@@ -1,6 +1,6 @@
 # Commands Quick Reference
 
-> 94 slash commands installed globally. Type `/` in any Claude Code session to invoke.
+> 95 slash commands installed globally. Type `/` in any Claude Code session to invoke.
 
 ---
 
