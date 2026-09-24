@@ -106,6 +106,8 @@ Table filtered = user.find(
 import org.tinystruct.data.annotation.Column;
 import org.tinystruct.data.annotation.Id;
 import org.tinystruct.data.annotation.Table;
+import org.tinystruct.data.component.AbstractData;
+import java.io.Serializable;
 
 @Table(name = "users",
         id = @Id(name = "Id", column = "id", type = "int", length = 11, autoIncrement = true))
