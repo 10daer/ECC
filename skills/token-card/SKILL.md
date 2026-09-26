@@ -97,8 +97,11 @@ npm view @tokenchit/cli@0.10.0 dist.integrity dist.tarball
    ![tokenchit](./tokenchit.svg)
    ```
 
-   Use the path `sync` actually reported, not this one, when the output is configured
-   elsewhere.
+   `sync` prints the path relative to the repository root. A Markdown image resolves
+   relative to the file it sits in, so rewrite it for the README being edited: a card at
+   `docs/usage.svg` is `./docs/usage.svg` from the root README but `../usage.svg` from
+   `docs/zh-CN/README.md`. Pasting the printed path into a nested README points at
+   `docs/zh-CN/docs/usage.svg` and renders broken.
 
    Do not edit the README without being asked.
 
