@@ -31,13 +31,35 @@ function contrastRatio(left, right) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-const clear = '#2ea043';
-const resolution = '#ff7b72';
+const BACKGROUND = html.match(/body \{[^}]*background: (#[0-9a-f]{6})/)[1];
+
+// Read the palette back out of the rendered view instead of hard-coding it, so
+// a colour change cannot leave these contrast assertions quietly passing.
+const legend = [...html.matchAll(
+  /<span class="shape" style="color:(#[0-9a-f]{6})">([\u25cf\u25a0\u25b2])<\/span>/g
+)].map(match => ({ color: match[1], glyph: match[2] }));
+
+assert.strictEqual(legend.length, 3, 'the legend should declare three risk levels');
+assert.deepStrictEqual(legend.map(entry => entry.glyph), ['\u25cf', '\u25a0', '\u25b2'],
+  'clear, traffic, and resolution should be marked circle, square, and triangle');
+
+const [clear, traffic, resolution] = legend.map(entry => entry.color);
+
+// The legend and the canvas must agree, otherwise the operator reads a different
+// colour from the one the marker is drawn in.
+const riskColorBody = html.match(/function riskColor\(risk\) \{([\s\S]*?)\n  \}/)[1];
+const canvasColors = [...riskColorBody.matchAll(/return '(#[0-9a-f]{6})';/g)].map(match => match[1]);
+assert.deepStrictEqual(canvasColors, [resolution, traffic, clear],
+  'the legend palette and the riskColor palette must match');
+
+// Clear and resolution must stay separable when hue is unavailable, so their
+// relative luminances have to differ by more than the ~1.05:1 that used to
+// collapse "clear" and "steer now" into the same grey.
 assert.ok(contrastRatio(clear, resolution) >= 1.3,
   `clear and resolution must differ by luminance, got ${contrastRatio(clear, resolution).toFixed(2)}:1`);
-assert.ok(contrastRatio(clear, '#0b0e14') >= 4.5,
-  'the clear marker must still meet 4.5:1 against the page background');
-assert.ok(contrastRatio(resolution, '#0b0e14') >= 4.5,
-  'the resolution marker must still meet 4.5:1 against the page background');
+for (const level of legend) {
+  assert.ok(contrastRatio(level.color, BACKGROUND) >= 4.5,
+    `the ${level.color} marker must meet 4.5:1 against the page background, got ${contrastRatio(level.color, BACKGROUND).toFixed(2)}:1`);
+}
 
-console.log('Results: Passed: 12, Failed: 0');
+console.log('Results: Passed: 15, Failed: 0');
