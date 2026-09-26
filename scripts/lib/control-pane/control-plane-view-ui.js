@@ -49,7 +49,7 @@ function renderControlPlaneViewHtml() {
   .empty { color: #6e7681; font-size: 12px; }
   #legend { position: absolute; left: 12px; bottom: 12px; font-size: 11px; color: #8b949e; background: rgba(11,14,20,.7); padding: 6px 8px; border-radius: 6px; }
   #meta { position: absolute; right: 12px; top: 12px; font-size: 11px; color: #8b949e; background: rgba(11,14,20,.7); padding: 6px 8px; border-radius: 6px; text-align: right; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+  .shape { display: inline-block; width: 12px; margin-right: 5px; text-align: center; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -60,12 +60,12 @@ function renderControlPlaneViewHtml() {
   </header>
   <div id="wrap">
     <div id="stage">
-      <canvas id="c"></canvas>
+      <canvas id="c" role="img" aria-label="Control-plane projection. See the Lanes panel for a text alternative.">Control-plane projection; see the Lanes panel for per-task risk.</canvas>
       <div id="meta"></div>
       <div id="legend">
-        <div><span class="dot" style="background:#3fb950"></span>clear</div>
-        <div><span class="dot" style="background:#e3b341"></span>traffic advisory (transmit)</div>
-        <div><span class="dot" style="background:#ff7b72"></span>resolution advisory (steer)</div>
+        <div><span class="shape" style="color:#2ea043">●</span>clear</div>
+        <div><span class="shape" style="color:#e3b341">■</span>traffic advisory (transmit)</div>
+        <div><span class="shape" style="color:#ff7b72">▲</span>resolution advisory (steer)</div>
       </div>
     </div>
     <div id="side">
@@ -91,10 +91,35 @@ function renderControlPlaneViewHtml() {
   }
   window.addEventListener('resize', resize);
 
+  // Keep clear and resolution apart by luminance as well as hue: at the
+  // previous #3fb950/#ff7b72 the two differed by 1.01:1, so a red-green
+  // colour-blind operator saw the same grey for "clear" and "steer now".
+  function riskLevel(risk) {
+    if (risk >= view.thresholds.ra) return 'resolution';
+    if (risk >= view.thresholds.ta) return 'traffic';
+    return 'clear';
+  }
+
   function riskColor(risk) {
     if (risk >= view.thresholds.ra) return '#ff7b72';
     if (risk >= view.thresholds.ta) return '#e3b341';
-    return '#3fb950';
+    return '#2ea043';
+  }
+
+  // Shape is the second, non-colour channel: circle / square / triangle.
+  function drawRiskMarker(x, y, radius, level) {
+    ctx.beginPath();
+    if (level === 'resolution') {
+      ctx.moveTo(x, y - radius);
+      ctx.lineTo(x + radius, y + radius);
+      ctx.lineTo(x - radius, y + radius);
+      ctx.closePath();
+    } else if (level === 'traffic') {
+      ctx.rect(x - radius, y - radius, radius * 2, radius * 2);
+    } else {
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+    }
+    ctx.fill();
   }
 
   // Fit the projected points into the canvas with a margin. The PCA scores
@@ -142,8 +167,9 @@ function renderControlPlaneViewHtml() {
       var t = taskById[a.agentId] || {};
       var files = (t.workingSet && t.workingSet.fileCount) || 1;
       var radius = 6 + Math.sqrt(files) * 3;
-      ctx.fillStyle = riskColor(a.maxRisk || 0);
-      ctx.beginPath(); ctx.arc(p[0], p[1], radius, 0, Math.PI * 2); ctx.fill();
+      var risk = a.maxRisk || 0;
+      ctx.fillStyle = riskColor(risk);
+      drawRiskMarker(p[0], p[1], radius, riskLevel(risk));
       ctx.fillStyle = '#c9d1d9';
       ctx.font = '11px -apple-system, system-ui, sans-serif';
       ctx.fillText(String(a.agentId).slice(0, 18), p[0] + radius + 4, p[1] + 3);
@@ -198,7 +224,9 @@ function renderControlPlaneViewHtml() {
         var st = document.createElement('span'); st.textContent = t.harness + ' / ' + t.state + ' / ' + (t.workingSet.fileCount || 0) + ' files';
         var risk = document.createElement('span'); risk.className = 'risk';
         risk.style.color = riskColor(t.projection.maxRisk || 0);
-        risk.textContent = t.projection.point ? Math.round((t.projection.maxRisk || 0) * 100) + '%' : 'no pair';
+        risk.textContent = (t.projection.point
+          ? Math.round((t.projection.maxRisk || 0) * 100) + '% - ' + riskLevel(t.projection.maxRisk || 0)
+          : 'no pair');
         row.appendChild(idEl); row.appendChild(st); row.appendChild(risk);
         el.appendChild(row);
       });
@@ -216,6 +244,10 @@ function renderControlPlaneViewHtml() {
     view = Object.assign({}, data);
     renderEvents(); renderLanes(); draw();
     var c = view.counts || {};
+    canvas.setAttribute('aria-label',
+      (c.tasks || 0) + ' tasks in ' + (c.lanes || 0) + ' lanes, ' +
+      (c.advisories || 0) + ' advisories, ' + (c.resolutions || 0) + ' steering. ' +
+      'See the Lanes panel for per-task risk.');
     document.getElementById('status').textContent =
       (c.tasks || 0) + ' tasks in ' + (c.lanes || 0) + ' lanes | ' + (c.agents || 0) + ' with edits | ' +
       (c.advisories || 0) + ' advisories (' + (c.resolutions || 0) + ' steering)' +

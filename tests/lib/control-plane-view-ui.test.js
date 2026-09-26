@@ -17,7 +17,7 @@ async function renderResponse(ok, data) {
   const elements = new Map();
   const context = new Proxy({}, { get: () => () => {} });
   function element() {
-    return { textContent: '', style: {}, appendChild() {}, getContext: () => context,
+    return { textContent: '', style: {}, appendChild() {}, setAttribute() {}, getContext: () => context,
       clientWidth: 640, clientHeight: 480,
       parentElement: { getBoundingClientRect: () => ({ width: 640, height: 480 }) } };
   }
