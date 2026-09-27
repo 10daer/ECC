@@ -30,5 +30,13 @@ module.exports = [
         languageOptions: {
             sourceType: 'module'
         }
+    },
+    {
+        // The DSH bundle is ESM in a .js file. Flat config does not read a nested
+        // package.json "type": "module", so declare it here rather than ignore it.
+        files: ['.dsh/**/*.js'],
+        languageOptions: {
+            sourceType: 'module'
+        }
     }
 ];
