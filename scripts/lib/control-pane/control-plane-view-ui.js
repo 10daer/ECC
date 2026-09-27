@@ -83,8 +83,8 @@ function renderControlPlaneViewHtml() {
   var canvas = document.getElementById('c');
   var ctx = canvas.getContext('2d');
   var view = { tasks: [], lanes: [], pairs: [], events: [], projection: { agents: [] }, thresholds: { ta: 0.35, ra: 0.7 } };
-  // Last advisory/steering pair handed to the live region, so a poll that
-  // changes nothing stays silent.
+  // Last message handed to the live region, so a poll that changes nothing
+  // stays silent.
   var lastSpoken = null;
 
   function resize() {
@@ -240,6 +240,15 @@ function renderControlPlaneViewHtml() {
     });
   }
 
+  // Polling runs every few seconds, so only speak when the advisory and
+  // steering counts actually move. Repeating an unchanged summary would talk
+  // over the operator without telling them anything new.
+  function announce(message) {
+    if (message === lastSpoken) return;
+    lastSpoken = message;
+    document.getElementById('announce').textContent = message;
+  }
+
   function apply(data) {
     if (!data || data.schemaVersion !== 'ecc.control-plane.view.v1' ||
         !['tasks', 'lanes', 'pairs', 'events'].every(function (key) { return Array.isArray(data[key]); }) ||
@@ -259,17 +268,9 @@ function renderControlPlaneViewHtml() {
       (c.advisories || 0) + ' advisories (' + (c.resolutions || 0) + ' steering)' +
       (view.inventory && view.inventory.status !== 'ok' ? ' | inventory ' + view.inventory.status : '');
 
-    // Polling runs every few seconds, so only speak when the advisory and
-    // steering counts actually move. Repeating an unchanged summary would talk
-    // over the operator without telling them anything new.
-    var speaker = document.getElementById('announce');
-    var spoken = (c.advisories || 0) + '/' + (c.resolutions || 0);
-    if (spoken !== lastSpoken) {
-      lastSpoken = spoken;
-      speaker.textContent = (c.advisories || 0) + ' advisories, ' +
-        (c.resolutions || 0) + ' steering. ' +
-        ((c.resolutions || 0) > 0 ? 'Steering is required.' : 'No steering is required.');
-    }
+    announce((c.advisories || 0) + ' advisories, ' +
+      (c.resolutions || 0) + ' steering. ' +
+      ((c.resolutions || 0) > 0 ? 'Steering is required.' : 'No steering is required.'));
   }
 
   function poll() {
@@ -278,6 +279,9 @@ function renderControlPlaneViewHtml() {
       return r.json();
     }).then(apply).catch(function () {
       document.getElementById('status').textContent = 'offline';
+      // The last guidance is now stale, so replace it rather than leaving the
+      // live region claiming the airspace is clear.
+      announce('Control-plane data is unavailable. Advisories and steering are unknown.');
     });
   }
 

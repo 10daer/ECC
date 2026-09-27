@@ -206,6 +206,43 @@ let passed = 0;
     `a changed poll must announce the new counts, got ${changed.elements.get('announce').textContent}`);
   passed += 1;
 
+  // An outage must not leave the live region holding the last known guidance,
+  // which would read as a current "airspace is clear" after data stopped.
+  const outage = await render([
+    { ok: true, data: populatedView() },
+    { ok: false, data: { ok: false, error: 'snapshot unavailable' } }
+  ]);
+  const beforeOutage = outage.elements.get('announce').textContent;
+  await outage.pollAgain();
+  assert.strictEqual(outage.elements.get('status').textContent, 'offline');
+  assert.ok(outage.elements.get('announce').textContent !== beforeOutage,
+    'a failed poll must not leave the previous guidance in the live region');
+  assert.ok(/unavailable/i.test(outage.elements.get('announce').textContent)
+    && /unknown/i.test(outage.elements.get('announce').textContent),
+    `an outage must say the counts are unknown, got ${outage.elements.get('announce').textContent}`);
+  passed += 1;
+
+  // A repeated failure stays silent, but recovering online must speak again.
+  const writesAfterOutage = outage.writesTo('announce');
+  await outage.pollAgain();
+  assert.strictEqual(outage.writesTo('announce'), writesAfterOutage,
+    'a repeated failure must not re-announce the same outage');
+  passed += 1;
+
+  const recovered = await render([
+    { ok: true, data: populatedView() },
+    { ok: false, data: { ok: false, error: 'snapshot unavailable' } },
+    { ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 1, resolutions: 1 } }) }
+  ]);
+  await recovered.pollAgain();
+  await recovered.pollAgain();
+  assert.ok(recovered.elements.get('status').textContent.includes('3 tasks'),
+    'a recovered poll must restore the live status');
+  assert.ok(recovered.elements.get('announce').textContent.includes('1 advisories')
+    && recovered.elements.get('announce').textContent.includes('Steering is required.'),
+    `a recovered poll must announce the restored counts, got ${recovered.elements.get('announce').textContent}`);
+  passed += 1;
+
   console.log(`Results: Passed: ${passed}, Failed: 0`);
 })().catch(error => {
   console.error(error.message);
