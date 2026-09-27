@@ -85,15 +85,24 @@ This step is complete when tests reject empty, oversized, malformed, traversal-s
 
 ### 3. Contain Filesystem Access
 
-Reject absolute user-controlled paths and traversal components before joining. Resolve both the workspace and candidate path, then prove containment:
+Reject absolute user-controlled paths and traversal components before joining. Reject Windows-unsafe components on every platform so behavior stays portable: reserved device names (`CON`, `NUL`, `COM1`, `LPT1`, including with an extension such as `nul.txt`), names ending in a dot or space (Win32 strips them), and `:` (drive-relative or NTFS alternate data stream syntax such as `report.txt:ads`). Resolve both the workspace and candidate path, then prove containment:
 
 ```python
+import re
 from pathlib import Path
+
+WINDOWS_RESERVED_NAME = re.compile(
+    r"(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(\..*)?",
+    re.IGNORECASE,
+)
 
 def workspace_path(workspace: Path, requested: str) -> Path:
     relative = Path(requested)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("path must be workspace-relative")
+    for part in relative.parts:
+        if ":" in part or part.endswith((".", " ")) or WINDOWS_RESERVED_NAME.fullmatch(part):
+            raise ValueError("path component is not portable")
 
     root = workspace.resolve(strict=True)
     candidate = (root / relative).resolve(strict=False)
@@ -104,7 +113,7 @@ def workspace_path(workspace: Path, requested: str) -> Path:
 
 Containment checks do not eliminate symlink races. For sensitive writes, open relative to a trusted directory handle where the platform supports it, reject symlink targets, create files exclusively, and verify ownership and permissions after opening.
 
-This step is complete when tests cover sibling-prefix paths, nested `..`, absolute paths, symlink escapes, and a valid nested workspace path.
+This step is complete when tests cover sibling-prefix paths, nested `..`, absolute paths, symlink escapes, reserved device names, trailing dots or spaces, alternate data stream syntax, and a valid nested workspace path.
 
 ### 4. Protect Temporary Data and Credentials
 
