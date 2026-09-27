@@ -67,8 +67,8 @@ test('native prepare verifies exact installed bytes and returns isolated session
   assert.equal(result.active, false);
   assert.equal(result.storeRevision, 1);
   assert.equal(result.providerVersion, '0.154.0');
-  assert.ok(result.home.startsWith(`${options.nativeRoot}/`));
-  assert.ok(result.codexHome.startsWith(`${result.home}/`));
+  assert.equal(path.dirname(path.dirname(result.home)), path.join(options.nativeRoot, 'generations'));
+  assert.equal(path.dirname(result.codexHome), result.home);
   assert.equal(result.discovery, 'verified');
   assert.equal(result.selectedIds.length, 3);
   assert.equal(dependency.calls.filter(call => call.args[1] === 'add').length, 1);

@@ -64,6 +64,8 @@ test('provider failure is distinct from successful task completion', () => withF
 test('isolated native launches replace every provider home without mutating the parent environment', () => withFixture(repoRoot => {
   const nativeEnvironment = nativeFixture(repoRoot);
   const before = { ...process.env };
+  // Windows may expose the inherited key as Path while process.env resolves PATH case-insensitively.
+  const inheritedPath = process.env.PATH;
   let called = false;
   const result = launchTaskContext({ repoRoot, task: input, nativeEnvironment, execute(command, args, options) {
     called = true;
@@ -73,7 +75,7 @@ test('isolated native launches replace every provider home without mutating the 
     assert.equal(options.env.HOME, nativeEnvironment.home);
     assert.equal(options.env.USERPROFILE, nativeEnvironment.home);
     assert.equal(options.env.CODEX_HOME, nativeEnvironment.codexHome);
-    assert.equal(options.env.PATH, before.PATH);
+    assert.equal(options.env.PATH, inheritedPath);
     for (const key of ['AWS_ACCESS_KEY_ID', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'HTTP_PROXY', 'NODE_OPTIONS']) {
       assert.equal(options.env[key], undefined);
     }

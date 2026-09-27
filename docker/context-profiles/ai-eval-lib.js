@@ -489,9 +489,11 @@ function syntheticEnvironments(root) {
 function checkArguments(cwd, file = CHECK_FILE, writable = false) {
   const major = Number(process.versions.node.split('.')[0]);
   const flag = major >= 22 ? '--permission' : major >= 20 ? '--experimental-permission' : null;
-  return flag ? [flag, `--allow-fs-read=${cwd}`, `--allow-fs-read=${path.join(cwd, '*')}`,
+  // A directory grant covers its children. Node 20.20.2 can abort in its native
+  // permission radix tree when the same directory is also granted as "cwd/*".
+  return flag ? [flag, `--allow-fs-read=${cwd}`,
     // Stepped graders exercise stateful apps (persistence); single-step graders stay read-only.
-    ...(writable ? [`--allow-fs-write=${cwd}`, `--allow-fs-write=${path.join(cwd, '*')}`] : []), file] : [file];
+    ...(writable ? [`--allow-fs-write=${cwd}`] : []), file] : [file];
 }
 
 // The hidden grader enters the workspace only after the agent exits, and runs read-only where Node supports it.
