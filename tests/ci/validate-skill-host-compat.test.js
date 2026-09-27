@@ -203,6 +203,22 @@ check('bash fence $(pwd) is accepted in place of CLAUDE_PROJECT_DIR', () => {
   }
 });
 
+check('bash fence variables that only contain CLAUDE_PROJECT_DIR are accepted', () => {
+  const root = createRoot();
+  try {
+    writeSkill(
+      root,
+      'proj',
+      `${checklistBody('Proj')}\n## Code Examples\n\n\`\`\`bash\ncd "$MY_CLAUDE_PROJECT_DIR"\ncd "\${MY_CLAUDE_PROJECT_DIR}"\nls "$CLAUDE_PROJECT_DIR_TMP"\nls "\${CLAUDE_PROJECT_DIR_TMP}"\n\`\`\`\n`
+    );
+    const result = runValidator(root);
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.ok(!result.stderr.includes('ERROR:'));
+  } finally {
+    cleanup(root);
+  }
+});
+
 check('prose mention of CLAUDE_PROJECT_DIR does not fail', () => {
   const root = createRoot();
   try {
