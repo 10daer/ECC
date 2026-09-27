@@ -50,6 +50,8 @@ function renderControlPlaneViewHtml() {
   #legend { position: absolute; left: 12px; bottom: 12px; font-size: 11px; color: #8b949e; background: rgba(11,14,20,.7); padding: 6px 8px; border-radius: 6px; }
   #meta { position: absolute; right: 12px; top: 12px; font-size: 11px; color: #8b949e; background: rgba(11,14,20,.7); padding: 6px 8px; border-radius: 6px; text-align: right; }
   .shape { display: inline-block; width: 12px; margin-right: 5px; text-align: center; font-weight: 700; }
+  /* Off-screen, not display:none, so assistive tech still reads the node. */
+  .sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; clip: rect(0 0 0 0); clip-path: inset(50%); overflow: hidden; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -67,6 +69,7 @@ function renderControlPlaneViewHtml() {
         <div><span class="shape" style="color:#e3b341">■</span>traffic advisory (transmit)</div>
         <div><span class="shape" style="color:#ff7b72">▲</span>resolution advisory (steer)</div>
       </div>
+      <div id="announce" class="sr" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="side">
       <h2>Events</h2>
@@ -80,6 +83,9 @@ function renderControlPlaneViewHtml() {
   var canvas = document.getElementById('c');
   var ctx = canvas.getContext('2d');
   var view = { tasks: [], lanes: [], pairs: [], events: [], projection: { agents: [] }, thresholds: { ta: 0.35, ra: 0.7 } };
+  // Last advisory/steering pair handed to the live region, so a poll that
+  // changes nothing stays silent.
+  var lastSpoken = null;
 
   function resize() {
     var r = canvas.parentElement.getBoundingClientRect();
@@ -244,14 +250,26 @@ function renderControlPlaneViewHtml() {
     view = Object.assign({}, data);
     renderEvents(); renderLanes(); draw();
     var c = view.counts || {};
-    canvas.setAttribute('aria-label',
-      (c.tasks || 0) + ' tasks in ' + (c.lanes || 0) + ' lanes, ' +
+    var summary = (c.tasks || 0) + ' tasks in ' + (c.lanes || 0) + ' lanes, ' +
       (c.advisories || 0) + ' advisories, ' + (c.resolutions || 0) + ' steering. ' +
-      'See the Lanes panel for per-task risk.');
+      'See the Lanes panel for per-task risk.';
+    canvas.setAttribute('aria-label', summary);
     document.getElementById('status').textContent =
       (c.tasks || 0) + ' tasks in ' + (c.lanes || 0) + ' lanes | ' + (c.agents || 0) + ' with edits | ' +
       (c.advisories || 0) + ' advisories (' + (c.resolutions || 0) + ' steering)' +
       (view.inventory && view.inventory.status !== 'ok' ? ' | inventory ' + view.inventory.status : '');
+
+    // Polling runs every few seconds, so only speak when the advisory and
+    // steering counts actually move. Repeating an unchanged summary would talk
+    // over the operator without telling them anything new.
+    var speaker = document.getElementById('announce');
+    var spoken = (c.advisories || 0) + '/' + (c.resolutions || 0);
+    if (spoken !== lastSpoken) {
+      lastSpoken = spoken;
+      speaker.textContent = (c.advisories || 0) + ' advisories, ' +
+        (c.resolutions || 0) + ' steering. ' +
+        ((c.resolutions || 0) > 0 ? 'Steering is required.' : 'No steering is required.');
+    }
   }
 
   function poll() {

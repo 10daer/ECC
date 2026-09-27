@@ -15,6 +15,13 @@ assert.ok(html.includes('■</span>traffic advisory'), 'legend should show the a
 assert.ok(html.includes('▲</span>resolution'), 'legend should show the resolution triangle marker');
 assert.ok(!html.includes('class="dot"'), 'legend should not render color-only dots');
 
+// Counts are polled every few seconds, so a screen-reader user needs a polite
+// live region to hear an advisory move. The canvas keeps its own label as the
+// on-demand description.
+assert.ok(html.includes('role="status" aria-live="polite"'),
+  'polled counts should be announced through a polite live region');
+assert.ok(html.includes('class="sr"'), 'the live region should be hidden visually but not removed from the tree');
+
 // Clear and resolution must stay separable when hue is unavailable, so their
 // relative luminances have to differ by more than the ~1.05:1 that used to
 // collapse "clear" and "steer now" into the same grey.
@@ -47,7 +54,7 @@ const [clear, traffic, resolution] = legend.map(entry => entry.color);
 
 // The legend and the canvas must agree, otherwise the operator reads a different
 // colour from the one the marker is drawn in.
-const riskColorBody = html.match(/function riskColor\(risk\) \{([\s\S]*?)\n  \}/)[1];
+const riskColorBody = html.match(/function riskColor\(risk\) \{([\s\S]*?)\n {2}\}/)[1];
 const canvasColors = [...riskColorBody.matchAll(/return '(#[0-9a-f]{6})';/g)].map(match => match[1]);
 assert.deepStrictEqual(canvasColors, [resolution, traffic, clear],
   'the legend palette and the riskColor palette must match');
@@ -62,4 +69,4 @@ for (const level of legend) {
     `the ${level.color} marker must meet 4.5:1 against the page background, got ${contrastRatio(level.color, BACKGROUND).toFixed(2)}:1`);
 }
 
-console.log('Results: Passed: 15, Failed: 0');
+console.log('Results: Passed: 17, Failed: 0');
