@@ -34,7 +34,8 @@ while ($true) {
 $scriptDir = Split-Path -Parent $scriptPath
 $installerScript = Join-Path -Path (Join-Path -Path $scriptDir -ChildPath 'scripts') -ChildPath 'install-apply.js'
 
-# ponytail: preflight Node.js presence and version (>= 18)
+# Preflight: check Node.js presence and version
+# Must stay in sync with package.json "engines.node" (>= 18)
 $minimumNodeMajor = 18
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     [Console]::Error.WriteLine("[ECC] Node.js is required but was not found in PATH. Please install Node.js $minimumNodeMajor or newer: https://nodejs.org")
