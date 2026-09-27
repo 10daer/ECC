@@ -395,6 +395,56 @@ let passed = 0;
     `a timed out poll must announce the outage, got ${hung.elements.get('announce').textContent}`);
   passed += 1;
 
+  // Three polls settling out of order as #3, #1, #2. The ignored #1 must not
+  // pull the staleness mark back to 1, or the even older #2 would then be let
+  // through on top of #3's counts.
+  async function settleOutOfOrder(second, third) {
+    let releaseFirst, releaseSecond, releaseThird;
+    const holdOne = new Promise(resolve => { releaseFirst = resolve; });
+    const holdTwo = new Promise(resolve => { releaseSecond = resolve; });
+    const holdThree = new Promise(resolve => { releaseThird = resolve; });
+    const view = await render([
+      { ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 1, resolutions: 0 } }), hold: holdOne },
+      second(holdTwo),
+      third(holdThree)
+    ]);
+    // Start all three, then settle them newest first.
+    await view.pollAgain();
+    await view.pollAgain();
+    await view.pollAgain();
+    releaseThird();
+    await settle();
+    releaseFirst();
+    await settle();
+    releaseSecond();
+    await settle();
+    return view;
+  }
+
+  const newest = { tasks: 3, lanes: 1, agents: 2, advisories: 9, resolutions: 0 };
+  // The ignored #1 is a success, and the older #2 is also a success.
+  const outOfOrderSuccess = await settleOutOfOrder(
+    hold => ({ ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 2, resolutions: 1 } }), hold }),
+    hold => ({ ok: true, data: populatedView({ counts: newest }), hold })
+  );
+  assert.ok(outOfOrderSuccess.labelOf('c').includes('9 advisories')
+    && !outOfOrderSuccess.labelOf('c').includes('2 advisories'),
+    `an older success must not lower the staleness mark, got ${outOfOrderSuccess.labelOf('c')}`);
+  passed += 1;
+
+  // The ignored #1 is a success, and the older #2 is a failure, which would
+  // otherwise mark a healthy view offline.
+  const outOfOrderFailure = await settleOutOfOrder(
+    hold => ({ ok: false, data: { ok: false, error: 'snapshot unavailable' }, hold }),
+    hold => ({ ok: true, data: populatedView({ counts: newest }), hold })
+  );
+  assert.notStrictEqual(outOfOrderFailure.elements.get('status').textContent, 'offline',
+    'a superseded failure must not mark a healthy view offline');
+  assert.ok(outOfOrderFailure.labelOf('c').includes('9 advisories')
+    && !/unavailable/i.test(outOfOrderFailure.labelOf('c')),
+    `the newest counts must survive an ignored poll, got ${outOfOrderFailure.labelOf('c')}`);
+  passed += 1;
+
   console.log(`Results: Passed: ${passed}, Failed: 0`);
 })().catch(error => {
   console.error(error.message);

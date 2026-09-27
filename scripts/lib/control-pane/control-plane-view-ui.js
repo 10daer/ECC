@@ -307,10 +307,12 @@ function renderControlPlaneViewHtml() {
     // reported as an outage rather than swallowed.
     timer = setTimeout(function () { controller.abort(); }, TIMEOUT_MS);
     // A poll that has already answered, or timed out, owns the view. Anything
-    // that settles later is superseded and must be dropped.
+    // that settles later is superseded and must be dropped. The watermark only
+    // ever moves forward: a poll that settles late is itself stale, and letting
+    // it lower the mark would re-admit an even older poll behind it.
     function settle() {
       clearTimeout(timer);
-      settledPoll = token;
+      if (token > settledPoll) settledPoll = token;
     }
     fetch('/api/control-plane', { signal: controller.signal }).then(function (r) {
       if (!r.ok) throw new Error('Control-plane request failed');
