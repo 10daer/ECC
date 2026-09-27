@@ -43,6 +43,19 @@ def test_artifact_scope_fails_on_broken_markdown_link(project: Path) -> None:
     assert "Broken Markdown link" in result.stdout
 
 
+def test_artifact_scope_resolves_windows_style_relative_markdown_links(
+    project: Path,
+) -> None:
+    target = project / "docs" / "adr" / "0001.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# ADR\n", encoding="utf-8")
+    (project / "guide.md").write_text(
+        "[adr](docs\\adr\\0001.md)\n", encoding="utf-8"
+    )
+    result = run_audit(project, "artifacts")
+    assert result.returncode == 0, result.stdout
+
+
 def test_artifact_scope_resolves_root_relative_links_inside_project(
     project: Path,
 ) -> None:

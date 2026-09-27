@@ -180,7 +180,7 @@ def normalize_link_target(raw: str) -> str | None:
         )
         if title:
             target = target[: title.start()]
-    target = unquote(target.split("#", 1)[0].split("?", 1)[0])
+    target = unquote(target.split("#", 1)[0].split("?", 1)[0]).replace("\\", "/")
     if not target or target.startswith("//"):
         return None
     if EXTERNAL_URI_RE.match(target):
