@@ -45,9 +45,10 @@ function openerCommandFor(platform, url) {
  *
  * @param {string} url
  * @param {NodeJS.Platform} [platform] - injectable for tests; defaults to process.platform
+ * @param {typeof spawn} [spawnProcess] - injectable process launcher for tests
  * @returns {{ opened: boolean, reason: string }}
  */
-function openBrowser(url, platform = process.platform) {
+function openBrowser(url, platform = process.platform, spawnProcess = spawn) {
   if (typeof url !== 'string' || url.length === 0) {
     return { opened: false, reason: 'invalid-url' };
   }
@@ -55,7 +56,7 @@ function openBrowser(url, platform = process.platform) {
   const [cmd, args] = openerCommandFor(platform, url);
   let child;
   try {
-    child = spawn(cmd, args, {
+    child = spawnProcess(cmd, args, {
       detached: true,
       stdio: 'ignore',
     });

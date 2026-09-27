@@ -38,11 +38,27 @@ test('openBrowser: returns structured { opened, reason }', () => {
   assert.ok(r.reason.length > 0);
 });
 
-test('openBrowser: uses xdg-open on linux', () => {
-  // Spy by stubbing spawn via require cache (not possible without mocking module).
-  // Smoke-test: just ensure the function is callable.
-  const r = openBrowser('http://localhost:0', 'linux');
-  // Either opened=true (xdg-open exists on runner) or opened=false with reason
-  assert.ok(['spawned', 'child-error:ENOENT', 'child-error:EACCES', 'spawn-threw:ENOENT'].includes(r.reason)
-      || r.opened === true || r.opened === false);
+test('openBrowser: installs an error listener and detaches the launcher', () => {
+  const handlers = new Map();
+  let unrefCalls = 0;
+  const child = {
+    on(event, listener) {
+      handlers.set(event, listener);
+    },
+    unref() {
+      unrefCalls += 1;
+    },
+  };
+
+  const result = openBrowser('http://localhost:0', 'linux', (command, args, options) => {
+    assert.equal(command, 'xdg-open');
+    assert.deepEqual(args, ['http://localhost:0']);
+    assert.deepEqual(options, { detached: true, stdio: 'ignore' });
+    return child;
+  });
+
+  assert.deepEqual(result, { opened: true, reason: 'spawned' });
+  assert.equal(unrefCalls, 1);
+  assert.equal(typeof handlers.get('error'), 'function');
+  assert.doesNotThrow(() => handlers.get('error')({ code: 'ENOENT' }));
 });
