@@ -40,6 +40,32 @@ def test_artifact_scope_fails_on_broken_markdown_link(project: Path) -> None:
     assert "Broken Markdown link" in result.stdout
 
 
+def test_artifact_scope_fails_on_broken_nested_label_markdown_link(project: Path) -> None:
+    (project / "guide.md").write_text(
+        "[outer [inner]](docs/missing.md)\n", encoding="utf-8"
+    )
+    result = run_audit(project, "artifacts")
+    assert result.returncode == 1
+    assert "Broken Markdown link" in result.stdout
+
+
+def test_artifact_scope_checks_even_backslashes_before_markdown_link(project: Path) -> None:
+    (project / "guide.md").write_text(
+        "\\\\[missing](docs/missing.md)\n", encoding="utf-8"
+    )
+    result = run_audit(project, "artifacts")
+    assert result.returncode == 1
+    assert "Broken Markdown link" in result.stdout
+
+
+def test_artifact_scope_ignores_escaped_markdown_link(project: Path) -> None:
+    (project / "guide.md").write_text(
+        "\\[missing](docs/missing.md)\n", encoding="utf-8"
+    )
+    result = run_audit(project, "artifacts")
+    assert result.returncode == 0, result.stdout
+
+
 def test_artifact_scope_resolves_root_relative_links_inside_project(project: Path) -> None:
     docs = project / "docs"
     docs.mkdir()
