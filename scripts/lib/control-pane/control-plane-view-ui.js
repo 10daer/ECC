@@ -243,10 +243,18 @@ function renderControlPlaneViewHtml() {
   // Wording shared by the canvas label and the live region so an outage reads
   // the same way however the operator reaches it.
   var UNAVAILABLE = 'Control-plane data is unavailable. Advisories and steering are unknown.';
-  // Monotonic poll id. Polls are not sequenced, so a slow older request can
-  // settle after a newer one. Only the newest poll may touch the view, which
-  // stops a late failure from overwriting a newer success.
-  var latestPoll = 0;
+  // Polls are not sequenced, so a slow request can settle out of order. Only
+  // the newest poll that has already settled may update the view: a success
+  // from a superseded poll would show older counts, and a failure from a
+  // superseded poll would erase newer counts. Anchoring to the last settled
+  // poll rather than the last started one also lets a failure land while a
+  // newer poll is still pending, instead of leaving stale guidance on screen.
+  var settledPoll = 0;
+  // Monotonic id handed to each poll as it starts.
+  var pollSeq = 0;
+  // A poll that never answers must not stay pending forever, or the last
+  // steering guidance stays on screen indefinitely.
+  var TIMEOUT_MS = 10000;
 
   // Polling runs every few seconds, so only speak when the advisory and
   // steering counts actually move. Repeating an unchanged summary would talk
@@ -255,6 +263,15 @@ function renderControlPlaneViewHtml() {
     if (message === lastSpoken) return;
     lastSpoken = message;
     document.getElementById('announce').textContent = message;
+  }
+
+  function unavailable() {
+    document.getElementById('status').textContent = 'offline';
+    // The last guidance is now stale, so replace it rather than leaving the
+    // live region claiming the airspace is clear. The canvas label goes with
+    // it, or it would still report the last successful counts.
+    canvas.setAttribute('aria-label', UNAVAILABLE);
+    announce(UNAVAILABLE);
   }
 
   function apply(data) {
@@ -282,21 +299,30 @@ function renderControlPlaneViewHtml() {
   }
 
   function poll() {
-    var token = ++latestPoll;
-    fetch('/api/control-plane').then(function (r) {
+    var token = ++pollSeq;
+    var timer = null;
+    var controller = new AbortController();
+    // Reject on a timer so a hung request cannot keep the previous guidance on
+    // screen forever. The abort is what wakes this poll up, so a timeout is
+    // reported as an outage rather than swallowed.
+    timer = setTimeout(function () { controller.abort(); }, TIMEOUT_MS);
+    // A poll that has already answered, or timed out, owns the view. Anything
+    // that settles later is superseded and must be dropped.
+    function settle() {
+      clearTimeout(timer);
+      settledPoll = token;
+    }
+    fetch('/api/control-plane', { signal: controller.signal }).then(function (r) {
       if (!r.ok) throw new Error('Control-plane request failed');
       return r.json();
-    }).then(apply).catch(function () {
-      // A newer poll has already answered, so this failure is stale and must
-      // not overwrite the newer counts.
-      if (token !== latestPoll) return;
-      document.getElementById('status').textContent = 'offline';
-      // The last guidance is now stale, so replace it rather than leaving the
-      // live region claiming the airspace is clear. The canvas label goes with
-      // it, or it would still report the last successful counts.
-      canvas.setAttribute('aria-label', UNAVAILABLE);
-      announce(UNAVAILABLE);
-    });
+    }).then(function (data) {
+      // A newer poll already owns the view, so do not resurrect older counts.
+      if (token < settledPoll) return;
+      apply(data);
+    }).catch(function () {
+      if (token < settledPoll) return;
+      unavailable();
+    }).then(settle, settle);
   }
 
   resize();

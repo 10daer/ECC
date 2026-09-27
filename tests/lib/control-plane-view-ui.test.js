@@ -83,13 +83,25 @@ function element(tag, context) {
   return node;
 }
 
+// A poll settles through several chained promise callbacks, so draining needs a
+// few turns of the event loop rather than a single tick.
+function settle() {
+  return new Promise(resolve => {
+    let remaining = 5;
+    const step = () => (remaining-- > 0 ? setImmediate(step) : resolve());
+    step();
+  });
+}
+
 // Drives the view's inline script against a queue of poll responses, so one run
 // can cover several polls and the state each one leaves behind. A response may
-// carry a `hold` function, which lets a test settle two polls out of order.
+// carry a `hold` promise to park until the test releases it, or `never: true` to
+// stay pending so the request timeout can be exercised.
 async function render(responses) {
   const context = createContext();
   const elements = new Map();
   const timers = [];
+  const timeouts = [];
   const queue = responses.slice();
   const document = {
     getElementById(id) { if (!elements.has(id)) elements.set(id, element(null, context)); return elements.get(id); },
@@ -103,12 +115,24 @@ async function render(responses) {
   vm.runInNewContext(code, {
     document,
     window: { addEventListener() {}, devicePixelRatio: 1 },
+    AbortController,
     setInterval(fn) { timers.push(fn); },
-    fetch: async () => {
+    // Timers are collected rather than run, so a test can fire the request
+    // timeout on demand instead of waiting ten seconds for it.
+    setTimeout(fn, ms) { const entry = { fn, ms, fired: false }; timeouts.push(entry); return entry; },
+    clearTimeout(entry) { if (entry) entry.fired = true; },
+    fetch: async (url, options) => {
       const next = queue.length > 1 ? queue.shift() : queue[0];
-      // `hold` parks this response until the test releases it, which is how a
-      // slow older poll is made to settle after a newer one.
+      if (next.never) {
+        // A request that never answers. Honour the abort the view sends, so the
+        // timeout can drive it to a failure.
+        return new Promise((_, reject) => {
+          if (!options || !options.signal) return;
+          options.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        });
+      }
       if (next.hold) await next.hold;
+      if (options && options.signal && options.signal.aborted) throw new Error('aborted');
       return { ok: next.ok, json: async () => next.data };
     }
   });
@@ -118,9 +142,17 @@ async function render(responses) {
     context,
     writesTo(id) { return elements.get(id).writes; },
     labelOf(id) { return elements.get(id).attributes['aria-label']; },
+    // Fire every pending request timeout, then let the rejections propagate.
+    async fireTimeouts() {
+      for (const entry of timeouts) {
+        if (!entry.fired) { entry.fired = true; entry.fn(); }
+      }
+      await settle();
+    },
+    timeoutBudgetMs() { return timeouts.length ? timeouts[0].ms : null; },
     async pollAgain() {
       for (const fn of timers) fn();
-      await new Promise(resolve => setImmediate(resolve));
+      await settle();
     }
   };
 }
@@ -283,6 +315,84 @@ let passed = 0;
     `a superseded failure must not announce an outage, got ${overlapping.elements.get('announce').textContent}`);
   assert.notStrictEqual(overlapping.elements.get('status').textContent, 'offline',
     'a superseded failure must not mark the view offline');
+  passed += 1;
+
+  // The mirror of the case above. An older SUCCESS settling after a newer
+  // success must not drag the view back to the older counts.
+  let releaseStale;
+  const staleSettles = new Promise(resolve => { releaseStale = resolve; });
+  const staleSuccess = await render([
+    { ok: true, data: populatedView() },
+    { ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 2, resolutions: 1 } }), hold: staleSettles },
+    { ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 7, resolutions: 0 } }) }
+  ]);
+  await staleSuccess.pollAgain();
+  await staleSuccess.pollAgain();
+  assert.ok(staleSuccess.labelOf('c').includes('7 advisories'),
+    `the newer success should land first, got ${staleSuccess.labelOf('c')}`);
+  releaseStale();
+  await settle();
+  assert.ok(staleSuccess.labelOf('c').includes('7 advisories'),
+    `a superseded success must not overwrite the newer counts, got ${staleSuccess.labelOf('c')}`);
+  assert.ok(!staleSuccess.elements.get('announce').textContent.includes('Steering is required.'),
+    `a superseded success must not re-announce the older guidance, got ${staleSuccess.elements.get('announce').textContent}`);
+  passed += 1;
+
+  // A failure must still surface while a newer poll is already in flight and has
+  // not answered. The older failure is still the newest thing to have settled,
+  // so a guard anchored to the last settled poll lets it through, while one
+  // anchored to the last poll started would silently drop it and leave stale
+  // steering guidance on screen.
+  let releaseFailure;
+  const failureSettles = new Promise(resolve => { releaseFailure = resolve; });
+  let releasePending;
+  const pendingSettles = new Promise(resolve => { releasePending = resolve; });
+  const failureWhilePending = await render([
+    { ok: true, data: populatedView() },
+    { ok: false, data: { ok: false, error: 'snapshot unavailable' }, hold: failureSettles },
+    { ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 9, resolutions: 0 } }), hold: pendingSettles }
+  ]);
+  // Start the failing poll, then the newer pending one, so the failure settles
+  // with a newer request still in flight.
+  await failureWhilePending.pollAgain();
+  await failureWhilePending.pollAgain();
+  releaseFailure();
+  await settle();
+  assert.strictEqual(failureWhilePending.elements.get('status').textContent, 'offline',
+    'a failure must surface while a newer poll is still pending');
+  assert.ok(/unavailable/i.test(failureWhilePending.labelOf('c')),
+    `a failure must clear the canvas counts while a newer poll is pending, got ${failureWhilePending.labelOf('c')}`);
+  assert.ok(/unavailable/i.test(failureWhilePending.elements.get('announce').textContent),
+    `a failure must announce the outage while a newer poll is pending, got ${failureWhilePending.elements.get('announce').textContent}`);
+  passed += 1;
+
+  // The newer poll that was pending must still be able to restore the view.
+  await failureWhilePending.pollAgain();
+  releasePending();
+  await settle();
+  assert.ok(failureWhilePending.labelOf('c').includes('9 advisories')
+    && !/unavailable/i.test(failureWhilePending.labelOf('c')),
+    `the pending poll must still restore the counts, got ${failureWhilePending.labelOf('c')}`);
+  passed += 1;
+
+  // A poll that never answers must not leave the last steering guidance on
+  // screen forever.
+  const hung = await render([
+    { ok: true, data: populatedView() },
+    { ok: false, data: { ok: false, error: 'snapshot unavailable' }, never: true }
+  ]);
+  await hung.pollAgain();
+  assert.ok(!/unavailable/i.test(hung.labelOf('c')),
+    'the hung poll should not have reported anything yet');
+  assert.ok(hung.timeoutBudgetMs() !== null && hung.timeoutBudgetMs() <= 15000,
+    `a request timeout should be bounded, got ${hung.timeoutBudgetMs()}`);
+  await hung.fireTimeouts();
+  assert.strictEqual(hung.elements.get('status').textContent, 'offline',
+    'a poll that never answers must time out into the offline state');
+  assert.ok(/unavailable/i.test(hung.labelOf('c')),
+    `a timed out poll must clear the canvas label, got ${hung.labelOf('c')}`);
+  assert.ok(/unavailable/i.test(hung.elements.get('announce').textContent),
+    `a timed out poll must announce the outage, got ${hung.elements.get('announce').textContent}`);
   passed += 1;
 
   console.log(`Results: Passed: ${passed}, Failed: 0`);
