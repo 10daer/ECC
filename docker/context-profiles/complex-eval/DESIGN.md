@@ -136,13 +136,18 @@ node docker/context-profiles/ai-eval.js --plan \
   > registration.json
 
 # 5. Run (requires your own Claude subscription login or API key).
-node docker/context-profiles/ai-eval.js --allow-real-provider \
+node docker/context-profiles/ai-eval.js --allow-real-provider --allow-credentialed-tools \
   --registration registration.json \
   --corpus docker/context-profiles/complex-corpus.json \
   --provider claude --model <model> --executable /absolute/path/to/claude \
   --repeats 4 --max-calls 400 --deadline-ms 25200000 --call-timeout-ms 600000 \
   --artifact-dir /absolute/path/for/transcripts > report.json
 ```
+
+Claude task tools inherit the provider credential through the CLI process and can read it. Use
+`--allow-credentialed-tools` only with a trusted local corpus and credential. Without that
+explicit flag, real Claude task evaluation stops before a provider call; selection-only calls
+remain tool-free. This development evaluator does not provide a credential isolation boundary.
 
 The registration digest binds the exact corpus, evaluator source, model, and
 executable; the run refuses to start if any of them drift, and aborts if the

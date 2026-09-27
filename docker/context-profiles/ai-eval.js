@@ -5,7 +5,7 @@ const { preregister, runEvaluation, loadCorpus } = require('./ai-eval-lib');
 
 function main(argv = process.argv.slice(2), injected = {}) {
   const flags = new Map();
-  const switches = new Set(['--plan', '--allow-real-provider', '--help']);
+  const switches = new Set(['--plan', '--allow-real-provider', '--allow-credentialed-tools', '--help']);
   const values = new Set(['--registration', '--model', '--executable', '--provider', '--auth-home', '--effort', '--repeats', '--max-calls', '--deadline-ms', '--artifact-dir', '--corpus', '--call-timeout-ms', '--arms']);
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -14,10 +14,13 @@ function main(argv = process.argv.slice(2), injected = {}) {
     flags.set(flag, switches.has(flag) ? true : argv[++i]);
   }
   if (flags.has('--help')) {
-    return { usage: 'ai-eval.js --plan [--corpus FILE] [--arms a,b] [--repeats N] [--model MODEL --executable ABSOLUTE_PATH [--provider claude|codex] [--effort LEVEL]] | --allow-real-provider --registration FILE --model MODEL --executable ABSOLUTE_PATH [--provider claude|codex] [--effort LEVEL (Codex only)] [--auth-home ABSOLUTE_DIR (Codex only)] [--corpus FILE] [--arms a,b] [--repeats N] [--max-calls N] [--deadline-ms N] [--call-timeout-ms N]. Claude auth: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, or the macOS Keychain login.' };
+    return { usage: 'ai-eval.js --plan [--corpus FILE] [--arms a,b] [--repeats N] [--model MODEL --executable ABSOLUTE_PATH [--provider claude|codex] [--effort LEVEL]] | --allow-real-provider --registration FILE --model MODEL --executable ABSOLUTE_PATH [--provider claude|codex] [--allow-credentialed-tools (Claude only)] [--effort LEVEL (Codex only)] [--auth-home ABSOLUTE_DIR (Codex only)] [--corpus FILE] [--arms a,b] [--repeats N] [--max-calls N] [--deadline-ms N] [--call-timeout-ms N]. Claude auth: CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, or the macOS Keychain login.' };
   }
   if (flags.get('--provider') !== undefined && !['claude', 'codex'].includes(flags.get('--provider'))) throw new Error('Provider must be claude or codex');
   if (flags.get('--provider') === 'claude' && flags.has('--effort')) throw new Error('Reasoning effort applies only to the Codex provider');
+  if (flags.has('--allow-credentialed-tools') && (!flags.has('--allow-real-provider') || flags.get('--provider') !== 'claude')) {
+    throw new Error('Credentialed-tool opt-in requires a real Claude evaluation');
+  }
   const repeats = flags.has('--repeats') ? Number(flags.get('--repeats')) : 1;
   const corpus = flags.has('--corpus') ? loadCorpus(flags.get('--corpus')) : undefined;
   const arms = flags.has('--arms') ? flags.get('--arms').split(',').map(a => a.trim()).filter(Boolean) : undefined;
@@ -30,6 +33,7 @@ function main(argv = process.argv.slice(2), injected = {}) {
   if (!flags.has('--registration')) throw new Error('Evaluation requires a preregistration file');
   const registration = JSON.parse(fs.readFileSync(flags.get('--registration'), 'utf8'));
   return runEvaluation({ ...injected, registration, repeats, allowRealProvider: flags.has('--allow-real-provider'),
+    allowCredentialedTools: flags.has('--allow-credentialed-tools'),
     executable: flags.get('--executable'), model: flags.get('--model'), family: flags.get('--provider'), effort: flags.get('--effort'), authHome: flags.get('--auth-home'),
     artifactDir: flags.get('--artifact-dir'), ...(corpus ? { corpus } : {}), ...(arms ? { arms } : {}),
     ...(flags.has('--max-calls') ? { maxCalls: Number(flags.get('--max-calls')) } : {}),

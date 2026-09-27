@@ -255,8 +255,10 @@ function createAuthLease(authHome) {
           if (!after.equals(original)) {
             JSON.parse(after.toString('utf8'));
             const temp = `${source}.${process.pid}.tmp`;
-            fs.writeFileSync(temp, after, { flag: 'wx', mode: 0o600 });
-            fs.renameSync(temp, source);
+            try {
+              fs.writeFileSync(temp, after, { flag: 'wx', mode: 0o600 });
+              fs.renameSync(temp, source);
+            } finally { fs.rmSync(temp, { force: true }); }
           }
         } catch { /* An unreadable refresh keeps the previous login; the next call reports any auth failure. */ }
         fs.rmSync(leased, { force: true });
@@ -282,7 +284,7 @@ function readClaudeKeychainToken() {
   return token;
 }
 
-function createClaudeProvider({ allowRealProvider = false, executable, model,
+function createClaudeProvider({ allowRealProvider = false, allowCredentialedTools = false, executable, model,
   apiKey = process.env.ANTHROPIC_API_KEY, oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN,
   tokenSource = readClaudeKeychainToken, persistSessions = false, execute = spawnSync } = {}) {
   if (allowRealProvider !== true) throw new Error('Real provider requires explicit opt-in');
@@ -301,6 +303,9 @@ function createClaudeProvider({ allowRealProvider = false, executable, model,
   const provider = request => {
     if (fingerprintExecutable(binary.path).digest !== pin.executableDigest) fail('source-drift');
     const selection = request.phase === 'selection';
+    if (!selection && !allowCredentialedTools) {
+      throw new Error('Claude task tools can read provider credentials; explicit credentialed-tool opt-in is required');
+    }
     // Selection is tool-free and read-only; task execution may edit and run commands in the workspace.
     // Claude has no cwd-write sandbox flag, so containment relies on the isolated home and temp workspace.
     const args = ['--print', '--output-format', 'json',
@@ -682,8 +687,9 @@ function outcomeTrial(item, arm, repeat, repoRoot, execute, cwd, environment, ta
       if (harvest) harvest(arm, `${item.id}--step${index + 1}`, repeat, environment);
       if (result.status !== 'completed') {
         // A failed ticket ends the chain; remaining tickets are unscored.
-        for (let rest = index; rest < item.steps.length; rest++) {
-          steps.push({ score: 0, ...(metrics ? metricsSince(metrics, start) : {}) });
+        steps.push({ score: 0, ...(metrics ? metricsSince(metrics, start) : {}) });
+        for (let rest = index + 1; rest < item.steps.length; rest++) {
+          steps.push({ score: 0, ...(metrics ? metricsSince(metrics, metrics.length) : {}) });
         }
         break;
       }
@@ -748,7 +754,8 @@ function createHarvester(artifactDir, envs) {
 }
 
 function runEvaluation({ repoRoot = DEFAULT_REPO_ROOT, corpus = loadCorpus(), registration,
-  repeats = 1, provider, family, allowRealProvider = false, executable, model, effort, authHome, environments,
+  repeats = 1, provider, family, allowRealProvider = false, allowCredentialedTools = false,
+  executable, model, effort, authHome, environments,
   arms = undefined, artifactDir = null, maxCalls = 300, deadlineMs = 3600000, callTimeoutMs = 300000 } = {}) {
   if (!provider && !allowRealProvider) throw new Error('Evaluation requires an injected provider or explicit opt-in');
   if (!bounded(maxCalls, 1, 2000) || !bounded(deadlineMs, 1, 8 * 3600000)
@@ -756,6 +763,9 @@ function runEvaluation({ repoRoot = DEFAULT_REPO_ROOT, corpus = loadCorpus(), re
   if (!provider && !registration) throw new Error('Real evaluation requires prior registration');
   const resolvedFamily = provider ? (family || 'codex') : resolveFamily(family, executable);
   if (resolvedFamily === 'claude' && effort !== undefined) throw new Error('Reasoning effort applies only to the Codex provider');
+  if (!provider && resolvedFamily === 'claude' && !allowCredentialedTools) {
+    throw new Error('Claude task tools can read provider credentials; explicit credentialed-tool opt-in is required');
+  }
   const pin = preregister({ repoRoot, corpus, repeats, model, executable, effort, arms });
   if (!provider && resolvedFamily === 'codex' && pin.arms.includes('ecc-legacy')) {
     throw new Error('Codex real evaluation requires --arms without ecc-legacy; the pinned legacy skills arm is Claude-only');
@@ -763,7 +773,8 @@ function runEvaluation({ repoRoot = DEFAULT_REPO_ROOT, corpus = loadCorpus(), re
   if (registration && !isDeepStrictEqual(registration, pin)) throw new Error('Registration pin mismatch');
   const injected = Boolean(provider);
   const liveProvider = provider || (resolvedFamily === 'claude'
-    ? createClaudeProvider({ allowRealProvider, executable, model, persistSessions: Boolean(artifactDir) })
+    ? createClaudeProvider({ allowRealProvider, allowCredentialedTools, executable, model,
+      persistSessions: Boolean(artifactDir) })
     : createCodexProvider({ allowRealProvider, executable, model, effort, authHome }));
   const state = { calls: 0, metrics: [], maxCalls, callTimeoutMs, family: resolvedFamily,
     deadline: Date.now() + deadlineMs, provider: liveProvider,

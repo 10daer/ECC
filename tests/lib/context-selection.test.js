@@ -104,12 +104,25 @@ test('authority-bearing metadata cannot become automatic invocation', () => with
 test('receipt pins source and task identity without retaining query text', () => withFixture(repoRoot => {
   const first = resolve(repoRoot, { proposedIds: ['skill:feature'], query: 'private task prose' });
   assert.ok(!JSON.stringify(first.receipt).includes('private task prose'));
-  const second = resolve(repoRoot, { query: 'reworded' }, { previous: first.receipt });
+  const second = resolve(repoRoot, { query: 'private task prose' }, { previous: first.receipt });
   assert.deepEqual(second.selectedIds, first.selectedIds);
   assert.equal(second.reused, true);
+  const reworded = resolve(repoRoot, { query: 'reworded' }, { previous: first.receipt });
+  assert.equal(reworded.reused, false);
+  assert.notEqual(reworded.receipt.bindingDigest, first.receipt.bindingDigest);
   assert.throws(() => resolve(repoRoot, {}, { previous: { ...first.receipt, selectedIds: ['skill:shared'] } }), /receipt/);
   const changed = resolve(repoRoot, { sessionId: 'session-2' }, { previous: first.receipt });
   assert.equal(changed.reused, false);
+}));
+
+test('trigger changes invalidate a pinned Auto receipt', () => withFixture(repoRoot => {
+  const first = resolve(repoRoot, { proposedIds: ['skill:feature'], query: 'feature work' });
+  write(repoRoot, 'manifests/context-packs/skill-triggers@1.json', JSON.stringify({
+    schemaVersion: 1, triggers: { 'skill:feature': ['feature work'] },
+  }));
+  const second = resolve(repoRoot, { query: 'feature work' }, { previous: first.receipt });
+  assert.equal(second.reused, false);
+  assert.notEqual(second.receipt.bindingDigest, first.receipt.bindingDigest);
 }));
 
 for (const [label, taskChanges, options] of [

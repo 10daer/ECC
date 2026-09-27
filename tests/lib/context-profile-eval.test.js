@@ -187,6 +187,13 @@ test('subscription lease copies private auth into the call home, returns refresh
     });
     assert.equal(fs.existsSync(path.join(codexHome, 'auth.json')), false);
     assert.equal(fs.readFileSync(path.join(authHome, 'auth.json'), 'utf8'), '{"tokens":{"refresh_token":"new"}}');
+    const staleTemp = path.join(authHome, `auth.json.${process.pid}.tmp`);
+    fs.writeFileSync(staleTemp, 'stale', { mode: 0o600 });
+    lease.run(codexHome, () => fs.writeFileSync(path.join(codexHome, 'auth.json'), '{"tokens":{"refresh_token":"latest"}}'));
+    assert.equal(fs.existsSync(staleTemp), false);
+    assert.equal(fs.readFileSync(path.join(authHome, 'auth.json'), 'utf8'), '{"tokens":{"refresh_token":"new"}}');
+    lease.run(codexHome, () => fs.writeFileSync(path.join(codexHome, 'auth.json'), '{"tokens":{"refresh_token":"latest"}}'));
+    assert.equal(fs.readFileSync(path.join(authHome, 'auth.json'), 'utf8'), '{"tokens":{"refresh_token":"latest"}}');
     assert.throws(() => lease.run(codexHome, () => { throw new Error('provider crashed'); }), /crashed/);
     assert.equal(fs.existsSync(path.join(codexHome, 'auth.json')), false);
     fs.chmodSync(authHome, 0o755);
@@ -334,7 +341,11 @@ test('Claude provider runs tool-free selection and permissioned tasks with a san
   const request = { phase: 'selection', input: 'request', cwd, timeoutMs: 5, maxBuffer: 1000,
     env: { PATH: '/bin', HOME: cwd, CLAUDE_CONFIG_DIR: path.join(cwd, 'cfg'), TMPDIR: '/tmp', CODEX_HOME: '/tmp/x', SECRET: 's' } };
   provider(request);
-  provider({ ...request, phase: 'task' });
+  assert.throws(() => provider({ ...request, phase: 'task' }), /credentialed-tool opt-in/);
+  const credentialed = createClaudeProvider({ allowRealProvider: true, allowCredentialedTools: true,
+    executable: process.execPath, model: 'pinned-model', oauthToken: 'test-token', tokenSource: null,
+    execute(command, args, options) { calls.push({ args, options }); return { status: 0, stdout: claudeJson() }; } });
+  credentialed({ ...request, phase: 'task' });
   assert.ok(calls[0].args.includes('--tools'));
   assert.ok(!calls[0].args.join(' ').includes('bypassPermissions'));
   assert.ok(calls[1].args.includes('--permission-mode') && calls[1].args.includes('bypassPermissions'));

@@ -40,7 +40,7 @@ ecc profile start --state-root /absolute/dedicated/profile-store --native-root /
 
 `resolve --state-root` uses the saved base, mode and exclusions. It rejects overrides and stale source generations. `mode` preserves the configured profile and explicit selections while recording the new mode transactionally.
 
-A task input contains caller-assigned `sessionId`, `taskId`, positive integer `revision`, and `phase`. Optional fields are `query`, `explicitIds`, `proposedIds`, and `noWorkflow`. Increment revision for material task changes; keep it stable for rewording. Task prose is consumed locally and omitted from returned receipts.
+A task input contains caller-assigned `sessionId`, `taskId`, positive integer `revision`, and `phase`. Optional fields are `query`, `explicitIds`, `proposedIds`, and `noWorkflow`. Increment revision for material task changes. A changed query, including rewording, also invalidates selection reuse. Task prose is consumed locally and omitted from returned receipts.
 
 ```json
 {
@@ -54,7 +54,7 @@ A task input contains caller-assigned `sessionId`, `taskId`, positive integer `r
 
 Auto uses explicit user IDs first, then a completed pinned decision, an unambiguous ranked match, one cited skill name, or admitted agent-proposed IDs. Ambiguous free text shortlists up to five candidates for a bounded proposal. Manual uses explicit IDs; suggest emits a proposal without bodies. `--load` returns selected UTF-8 instructions and declared required resources, capped at 32,000 bytes across at most eight skills. `--task-input -` accepts one UTF-8 JSON object on standard input, capped at 65,536 bytes. These byte caps are output and transport bounds, not native tokenizer results.
 
-Save the returned `selection.receipt` as a separate JSON document to use `--previous receipt.json`. `--expected-digest` can bind a load to a prior selection digest. Source, routing-policy version, profile, mode, exclusions, session, task revision and phase invalidate stale reuse. A pending proposal cannot be reused as a completed decision. Receipts are integrity checks for local operation, not an authorization signature.
+Save the returned `selection.receipt` as a separate JSON document to use `--previous receipt.json`. `--expected-digest` can bind a load to a prior selection digest. Source, trigger content, routing-policy version, profile, mode, exclusions, session, task revision, phase, and a digest of the query invalidate stale reuse. A pending proposal cannot be reused as a completed decision. Receipts are integrity checks for local operation, not an authorization signature.
 
 An agent can call the resolver at task boundaries and read the returned context. This integration is prompt-advisory. Returning a body never grants tools, invokes shell interpolation, starts a native skill, changes hooks or installs dependencies. Native manual-only flags and authority-bearing metadata are checked before selection. Base profiles remain stable during task routing.
 

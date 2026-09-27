@@ -154,7 +154,9 @@ function resolveTaskContext({ repoRoot = DEFAULT_REPO_ROOT, task, profileId = 'l
     if (excluded.has(id)) throw new Error(`Context ID is excluded: ${id}`);
   });
   const taskBinding = { sessionId: task.sessionId, taskId: task.taskId, revision: task.revision, phase: task.phase };
-  const bindingDigest = digestObject({ ...taskBinding, planDigest: plan.planDigest, routingPolicyVersion: ROUTING_POLICY_VERSION });
+  const bindingDigest = digestObject({ ...taskBinding, planDigest: plan.planDigest,
+    routingPolicyVersion: ROUTING_POLICY_VERSION, triggersDigest: digestObject(triggers),
+    queryDigest: digestObject(task.query || '') });
   const reused = Boolean(previous && previous.bindingDigest === bindingDigest && !task.noWorkflow
     && ['selected', 'none'].includes(previous.decision) && !explicitIds.length && !proposedIds.length);
   const admissible = id => {

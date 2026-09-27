@@ -43,6 +43,10 @@ function parseFlags(argv) {
       flags[arg.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = argv[index += 1];
     } else throw new Error(`Unknown flag: ${arg}`);
   }
+  if (!/^[1-9][0-9]*$/.test(String(flags.batch)) || !Number.isSafeInteger(Number(flags.batch))) {
+    throw new Error('--batch must be a positive integer');
+  }
+  flags.batch = Number(flags.batch);
   return flags;
 }
 
