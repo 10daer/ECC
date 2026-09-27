@@ -84,7 +84,8 @@ function element(tag, context) {
 }
 
 // Drives the view's inline script against a queue of poll responses, so one run
-// can cover several polls and the state each one leaves behind.
+// can cover several polls and the state each one leaves behind. A response may
+// carry a `hold` function, which lets a test settle two polls out of order.
 async function render(responses) {
   const context = createContext();
   const elements = new Map();
@@ -105,6 +106,9 @@ async function render(responses) {
     setInterval(fn) { timers.push(fn); },
     fetch: async () => {
       const next = queue.length > 1 ? queue.shift() : queue[0];
+      // `hold` parks this response until the test releases it, which is how a
+      // slow older poll is made to settle after a newer one.
+      if (next.hold) await next.hold;
       return { ok: next.ok, json: async () => next.data };
     }
   });
@@ -113,6 +117,7 @@ async function render(responses) {
     elements,
     context,
     writesTo(id) { return elements.get(id).writes; },
+    labelOf(id) { return elements.get(id).attributes['aria-label']; },
     async pollAgain() {
       for (const fn of timers) fn();
       await new Promise(resolve => setImmediate(resolve));
@@ -222,6 +227,12 @@ let passed = 0;
     `an outage must say the counts are unknown, got ${outage.elements.get('announce').textContent}`);
   passed += 1;
 
+  // The canvas label is the on-demand description, so an outage has to clear
+  // the last counts there too, not just in the live region.
+  assert.ok(/unavailable/i.test(outage.labelOf('c')) && /unknown/i.test(outage.labelOf('c')),
+    `the canvas label must not keep the last counts during an outage, got ${outage.labelOf('c')}`);
+  passed += 1;
+
   // A repeated failure stays silent, but recovering online must speak again.
   const writesAfterOutage = outage.writesTo('announce');
   await outage.pollAgain();
@@ -241,6 +252,37 @@ let passed = 0;
   assert.ok(recovered.elements.get('announce').textContent.includes('1 advisories')
     && recovered.elements.get('announce').textContent.includes('Steering is required.'),
     `a recovered poll must announce the restored counts, got ${recovered.elements.get('announce').textContent}`);
+  passed += 1;
+
+  // apply() must put the counts back on the canvas once data flows again.
+  assert.ok(recovered.labelOf('c').includes('1 advisories') && recovered.labelOf('c').includes('1 steering'),
+    `a recovered poll must restore the count label on the canvas, got ${recovered.labelOf('c')}`);
+  passed += 1;
+
+  // Polls are not sequenced. An older poll that settles after a newer one must
+  // not overwrite it, or the live region and the canvas disagree. The initial
+  // poll takes the first response, the second response is the slow older poll,
+  // and the third is the newer success that lands while the older is parked.
+  let releaseOlder;
+  const olderSettles = new Promise(resolve => { releaseOlder = resolve; });
+  const overlapping = await render([
+    { ok: true, data: populatedView() },
+    { ok: false, data: { ok: false, error: 'snapshot unavailable' }, hold: olderSettles },
+    { ok: true, data: populatedView({ counts: { tasks: 3, lanes: 1, agents: 2, advisories: 4, resolutions: 0 } }) }
+  ]);
+  await overlapping.pollAgain();
+  await overlapping.pollAgain();
+  assert.ok(overlapping.labelOf('c').includes('4 advisories'),
+    `the newer success should land first, got ${overlapping.labelOf('c')}`);
+  releaseOlder();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(overlapping.labelOf('c').includes('4 advisories')
+    && !/unavailable/i.test(overlapping.labelOf('c')),
+    `a superseded failure must not clear the newer canvas counts, got ${overlapping.labelOf('c')}`);
+  assert.ok(!/unavailable/i.test(overlapping.elements.get('announce').textContent),
+    `a superseded failure must not announce an outage, got ${overlapping.elements.get('announce').textContent}`);
+  assert.notStrictEqual(overlapping.elements.get('status').textContent, 'offline',
+    'a superseded failure must not mark the view offline');
   passed += 1;
 
   console.log(`Results: Passed: ${passed}, Failed: 0`);
