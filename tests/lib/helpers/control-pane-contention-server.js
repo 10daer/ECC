@@ -3,7 +3,10 @@
 const workerThreads = require('worker_threads');
 const OriginalWorker = workerThreads.Worker;
 const metrics = { active: 0, peak: 0, started: 0, exited: 0, received: 0, disconnected: 0 };
-function report() { process.send({ type: 'workers', ...metrics }); }
+function send(message) {
+  if (process.connected) process.send(message, error => { if (error) process.exitCode = 1; });
+}
+function report() { send({ type: 'workers', ...metrics }); }
 workerThreads.Worker = class ObservedWorker extends OriginalWorker {
   constructor(...args) {
     super(...args);
@@ -25,21 +28,36 @@ async function main() {
     if (req.method === 'POST') {
       metrics.received += 1;
       report();
-      process.send({ type: 'mutation-received' });
+      send({ type: 'mutation-received' });
       res.once('close', () => {
         if (!res.writableFinished) { metrics.disconnected += 1; report(); }
       });
     }
   });
-  await app.listen();
-  process.send({ type: 'ready', url: app.url });
-  process.on('message', async message => {
-    if (message === 'close') {
-      await app.close();
-      process.disconnect();
-    }
-  });
+  let closing;
+  let startupFailed = false;
+  const close = () => {
+    if (!closing) closing = Promise.resolve().then(() => app.close());
+    return closing;
+  };
+  const finish = async () => {
+    try { await close(); if (!startupFailed) process.exitCode = 0; }
+    catch (error) { console.error(error); process.exitCode = 1; }
+    if (process.connected) process.disconnect();
+  };
+  process.on('disconnect', finish);
+  process.on('message', message => { if (message === 'close') finish(); });
+  try {
+    await app.listen();
+    send({ type: 'ready', url: app.url });
+  } catch (error) {
+    startupFailed = true;
+    try { await close(); } catch (_cleanupError) { /* Preserve startup error. */ }
+    throw error;
+  }
+
 }
+process.exitCode = 1;
 main().catch(error => {
   console.error(error);
   process.exitCode = 1;

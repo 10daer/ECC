@@ -2,13 +2,15 @@
 
 const assert = require('assert');
 const { EventEmitter } = require('events');
-const workerThreads = require('worker_threads');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const { createRequire } = require('module');
 
 const RUNNER = require.resolve('../../scripts/lib/control-pane/work-item-runner');
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 
 async function withFakeWorkers(callback) {
-  const OriginalWorker = workerThreads.Worker;
   const workers = [];
   const requests = [];
   let constructorFailures = 0;
@@ -39,14 +41,13 @@ async function withFakeWorkers(callback) {
     }
   }
 
-  delete require.cache[RUNNER];
-  workerThreads.Worker = FakeWorker;
-  let runWorkItemMutation;
-  try {
-    ({ runWorkItemMutation } = require(RUNNER));
-  } finally {
-    workerThreads.Worker = OriginalWorker;
-  }
+  const module = { exports: {} };
+  const nativeRequire = createRequire(RUNNER);
+  const localRequire = id => id === 'worker_threads' ? { Worker: FakeWorker } : nativeRequire(id);
+  vm.compileFunction(fs.readFileSync(RUNNER, 'utf8'),
+    ['exports', 'require', 'module', '__filename', '__dirname'], { filename: RUNNER })(
+    module.exports, localRequire, module, RUNNER, path.dirname(RUNNER));
+  const { runWorkItemMutation } = module.exports;
   const context = {
     workers,
     get constructionAttempts() { return constructionAttempts; },
@@ -76,7 +77,6 @@ async function withFakeWorkers(callback) {
       if (!worker.exited) worker.finish();
     }
     await Promise.all(requests.map(request => request.result));
-    delete require.cache[RUNNER];
   }
 }
 
@@ -97,7 +97,7 @@ async function run() {
       console.log(`  PASS ${name}`);
       passed += 1;
     } catch (error) {
-      console.log(`  FAIL ${name}\n    ${error.stack}`);
+      console.log(`  FAIL ${name}\n    ${error && error.stack ? error.stack : String(error)}`);
       failed += 1;
     }
   }
@@ -220,8 +220,38 @@ async function run() {
     assert.match(result.error.message, /exit/i);
   });
 
+
+  for (const response of [true, 'bad', {}, { ok: 1, result: 'wrong' }, { ok: false },
+    { ok: false, error: null }, { ok: false, error: { message: 7 } },
+    { ok: false, error: { message: 'bad', code: {} } }]) {
+    await test(`malformed worker response rejects after exit (${JSON.stringify(response)})`, async context => {
+      const request = context.request();
+      await nextTurn();
+      context.workers[0].emit('message', response);
+      await nextTurn();
+      assert.strictEqual(request.settled, false);
+      assert.doesNotThrow(() => context.workers[0].exit());
+      const result = await request.result;
+      assert.strictEqual(result.ok, false);
+      assert.match(result.error.message, /invalid.*response/i);
+    });
+  }
+  await test('disconnect and a never-exiting worker keep their slots occupied', async context => {
+    const first = context.request();
+    const second = context.request();
+    await nextTurn();
+    context.workers[0].emit('disconnect');
+    context.workers[1].emit('message', { ok: true, result: 'not exited' });
+    await assertBusy(context.request());
+    assert.strictEqual(first.settled, false);
+    assert.strictEqual(second.settled, false);
+    assert.strictEqual(context.constructionAttempts, 2);
+    // Fake workers are explicitly drained by the harness, never terminated by production.
+  });
+
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
   process.exitCode = failed ? 1 : 0;
 }
 
+process.exitCode = 1;
 run().catch(error => { console.error(error); process.exitCode = 1; });

@@ -7,22 +7,62 @@ const { performance } = require('perf_hooks');
 const WAIT_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 const DEFAULT_TIMEOUT_MS = 5000;
 
+// Cleanup must never replace an arbitrary primary throw (including frozen errors,
+// primitives, or objects with throwing property traps). Diagnostics are best effort.
+function attachCleanupError(primary, name, secondary) {
+  if (primary === null || (typeof primary !== 'object' && typeof primary !== 'function')) return;
+  try { Object.defineProperty(primary, name, { value: secondary, configurable: true }); }
+  catch (_error) { /* Preserve the primary when it cannot accept diagnostics. */ }
+}
+
+function hasCode(error, code) {
+  try { return error !== null && error !== undefined && error.code === code; }
+  catch (_error) { return false; }
+}
+
 function sameIdentity(left, right) {
-  return left.ino === right.ino
-    && (left.dev === right.dev || (process.platform === 'win32' && (!left.dev || !right.dev)));
+  return left.ino === right.ino && left.dev === right.dev;
+}
+
+function lostLock(lockPath) {
+  return Object.assign(new Error(`State-store lock changed or lost; refusing to remove it: ${lockPath}`),
+    { code: 'STATE_STORE_LOCK_LOST' });
 }
 
 function releaseOwnedLock(lockPath, descriptor, identity) {
-  let current;
+  let failed = false;
+  let primary;
+  let pendingDelete = false;
+  let inspected = false;
+  let closeFailed = false;
   try {
-    current = fs.lstatSync(lockPath, { bigint: true });
-  } finally {
-    fs.closeSync(descriptor);
+    const current = fs.lstatSync(lockPath, { bigint: true });
+    inspected = true;
+    if (!current.isFile() || current.isSymbolicLink() || !sameIdentity(identity, current)) {
+      throw lostLock(lockPath);
+    }
+    // Keep the owned descriptor through validation and unlink. This cooperative
+    // lock is not an atomic compare-and-unlink against a directory mutator.
+    fs.unlinkSync(lockPath);
+  } catch (error) {
+    failed = true;
+    primary = hasCode(error, 'ENOENT') ? lostLock(lockPath) : error;
+    pendingDelete = !inspected && hasCode(error, 'EPERM');
   }
-  if (!current.isFile() || current.isSymbolicLink() || !sameIdentity(identity, current)) {
-    throw new Error(`State-store lock changed; refusing to remove it: ${lockPath}`);
+  try {
+    fs.closeSync(descriptor); // Exactly one attempt, even after a release failure.
+  } catch (error) {
+    closeFailed = true;
+    if (failed) attachCleanupError(primary, 'closeError', error);
+    else { failed = true; primary = error; }
   }
-  fs.unlinkSync(lockPath);
+  if (pendingDelete && !closeFailed) {
+    // Windows can defer deletion until the handle closes. Only a subsequent
+    // ENOENT proves loss; preserve genuine EPERM and never unlink after close.
+    try { fs.lstatSync(lockPath, { bigint: true }); }
+    catch (error) { if (hasCode(error, 'ENOENT')) primary = lostLock(lockPath); }
+  }
+  if (failed) throw primary;
 }
 
 function acquireLock(dbPath, timeoutMs) {
@@ -33,7 +73,7 @@ function acquireLock(dbPath, timeoutMs) {
     try {
       descriptor = fs.openSync(lockPath, 'wx', 0o600);
     } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
+      if (!hasCode(error, 'EEXIST')) throw error;
       const remaining = deadline - performance.now();
       if (remaining <= 0) {
         const busy = new Error(`State store is busy: ${dbPath}. Retry after the other ECC operation finishes. `
@@ -54,7 +94,7 @@ function acquireLock(dbPath, timeoutMs) {
         if (identity) releaseOwnedLock(lockPath, descriptor, identity);
         else fs.closeSync(descriptor);
       } catch (releaseError) {
-        error.releaseError = releaseError;
+        attachCleanupError(error, 'releaseError', releaseError);
       }
       throw error;
     }
@@ -81,10 +121,10 @@ function withStateStoreLock(dbPath, callback, { timeoutMs = DEFAULT_TIMEOUT_MS }
     release();
   } catch (releaseError) {
     if (!failed) throw releaseError;
-    if (primaryError instanceof Error) primaryError.releaseError = releaseError;
+    attachCleanupError(primaryError, 'releaseError', releaseError);
   }
   if (failed) throw primaryError;
   return result;
 }
 
-module.exports = { withStateStoreLock };
+module.exports = { withStateStoreLock, attachCleanupError };

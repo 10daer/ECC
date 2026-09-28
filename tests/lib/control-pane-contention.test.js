@@ -5,83 +5,73 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { fork } = require('child_process');
+const { startOwnedChild, withCleanup } = require('./helpers/state-store-worker');
 const { createStateStore } = require('../../scripts/lib/state-store');
 
 const FIXTURE = path.join(__dirname, 'helpers', 'control-pane-contention-server.js');
 
 function request(url, method = 'GET', body, timeoutMs = 1000, onRequest = () => {}) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    let response;
+    const finish = (failed, error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (failed) {
+        try { if (response) response.destroy(); } catch (_cleanupError) { /* Primary wins. */ }
+        try { req.destroy(); } catch (_cleanupError) { /* Primary wins. */ }
+        reject(error);
+      }
+      else resolve(value);
+    };
     const req = http.request(url, { method, agent: false, headers: { 'Content-Type': 'application/json' } }, res => {
+      if (settled) { res.destroy(); return; }
+      response = res;
       let text = '';
+      let bytes = 0;
       res.setEncoding('utf8');
-      res.on('data', data => { text += data; });
+      res.on('data', data => {
+        bytes += Buffer.byteLength(data);
+        if (bytes > 128 * 1024) finish(true, new Error('HTTP fixture response exceeded 128 KiB'));
+        else text += data;
+      });
+      res.on('error', error => finish(true, error));
+      res.on('close', () => { if (!res.complete) finish(true, new Error('HTTP fixture response closed before completion')); });
+      res.on('aborted', () => finish(true, new Error('HTTP fixture response aborted')));
       res.on('end', () => {
-        try {
-          resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(text) });
-        } catch (error) {
-          reject(error);
-        }
+        try { finish(false, null, { status: res.statusCode, headers: res.headers, body: JSON.parse(text) }); }
+        catch (error) { finish(true, error); }
       });
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error(`HTTP ${method} timed out after ${timeoutMs}ms`)));
-    req.on('error', reject);
-    onRequest(req);
-    req.end(body === undefined ? undefined : JSON.stringify(body));
+    // A total deadline covers headers and body, even if bytes keep arriving.
+    timer = setTimeout(() => finish(true, new Error(`HTTP ${method} timed out after ${timeoutMs}ms`)), timeoutMs);
+    req.on('error', error => finish(true, error));
+    try { onRequest(req); req.end(body === undefined ? undefined : JSON.stringify(body)); }
+    catch (error) { finish(true, error); }
   });
 }
 
 async function startServer(dbPath, readOnly = false) {
-  const child = fork(FIXTURE, [dbPath, readOnly ? 'read-only' : 'editable'], {
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc']
-  });
-  const closed = new Promise(resolve => child.once('close', resolve));
-  child.stdout.resume();
-  let stderr = '';
+  const client = startOwnedChild(FIXTURE, [dbPath, readOnly ? 'read-only' : 'editable']);
   let metrics = { active: 0, peak: 0, started: 0, exited: 0, received: 0, disconnected: 0 };
   const observers = new Set();
-  child.on('message', message => {
-    if (message.type === 'workers') {
+  client.observe(message => {
+    if (message && message.type === 'workers') {
       metrics = message;
       for (const notify of observers) notify();
     }
   });
-  child.stderr.on('data', data => { stderr += data; });
   let ready;
-  try {
-    ready = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Server startup timed out: ${stderr}`)), 10000);
-      child.once('error', error => { clearTimeout(timer); reject(error); });
-      child.on('message', message => {
-        if (message.type === 'ready') { clearTimeout(timer); resolve(message); }
-      });
-      child.once('exit', code => { clearTimeout(timer); reject(new Error(`Server exited ${code}: ${stderr}`)); });
-    });
-  } catch (error) {
-    child.kill();
-    await closed;
-    throw error;
-  }
+  try { ready = await client.waitFor(message => message && message.type === 'ready'); }
+  catch (error) { return withCleanup(() => { throw error; }, [() => client.stop()]); }
   return {
     url: ready.url,
     get metrics() { return metrics; },
     observe(fn) { observers.add(fn); return () => observers.delete(fn); },
-    mutationReceived() {
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { child.off('message', onMessage); reject(new Error('Mutation never reached server')); }, 5000);
-        function onMessage(message) {
-          if (message.type !== 'mutation-received') return;
-          clearTimeout(timer);
-          child.off('message', onMessage);
-          resolve();
-        }
-        child.on('message', onMessage);
-      });
-    },
-    async close() {
-      if (child.exitCode === null && child.signalCode === null) child.kill();
-      await closed;
-    }
+    mutationReceived() { return client.waitFor(message => message && message.type === 'mutation-received', 5000); },
+    close: () => client.stop(),
   };
 }
 
@@ -103,17 +93,28 @@ function waitForObservation(server, predicate, timeoutMs = 3000) {
   });
 }
 
-async function burstScenario(server, dbPath) {
-  const bytesBefore = fs.readFileSync(dbPath);
+async function holdFixtureLock(dbPath) {
   const lockPath = `${dbPath}.ecc-state.lock`;
   const fd = fs.openSync(lockPath, 'wx', 0o600);
-  fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname() }));
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    return withCleanup(() => fs.unlinkSync(lockPath), [() => fs.closeSync(fd)]);
+  };
+  try { fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname() })); }
+  catch (error) { return withCleanup(() => { throw error; }, [release]); }
+  return release;
+}
+
+async function burstScenario(server, dbPath) {
+  const bytesBefore = fs.readFileSync(dbPath);
+  const releaseLock = await holdFixtureLock(dbPath);
   const results = [];
   const requests = [];
   let resolveRejected;
   const sixRejected = new Promise(resolve => { resolveRejected = resolve; });
-  let released = false;
-  try {
+  return withCleanup(async () => {
     for (let index = 0; index < 8; index += 1) {
       requests.push(request(`${server.url}/api/work-items/burst-${index}/claim`, 'POST', { owner: `owner-${index}` }, 12000)
         .then(result => {
@@ -148,58 +149,47 @@ async function burstScenario(server, dbPath) {
     assert.strictEqual(snapshot.status, 200);
     assert.deepStrictEqual(fs.readFileSync(dbPath), bytesBefore);
     const rejected = results.map(result => result.index);
-    fs.closeSync(fd);
-    fs.unlinkSync(lockPath);
-    released = true;
+    await releaseLock();
     await Promise.all(requests);
     await waitForObservation(server, () => server.metrics.active === 0);
     assert.strictEqual(results.filter(result => result.status === 200).length, 2);
     assert.strictEqual(server.metrics.started, 2, 'Rejected requests must never execute later');
     const store = await createStateStore({ dbPath });
-    try {
+    await withCleanup(() => {
       for (const index of rejected) assert.strictEqual(store.getWorkItemById(`burst-${index}`).owner, null);
-    } finally { store.close(); }
+    }, [() => store.close()]);
     const retry = await request(`${server.url}/api/work-items/burst-${rejected[0]}/claim`, 'POST', { owner: 'retry-owner' }, 5000);
     assert.strictEqual(retry.status, 200);
     assert.strictEqual(retry.body.item.owner, 'retry-owner');
-  } finally {
-    if (!released) { fs.closeSync(fd); fs.unlinkSync(lockPath); }
-    await Promise.all(requests);
-  }
+  }, [releaseLock, () => Promise.all(requests)]);
 }
 
 async function withServer(readOnly, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-http-contention-'));
   const dbPath = path.join(dir, 'state.db');
   let server;
-  try {
+  return withCleanup(async () => {
     const store = await createStateStore({ dbPath });
-    try {
+    await withCleanup(() => {
       store.upsertWorkItem({ id: 'task', title: 'Synthetic board task', source: 'manual', status: 'open' });
       for (let index = 0; index < 8; index += 1) {
         store.upsertWorkItem({ id: `burst-${index}`, title: `Burst task ${index}`, source: 'manual', status: 'open' });
       }
-    } finally {
-      store.close();
-    }
+    }, [() => store.close()]);
     server = await startServer(dbPath, readOnly);
     return await fn(server, dbPath);
-  } finally {
-    if (server) await server.close();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  }, [() => { if (server) return server.close(); },
+    () => fs.rmSync(dir, { recursive: true, force: true })]);
 }
 
 async function disconnectScenario(server, dbPath) {
-  const lockPath = `${dbPath}.ecc-state.lock`;
-  const fd = fs.openSync(lockPath, 'wx', 0o600);
-  fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname() }));
+  const releaseLock = await holdFixtureLock(dbPath);
   let disconnectedRequest;
   const abandoned = request(`${server.url}/api/work-items/burst-0/claim`, 'POST', { owner: 'abandoned-client' }, 12000,
     req => { disconnectedRequest = req; }).catch(error => ({ error }));
   const accepted = request(`${server.url}/api/work-items/burst-1/claim`, 'POST', { owner: 'connected-client' }, 12000)
     .catch(error => ({ error }));
-  try {
+  await withCleanup(async () => {
     await waitForObservation(server, () => server.metrics.active === 2);
     disconnectedRequest.destroy(new Error('Intentional client disconnect'));
     await waitForObservation(server, () => server.metrics.disconnected === 1);
@@ -207,12 +197,7 @@ async function disconnectScenario(server, dbPath) {
     assert.strictEqual(excess.status, 503, 'Disconnect must not release a slot while its worker is still alive');
     assert.strictEqual(server.metrics.started, 2);
     assert.strictEqual(server.metrics.active, 2);
-  } finally {
-    fs.closeSync(fd);
-    fs.unlinkSync(lockPath);
-    await abandoned;
-    await accepted;
-  }
+  }, [releaseLock, () => abandoned, () => accepted]);
   await waitForObservation(server, () => server.metrics.active === 0);
   const retry = await request(`${server.url}/api/work-items/burst-2/claim`, 'POST', { owner: 'retry-client' }, 5000);
   assert.strictEqual(retry.status, 200, 'Actual worker exits must restore capacity');
@@ -221,14 +206,13 @@ async function disconnectScenario(server, dbPath) {
 async function contentionScenario() {
   return withServer(false, async (server, dbPath) => {
     const bytesBefore = fs.readFileSync(dbPath);
-    const lockPath = `${dbPath}.ecc-state.lock`;
-    const fd = fs.openSync(lockPath, 'wx', 0o600);
-    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname() }));
+    const releaseLock = await holdFixtureLock(dbPath);
     let outcome;
-    try {
+    let mutation;
+    await withCleanup(async () => {
       const received = server.mutationReceived();
       let settled = false;
-      const mutation = request(`${server.url}/api/work-items/task/claim`, 'POST', { owner: 'alice' }, 12000)
+      mutation = request(`${server.url}/api/work-items/task/claim`, 'POST', { owner: 'alice' }, 12000)
         .then(result => { settled = true; return result; }, error => { settled = true; return { transportError: error }; });
       await received;
       let healthError = null;
@@ -253,19 +237,14 @@ async function contentionScenario() {
       const result = await mutation;
       if (result.transportError) throw result.transportError;
       outcome = { result, healthError, healthChecks, snapshotChecks };
-    } finally {
-      fs.closeSync(fd);
-      fs.unlinkSync(lockPath);
-    }
+    }, [releaseLock, () => mutation]);
     assert.deepStrictEqual(fs.readFileSync(dbPath), bytesBefore, 'Timed-out mutation must not change database bytes');
     const store = await createStateStore({ dbPath });
-    try {
+    await withCleanup(() => {
       const item = store.getWorkItemById('task');
       assert.strictEqual(item.status, 'open');
       assert.strictEqual(item.owner, null);
-    } finally {
-      store.close();
-    }
+    }, [() => store.close()]);
     return outcome;
   });
 }
@@ -279,7 +258,7 @@ async function run() {
       console.log(`  PASS ${name}`);
       passed += 1;
     } catch (error) {
-      console.log(`  FAIL ${name}\n    ${error.message}`);
+      console.log(`  FAIL ${name}\n    ${error && error.message ? error.message : String(error)}`);
       failed += 1;
     }
   }
@@ -308,14 +287,12 @@ async function run() {
     assert.strictEqual(invalid.status, 400);
     assert.strictEqual(invalid.body.ok, false);
     const store = await createStateStore({ dbPath });
-    try {
+    await withCleanup(() => {
       const item = store.getWorkItemById('task');
       assert.strictEqual(item.owner, 'alice');
       assert.strictEqual(item.status, 'blocked');
       assert.strictEqual(item.metadata.assigneeKind, 'human');
-    } finally {
-      store.close();
-    }
+    }, [() => store.close()]);
   }));
   await test('read-only mode rejects board edits before database work', () => withServer(true, async server => {
     for (const action of ['claim', 'move']) {
@@ -328,4 +305,5 @@ async function run() {
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
   process.exitCode = failed ? 1 : 0;
 }
+process.exitCode = 1;
 run().catch(error => { console.error(error); process.exitCode = 1; });

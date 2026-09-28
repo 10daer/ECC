@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const initSqlJs = require('sql.js');
-const { withStateStoreLock } = require('./file-lock');
+const { withStateStoreLock, attachCleanupError } = require('./file-lock');
 
 const { applyMigrations, getAppliedMigrations } = require('./migrations');
 const { createQueryApi } = require('./queries');
@@ -218,8 +218,20 @@ function wrapSqlJsDatabase(SQL, dbPath) {
     // sql.js can use its input buffer as writable backing storage.
     const originalBytes = bytes ? Buffer.from(bytes) : null;
     const latest = new SQL.Database(bytes);
-    latest.run('PRAGMA foreign_keys = ON');
-    if (rawDb) rawDb.close();
+    try {
+      latest.run('PRAGMA foreign_keys = ON');
+      if (rawDb) {
+        const previous = rawDb;
+        rawDb = null;
+        try { previous.close(); }
+        catch (error) { closed = true; throw error; }
+      }
+    } catch (error) {
+      // The replacement is not adopted until both initialization and the old
+      // handle's close succeed. Never reuse an uncertain previous handle.
+      try { latest.close(); } catch (closeError) { attachCleanupError(error, 'closeError', closeError); }
+      throw error;
+    }
     rawDb = latest;
     snapshotBytes = originalBytes;
   }
@@ -312,9 +324,9 @@ function wrapSqlJsDatabase(SQL, dbPath) {
       } catch (rollbackError) {
         // Never reuse an uncertain transaction, including an in-memory store.
         closed = true;
-        try { rawDb.close(); } catch (_closeError) { /* Preserve the original failure. */ }
+        try { rawDb.close(); } catch (closeError) { attachCleanupError(error, 'closeError', closeError); }
         rawDb = null;
-        if (error instanceof Error) error.rollbackError = rollbackError;
+        attachCleanupError(error, 'rollbackError', rollbackError);
       }
       dirty = previouslyDirty;
       throw error;
@@ -386,7 +398,7 @@ async function createStateStore(options = {}) {
   try {
     appliedMigrations = db.withSnapshot(() => applyMigrations(db));
   } catch (error) {
-    db.close();
+    try { db.close(); } catch (closeError) { attachCleanupError(error, 'closeError', closeError); }
     throw error;
   }
   const queryApi = createQueryApi(db);

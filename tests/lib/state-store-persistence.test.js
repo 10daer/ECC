@@ -1,11 +1,272 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
+// Private facade: fault injection must not mutate shared fs or require.cache.
+const fs = { ...require('fs') };
+const vm = require('vm');
+const { createRequire } = require('module');
 const os = require('os');
 const path = require('path');
-const { createStateStore } = require('../../scripts/lib/state-store');
-const { withStateStoreLock } = require('../../scripts/lib/state-store/file-lock');
+const STORE = require.resolve('../../scripts/lib/state-store');
+const LOCK = require.resolve('../../scripts/lib/state-store/file-lock');
+function loadPrivate(filename, overrides = {}, source = fs.readFileSync(filename, 'utf8'), processFacade = process) {
+  const module = { exports: {} };
+  const nativeRequire = createRequire(filename);
+  const localRequire = id => Object.hasOwn(overrides, id) ? overrides[id] : nativeRequire(id);
+  vm.compileFunction(source, ['exports', 'require', 'module', '__filename', '__dirname', 'process'],
+    { filename })(module.exports, localRequire, module, filename, path.dirname(filename), processFacade);
+  return module.exports;
+}
+const lockModule = loadPrivate(LOCK, { fs });
+const { withStateStoreLock } = lockModule;
+// sql.js is only initialized by the original integration cases, never the pure mode.
+const { createStateStore } = loadPrivate(STORE, { fs, './file-lock': lockModule });
+
+function thrownBy(fn) {
+  try { return { failed: false, value: fn() }; }
+  catch (error) { return { failed: true, error }; }
+}
+
+function lockFixture(overrides = {}, platform = 'linux') {
+  const calls = [];
+  const identity = { dev: 1n, ino: 2n, isFile: () => true, isSymbolicLink: () => false };
+  let present = true;
+  let closed = false;
+  const facade = {
+    openSync() { calls.push('open'); return 3; },
+    fstatSync() { calls.push('fstat'); return identity; },
+    writeFileSync() { calls.push('write'); },
+    lstatSync() { calls.push('lstat'); if (!present) throw Object.assign(new Error('missing'), { code: 'ENOENT' }); return identity; },
+    unlinkSync() { calls.push('unlink'); present = false; },
+    closeSync() { calls.push('close'); closed = true; },
+  };
+  const state = { calls, identity, get present() { return present; }, set present(value) { present = value; },
+    get closed() { return closed; } };
+  for (const [name, fn] of Object.entries(overrides)) {
+    const original = facade[name];
+    facade[name] = (...args) => fn(state, original, ...args);
+  }
+  const lock = loadPrivate(LOCK, { fs: facade, os: { hostname: () => 'fixture' } }, undefined,
+    { platform, pid: 7 });
+  return { ...state, calls, run: callback => lock.withStateStoreLock('synthetic.db', callback, { timeoutMs: 0 }) };
+}
+
+async function runSynthetic(test) {
+  await test('owned lock unlinks before its only close', () => {
+    const fixture = lockFixture();
+    assert.strictEqual(fixture.run(() => 'done'), 'done');
+    assert.deepStrictEqual(fixture.calls, ['open', 'fstat', 'write', 'lstat', 'unlink', 'close']);
+  });
+  await test('a replacement created during close is never unlinked', () => {
+    let replacement = false;
+    const fixture = lockFixture({
+      closeSync(state, close) { close(); replacement = true; state.present = true; },
+      unlinkSync(state, unlink) { assert.ok(!replacement, 'must not unlink after releasing the descriptor'); unlink(); },
+    });
+    fixture.run(() => {});
+    assert.ok(replacement);
+    assert.strictEqual(fixture.calls.filter(call => call === 'close').length, 1);
+  });
+  for (const platform of ['linux', 'win32']) {
+    for (const replacement of [{ ino: 3n }, { dev: 9n }, { dev: 0n }, { isFile: () => false }, { isSymbolicLink: () => true }]) {
+      await test(`observed lock replacement is preserved (${platform}, ${Object.keys(replacement)[0]})`, () => {
+        const fixture = lockFixture({ lstatSync(state) { state.calls.push('lstat'); return { ...state.identity, ...replacement }; } }, platform);
+        const result = thrownBy(() => fixture.run(() => {}));
+        assert.ok(result.failed);
+        assert.match(result.error.message, /lock.*(changed|lost)/i);
+        assert.ok(!fixture.calls.includes('unlink'));
+        assert.strictEqual(fixture.calls.filter(call => call === 'close').length, 1);
+      });
+    }
+  }
+  for (const afterClose of ['missing', 'permission', 'replacement']) {
+    await test(`initial EPERM performs only a post-close read probe (${afterClose})`, () => {
+      const denied = Object.assign(new Error('denied'), { code: 'EPERM' });
+      const fixture = lockFixture({ lstatSync(state) {
+        state.calls.push('lstat');
+        if (!state.closed || afterClose === 'permission') throw denied;
+        if (afterClose === 'missing') throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        return { ...state.identity, ino: 10n };
+      } }, 'win32');
+      const result = thrownBy(() => fixture.run(() => {}));
+      assert.ok(result.failed);
+      if (afterClose === 'missing') assert.strictEqual(result.error.code, 'STATE_STORE_LOCK_LOST');
+      else assert.strictEqual(result.error, denied);
+      assert.deepStrictEqual(fixture.calls.slice(3), ['lstat', 'close', 'lstat']);
+    });
+  }
+  await test('close failure stops the pending-delete probe and preserves initial EPERM', () => {
+    const denied = Object.assign(new Error('denied'), { code: 'EPERM' });
+    const cleanup = new Error('close failed');
+    const fixture = lockFixture({
+      lstatSync(state) { state.calls.push('lstat'); throw denied; },
+      closeSync(state) { state.calls.push('close'); throw cleanup; },
+    });
+    const result = thrownBy(() => fixture.run(() => {}));
+    assert.ok(result.failed);
+    assert.strictEqual(result.error, denied);
+    assert.strictEqual(result.error.closeError, cleanup);
+    assert.deepStrictEqual(fixture.calls.slice(3), ['lstat', 'close']);
+  });
+  await test('initial missing lock is loss after descriptor closure', () => {
+    const fixture = lockFixture({ lstatSync(state) { state.calls.push('lstat'); throw Object.assign(new Error('gone'), { code: 'ENOENT' }); } });
+    const result = thrownBy(() => fixture.run(() => {}));
+    assert.ok(result.failed);
+    assert.strictEqual(result.error.code, 'STATE_STORE_LOCK_LOST');
+    assert.deepStrictEqual(fixture.calls.slice(3), ['lstat', 'close']);
+  });
+  await test('unlink EPERM is not mistaken for an initial pending-delete lookup', () => {
+    const denied = Object.assign(new Error('unlink denied'), { code: 'EPERM' });
+    const fixture = lockFixture({ unlinkSync(state) { state.calls.push('unlink'); throw denied; } });
+    const result = thrownBy(() => fixture.run(() => {}));
+    assert.ok(result.failed);
+    assert.strictEqual(result.error, denied);
+    assert.deepStrictEqual(fixture.calls.slice(3), ['lstat', 'unlink', 'close']);
+  });
+  const primaries = [null, undefined, false, 0, '', 'primitive', Object.freeze(new Error('frozen')),
+    Object.defineProperty(new Error('setter'), 'releaseError', { set() { throw new Error('setter must not mask'); } })];
+  for (const [index, primary] of primaries.entries()) {
+    for (const stage of ['callback', 'metadata', 'identity']) {
+      await test(`arbitrary primary survives lock cleanup (${index}, ${stage})`, () => {
+        const cleanup = new Error('cleanup failed');
+        const overrides = stage === 'callback'
+          ? { unlinkSync() { throw cleanup; } }
+          : stage === 'metadata'
+            ? { writeFileSync() { throw primary; }, unlinkSync() { throw cleanup; } }
+            : { fstatSync() { throw primary; }, closeSync() { throw cleanup; } };
+        const fixture = lockFixture(overrides);
+        const result = thrownBy(() => fixture.run(() => { if (stage === 'callback') throw primary; assert.fail('callback must not run'); }));
+        assert.ok(result.failed);
+        assert.strictEqual(result.error, primary);
+      });
+    }
+    for (const stage of ['migration', 'rollback']) {
+      await test(`arbitrary primary survives state-store ${stage} cleanup (${index})`, async () => {
+        const secondary = new Error('cleanup failed');
+        let closes = 0;
+        const fakeSQL = { Database: class {
+          run(sql) { if (sql === 'ROLLBACK') throw secondary; }
+          close() { closes++; throw secondary; }
+        } };
+        const api = loadPrivate(STORE, {
+          'sql.js': async () => fakeSQL,
+          './migrations': { applyMigrations() { if (stage === 'migration') throw primary; return []; } },
+          './queries': { createQueryApi: () => ({}) },
+        });
+        let failed = false;
+        let caught;
+        try {
+          const store = await api.createStateStore({ dbPath: ':memory:' });
+          store._database.transaction(() => { throw primary; })();
+        } catch (error) { failed = true; caught = error; }
+        assert.ok(failed);
+        assert.strictEqual(caught, primary);
+        assert.strictEqual(closes, 1);
+      });
+    }
+  }
+  for (const stage of ['initialize', 'previous-close']) {
+    for (const [index, primary] of [null, undefined, Object.freeze(new Error('reload primary'))].entries()) {
+      await test(`reload closes its unadopted handle and preserves ${stage} failure (${index})`, () => {
+        const handles = [];
+        const SQL = { Database: class {
+          constructor() { this.id = handles.length; this.closes = 0; handles.push(this); }
+          run() { if (stage === 'initialize') throw primary; }
+          close() {
+            this.closes++;
+            if (stage === 'previous-close' && this.id === 0) throw primary;
+            throw new Error('unadopted cleanup');
+          }
+        } };
+        // Export only the existing private wrapper in this isolated exact-source module.
+        const source = `${fs.readFileSync(STORE, 'utf8')}\nmodule.exports.testWrap = wrapSqlJsDatabase;`;
+        const api = loadPrivate(STORE, {
+          fs: { lstatSync() { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); } },
+          './file-lock': { ...lockModule, withStateStoreLock: (_path, callback) => callback() },
+        }, source);
+        const db = api.testWrap(SQL, 'synthetic.db');
+        if (stage === 'previous-close') db.withSnapshot(() => {});
+        const result = thrownBy(() => db.withSnapshot(() => assert.fail('must not adopt failed handle')));
+        assert.ok(result.failed);
+        assert.strictEqual(result.error, primary);
+        assert.strictEqual(handles.at(-1).closes, 1);
+        if (stage === 'previous-close') {
+          assert.strictEqual(handles[0].closes, 1);
+          assert.throws(() => db.withSnapshot(() => {}), /closed/);
+        }
+        db.close();
+        assert.ok(handles.every(handle => handle.closes === 1));
+      });
+    }
+  }
+  await test('reload adopts a ready replacement and closes each owned handle once', () => {
+    const calls = [];
+    let next = 0;
+    const SQL = { Database: class {
+      constructor() { this.id = next++; }
+      run() { calls.push(`ready:${this.id}`); }
+      close() { calls.push(`close:${this.id}`); }
+    } };
+    const source = `${fs.readFileSync(STORE, 'utf8')}\nmodule.exports.testWrap = wrapSqlJsDatabase;`;
+    const api = loadPrivate(STORE, {
+      fs: { lstatSync() { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); } },
+      './file-lock': { ...lockModule, withStateStoreLock: (_path, callback) => callback() },
+    }, source);
+    const db = api.testWrap(SQL, 'synthetic.db');
+    db.withSnapshot(() => {});
+    db.withSnapshot(() => {});
+    db.close(); db.close();
+    assert.deepStrictEqual(calls, ['ready:0', 'ready:1', 'close:0', 'close:1']);
+  });
+  for (const [index, primary] of [null, undefined, false, 0, '', 'primitive',
+    Object.freeze(new Error('frozen worker')), { get message() { throw new Error('getter'); } }].entries()) {
+    await test(`worker reports bounded arbitrary mutation failure after close (${index})`, async () => {
+      const filename = require.resolve('../../scripts/lib/control-pane/work-item-worker');
+      const source = fs.readFileSync(filename, 'utf8');
+      assert.strictEqual(source.split('mutate().then(').length, 2);
+      const captured = source.replace('mutate().then(', 'module.exports = mutate().then(');
+      const messages = [];
+      let closes = 0;
+      await loadPrivate(filename, {
+        worker_threads: { workerData: { dbPath: ':memory:', action: 'claim', args: {} },
+          parentPort: { postMessage(message) { messages.push(message); } } },
+        '../state-store': { createStateStore: async () => ({
+          _database: { transaction: fn => fn }, close() { closes++; throw new Error('close failed'); },
+        }) },
+        './work-item-mutations': { claimWorkItem() { throw primary; } },
+      }, captured);
+      assert.strictEqual(closes, 1);
+      assert.strictEqual(messages.length, 1);
+      assert.strictEqual(messages[0].ok, false);
+      assert.strictEqual(typeof messages[0].error.message, 'string');
+      assert.ok(messages[0].error.message.length <= 1024);
+      if (index < 6) assert.strictEqual(messages[0].error.message, String(primary));
+      if (index === 6) assert.strictEqual(messages[0].error.message, primary.message);
+    });
+  }
+  await test('worker rejects close-only failure after successful mutation', async () => {
+    const filename = require.resolve('../../scripts/lib/control-pane/work-item-worker');
+    const source = fs.readFileSync(filename, 'utf8').replace('mutate().then(', 'module.exports = mutate().then(');
+    const messages = [];
+    await loadPrivate(filename, {
+      worker_threads: { workerData: { dbPath: ':memory:', action: 'claim', args: {} },
+        parentPort: { postMessage(message) { messages.push(message); } } },
+      '../state-store': { createStateStore: async () => ({
+        _database: { transaction: fn => fn }, close() { throw new Error('close-only'); },
+      }) },
+      './work-item-mutations': { claimWorkItem() { return 'committed'; } },
+    }, source);
+    assert.deepStrictEqual(messages, [{ ok: false, error: { message: 'close-only', code: undefined } }]);
+  });
+  await test('cleanup-only lock failure still rejects a successful operation', () => {
+    const cleanup = new Error('close failed');
+    const fixture = lockFixture({ closeSync() { throw cleanup; } });
+    const result = thrownBy(() => fixture.run(() => 'committed'));
+    assert.ok(result.failed);
+    assert.strictEqual(result.error, cleanup);
+  });
+}
+
 
 const item = id => ({ id, source: 'manual', title: id, status: 'open' });
 
@@ -19,11 +280,18 @@ async function run() {
       console.log(`  PASS ${name}`);
       passed += 1;
     } catch (error) {
-      console.log(`  FAIL ${name}\n    ${error.stack}`);
+      console.log(`  FAIL ${name}\n    ${error && error.stack ? error.stack : String(error)}`);
       failed += 1;
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
     }
+  }
+
+  await runSynthetic(test);
+  if (process.argv.includes('--synthetic-only')) {
+    console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
+    process.exitCode = failed ? 1 : 0;
+    return;
   }
 
   await test('queries, migration inspection and closing never rewrite an existing database', async dbPath => {
@@ -243,4 +511,5 @@ async function run() {
   process.exitCode = failed ? 1 : 0;
 }
 
+process.exitCode = 1;
 run().catch(error => { console.error(error); process.exitCode = 1; });

@@ -4,82 +4,45 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { fork, spawnSync } = require('child_process');
+const { startOwnedChild, withOwnedChildren, withCleanup } = require('./helpers/state-store-worker');
 const { createStateStore } = require('../../scripts/lib/state-store');
 
 const WORKER = path.join(__dirname, 'helpers', 'state-store-worker.js');
 const WORK_ITEMS = path.join(__dirname, '..', '..', 'scripts', 'work-items.js');
 
-function startWorker() {
-  const child = fork(WORKER, [], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
-  const pending = new Map();
+async function startWorker() {
+  const client = startOwnedChild(WORKER);
+  try {
+    await client.waitFor(message => message && message.ready === true);
+  } catch (error) {
+    return withCleanup(() => { throw error; }, [() => client.stop()]);
+  }
   let nextId = 0;
-  let stderr = '';
-  child.stderr.on('data', data => { stderr += data; });
-  child.stdout.resume();
-  child.on('message', message => {
-    const request = pending.get(message.id);
-    if (!request) return;
-    clearTimeout(request.timer);
-    pending.delete(message.id);
-    if (message.ok) request.resolve();
-    else request.reject(new Error(message.error));
-  });
-  child.on('exit', code => {
-    for (const request of pending.values()) {
-      clearTimeout(request.timer);
-      request.reject(new Error(`Worker exited ${code}: ${stderr}`));
-    }
-    pending.clear();
-  });
   return {
-    request(action, options = {}) {
+    async request(action, options = {}) {
       const id = ++nextId;
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error(`Worker timed out during ${action}: ${stderr}`));
-        }, 30000);
-        pending.set(id, { resolve, reject, timer });
-        child.send({ id, action, ...options });
-      });
+      const response = client.waitFor(message => message && message.id === id);
+      client.send({ id, action, ...options });
+      const message = await response;
+      if (!message.ok) throw new Error(message.error);
     },
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      await new Promise(resolve => {
-        child.once('exit', resolve);
-        child.kill();
-      });
-    }
+    stop: () => client.stop(),
   };
 }
 
 async function withDatabase(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-store-concurrency-'));
   const dbPath = path.join(dir, 'state.db');
-  try {
-    await fn(dbPath);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  return withCleanup(() => fn(dbPath), [() => fs.rmSync(dir, { recursive: true, force: true })]);
 }
 
 async function readItems(dbPath) {
   const store = await createStateStore({ dbPath });
-  try {
-    return store.listWorkItems({ limit: 1000 }).items;
-  } finally {
-    store.close();
-  }
+  return withCleanup(() => store.listWorkItems({ limit: 1000 }).items, [() => store.close()]);
 }
 
 async function withWorkers(count, fn) {
-  const workers = Array.from({ length: count }, () => startWorker());
-  try {
-    await fn(workers);
-  } finally {
-    await Promise.all(workers.map(worker => worker.stop()));
-  }
+  return withOwnedChildren(count, startWorker, fn);
 }
 
 async function run() {
@@ -91,7 +54,7 @@ async function run() {
       console.log(`  PASS ${name}`);
       passed += 1;
     } catch (error) {
-      console.log(`  FAIL ${name}\n    ${error.message}`);
+      console.log(`  FAIL ${name}\n    ${error && error.message ? error.message : String(error)}`);
       failed += 1;
     }
   }
@@ -100,31 +63,27 @@ async function run() {
 
   await test('closing an old reader preserves a task saved by the real CLI', async dbPath => {
     const reader = await createStateStore({ dbPath });
-    try {
+    await withCleanup(async () => {
       assert.strictEqual(reader.listWorkItems().items.length, 0);
-      const result = spawnSync(process.execPath, [WORK_ITEMS, 'upsert', 'cli-task',
-        '--title', 'Task saved while dashboard is open', '--db', dbPath, '--json'],
-      { encoding: 'utf8', timeout: 30000 });
+      const cli = startOwnedChild(WORK_ITEMS, ['upsert', 'cli-task',
+        '--title', 'Task saved while dashboard is open', '--db', dbPath, '--json']);
+      const result = await withCleanup(() => cli.completion(), [() => cli.stop()]);
       assert.strictEqual(result.status, 0, result.stderr);
-    } finally {
-      reader.close();
-    }
+    }, [() => reader.close()]);
     assert.ok((await readItems(dbPath)).some(item => item.id === 'cli-task'),
       'Closing the older reader must not remove the CLI task');
   });
 
   await test('long-lived handles preserve each other\'s writes and return current data', async dbPath => {
     const first = await createStateStore({ dbPath });
-    const second = await createStateStore({ dbPath });
-    try {
+    let second;
+    await withCleanup(async () => {
+      second = await createStateStore({ dbPath });
       first.upsertWorkItem({ id: 'a', source: 'manual', title: 'First task', status: 'open' });
       second.upsertWorkItem({ id: 'b', source: 'manual', title: 'Second task', status: 'open' });
       first.upsertWorkItem({ id: 'c', source: 'manual', title: 'Third task', status: 'open' });
       assert.deepStrictEqual(second.listWorkItems().items.map(item => item.id).sort(), ['a', 'b', 'c']);
-    } finally {
-      first.close();
-      second.close();
-    }
+    }, [() => first.close(), () => { if (second) second.close(); }]);
     assert.deepStrictEqual((await readItems(dbPath)).map(item => item.id).sort(), ['a', 'b', 'c']);
   });
 
@@ -145,8 +104,9 @@ async function run() {
 
   await test('read-modify-write transactions from concurrent processes retain every increment', async dbPath => {
     const initial = await createStateStore({ dbPath });
-    initial.upsertWorkItem({ id: 'counter', source: 'manual', title: 'Completed jobs', status: 'open', metadata: { value: 0 } });
-    initial.close();
+    await withCleanup(() => {
+      initial.upsertWorkItem({ id: 'counter', source: 'manual', title: 'Completed jobs', status: 'open', metadata: { value: 0 } });
+    }, [() => initial.close()]);
     await withWorkers(3, async workers => {
       await Promise.all(workers.map(worker => worker.request('open', { dbPath })));
       await Promise.all(workers.map(worker => worker.request('increment', { count: 4 })));
@@ -164,20 +124,19 @@ async function run() {
       await Promise.all(workers.map(worker => worker.request('close')));
     });
     const store = await createStateStore({ dbPath });
-    try {
+    await withCleanup(() => {
       const migrations = store.getAppliedMigrations();
       assert.ok(migrations.length > 0);
       assert.strictEqual(new Set(migrations.map(migration => migration.version)).size, migrations.length);
       assert.deepStrictEqual(store.listWorkItems().items.map(item => item.id).sort(), ['fresh-0-0', 'fresh-1-0', 'fresh-2-0']);
-    } finally {
-      store.close();
-    }
+    }, [() => store.close()]);
   });
 
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
   process.exitCode = failed > 0 ? 1 : 0;
 }
 
+process.exitCode = 1;
 run().catch(error => {
   console.error(error);
   process.exitCode = 1;
