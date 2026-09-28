@@ -103,6 +103,7 @@ async function render(responses) {
   const timers = [];
   const timeouts = [];
   const queue = responses.slice();
+  let jsonReads = 0;
   const document = {
     getElementById(id) { if (!elements.has(id)) elements.set(id, element(null, context)); return elements.get(id); },
     createElement: tag => element(tag, context)
@@ -133,13 +134,17 @@ async function render(responses) {
       }
       if (next.hold) await next.hold;
       if (options && options.signal && options.signal.aborted) throw new Error('aborted');
-      return { ok: next.ok, json: async () => next.data };
+      return { ok: next.ok, json: () => {
+        jsonReads += 1;
+        return next.body || Promise.resolve(next.data);
+      } };
     }
   });
   await new Promise(resolve => setImmediate(resolve));
   return {
     elements,
     context,
+    jsonReads() { return jsonReads; },
     writesTo(id) { return elements.get(id).writes; },
     labelOf(id) { return elements.get(id).attributes['aria-label']; },
     // Fire every pending request timeout, then let the rejections propagate.
@@ -185,6 +190,7 @@ function populatedView(overrides) {
 }
 
 let passed = 0;
+let failures = 0;
 (async () => {
   const failed = await render([{ ok: false, data: { ok: false, error: 'snapshot unavailable' } }]);
   assert.strictEqual(failed.elements.get('status').textContent, 'offline', 'HTTP errors must not display a healthy empty view');
@@ -445,9 +451,78 @@ let passed = 0;
     `the newest counts must survive an ignored poll, got ${outOfOrderFailure.labelOf('c')}`);
   passed += 1;
 
-  console.log(`Results: Passed: ${passed}, Failed: 0`);
+  // Both response headers have arrived before independently held JSON bodies
+  // resolve newest-first in the SAME turn. No drain separates those resolves.
+  // This specifically exercises the promise-continuation watermark gap.
+  function deferredBody() {
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  const prior = populatedView({ lanes: [{ label: 'prior', kind: 'lane', taskIds: ['task-clear'] }] });
+  const oldBody = populatedView({
+    lanes: [{ label: 'older', kind: 'lane', taskIds: ['task-clear'] }],
+    projection: { agents: [{ agentId: 'task-clear', point: [1, 0], maxRisk: 0.1 }] },
+    counts: { tasks: 1, lanes: 1, agents: 1, advisories: 0, resolutions: 0 }
+  });
+  const newBody = populatedView({
+    lanes: [{ label: 'newest', kind: 'lane', taskIds: ['task-resolution'] }],
+    projection: { agents: [{ agentId: 'task-resolution', point: [-1, -1], maxRisk: 0.9 }] },
+    counts: { tasks: 1, lanes: 1, agents: 1, advisories: 1, resolutions: 1 }
+  });
+  for (const [name, body, unavailable] of [
+    ['newest valid body', newBody, false],
+    ['newest invalid body', { schemaVersion: 'invalid' }, true],
+    ['newest render failure', populatedView({ events: [null] }), true]
+  ]) {
+    try {
+      const older = deferredBody();
+      const newer = deferredBody();
+      const sameTurn = await render([
+        { ok: true, data: prior },
+        { ok: true, body: older.promise },
+        { ok: true, body: newer.promise }
+      ]);
+      await sameTurn.pollAgain();
+      await sameTurn.pollAgain();
+      assert.strictEqual(sameTurn.jsonReads(), 3, 'both deferred JSON bodies must be pending after headers');
+      const priorLanes = textOf(sameTurn.elements.get('lanes'));
+      const priorDraws = sameTurn.context.log.length;
+      newer.resolve(body);
+      older.resolve(oldBody);
+      await settle();
+      const laneText = textOf(sameTurn.elements.get('lanes'));
+      const label = sameTurn.labelOf('c');
+      const announcement = sameTurn.elements.get('announce').textContent;
+      const status = sameTurn.elements.get('status').textContent;
+      if (unavailable) {
+        assert.strictEqual(laneText, priorLanes, `${name}: older body must not replace retained lanes`);
+        assert.strictEqual(sameTurn.context.log.length, priorDraws, `${name}: older body must not render markers`);
+        assert.strictEqual(status, 'offline', `${name}: the claimed token must report its failure`);
+        assert.match(label, /unavailable.*unknown/i);
+        assert.match(announcement, /unavailable.*unknown/i);
+      } else {
+        assert.match(laneText, /newest/, 'newest lanes must survive same-turn body completion');
+        assert.doesNotMatch(laneText, /older/);
+        assert.deepStrictEqual(markerShapes({ log: sameTurn.context.log.slice(priorDraws) }),
+          [{ shape: 'triangle', color: '#ff7b72' }], 'only the newest marker may be drawn');
+        assert.match(label, /1 tasks.*1 advisories.*1 steering/);
+        assert.match(announcement, /1 advisories.*1 steering.*Steering is required/);
+        assert.match(status, /1 tasks.*1 advisories.*1 steering/);
+      }
+      passed += 1;
+    } catch (error) {
+      failures += 1;
+      console.error(`${name}: ${error.message}`);
+    }
+  }
+
+  console.log(`Results: Passed: ${passed}, Failed: ${failures}`);
+  process.exitCode = failures > 0 ? 1 : 0;
+
 })().catch(error => {
   console.error(error.message);
-  console.log(`Results: Passed: ${passed}, Failed: 1`);
+  console.log(`Results: Passed: ${passed}, Failed: ${failures + 1}`);
   process.exitCode = 1;
 });

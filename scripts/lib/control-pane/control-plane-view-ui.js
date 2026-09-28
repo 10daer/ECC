@@ -97,9 +97,9 @@ function renderControlPlaneViewHtml() {
   }
   window.addEventListener('resize', resize);
 
-  // Keep clear and resolution apart by luminance as well as hue: at the
-  // previous #3fb950/#ff7b72 the two differed by 1.01:1, so a red-green
-  // colour-blind operator saw the same grey for "clear" and "steer now".
+  // The previous clear/resolution palette had similar relative luminance.
+  // Separate luminance values plus redundant shapes and text reduce reliance
+  // on hue; palette math alone does not establish a user's visual experience.
   function riskLevel(risk) {
     if (risk >= view.thresholds.ra) return 'resolution';
     if (risk >= view.thresholds.ta) return 'traffic';
@@ -306,23 +306,26 @@ function renderControlPlaneViewHtml() {
     // screen forever. The abort is what wakes this poll up, so a timeout is
     // reported as an outage rather than swallowed.
     timer = setTimeout(function () { controller.abort(); }, TIMEOUT_MS);
-    // A poll that has already answered, or timed out, owns the view. Anything
-    // that settles later is superseded and must be dropped. The watermark only
-    // ever moves forward: a poll that settles late is itself stale, and letting
-    // it lower the mark would re-admit an even older poll behind it.
+    // Claim before rendering or reporting failure: two JSON bodies may settle
+    // in the same turn, before a later cleanup continuation can run. Equality
+    // lets a render failure report unavailable for the token that just claimed.
+    function claim() {
+      if (token < settledPoll) return false;
+      settledPoll = token;
+      return true;
+    }
     function settle() {
       clearTimeout(timer);
-      if (token > settledPoll) settledPoll = token;
     }
     fetch('/api/control-plane', { signal: controller.signal }).then(function (r) {
       if (!r.ok) throw new Error('Control-plane request failed');
       return r.json();
     }).then(function (data) {
       // A newer poll already owns the view, so do not resurrect older counts.
-      if (token < settledPoll) return;
+      if (!claim()) return;
       apply(data);
     }).catch(function () {
-      if (token < settledPoll) return;
+      if (!claim()) return;
       unavailable();
     }).then(settle, settle);
   }
