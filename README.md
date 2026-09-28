@@ -1515,9 +1515,14 @@ npm install && bash scripts/sync-ecc-to-codex.sh
 cp .codex/config.toml ~/.codex/config.toml
 ```
 
-The sync script safely merges ECC MCP servers into your existing `~/.codex/config.toml` using an **add-only** strategy: it never removes or modifies your existing servers. Run with `--dry-run` to preview changes, or `--update-mcp` to force-refresh ECC servers to the latest recommended config.
+Normal MCP sync preserves existing server settings and warns when they differ from ECC's recommendation. An existing `chrome-devtools-mcp@latest` entry therefore stays unchanged; updating the repository alone does not adopt the recommended `chrome-devtools-mcp@1.10.1` pin. Existing legacy-sync users can preview and explicitly apply the refresh from the updated ECC checkout:
 
-For Context7, ECC uses the canonical Codex section name `[mcp_servers.context7]` while still launching the `@upstash/context7-mcp` package. If you already have a legacy `[mcp_servers.context7-mcp]` entry, `--update-mcp` migrates it to the canonical section name.
+```bash
+bash scripts/sync-ecc-to-codex.sh --dry-run --update-mcp
+bash scripts/sync-ecc-to-codex.sh --update-mcp
+```
+
+Review the preview before applying: `--update-mcp` replaces the entire recommended `chrome-devtools` server section, including custom command arguments and nested settings. Unrelated user-managed servers remain in place. Retired defaults such as Context7 are not refreshed or migrated by this flag.
 
 Codex macOS app:
 - Open this repository as your workspace.
@@ -1533,7 +1538,7 @@ Codex macOS app:
 | Config | 1 | `.codex/config.toml`: top-level approvals/sandbox/web_search, MCP servers, notifications, profiles |
 | AGENTS.md | 2 | Root (universal) + `.codex/AGENTS.md` (Codex-specific supplement) |
 | Skills | 32 | `.agents/skills/`: SKILL.md + agents/openai.yaml per skill |
-| MCP Servers | 6 | GitHub, Context7, Exa, Memory, Playwright, Sequential Thinking (7 with Supabase via `--update-mcp` sync) |
+| MCP Servers | 6 legacy reference entries | GitHub, Context7, Exa, Memory, Playwright, Sequential Thinking. Current managed sync recommends `chrome-devtools`; see the explicit refresh instructions above. |
 | Profiles | 2 | `strict` (read-only sandbox) and `yolo` (full auto-approve) |
 | Agent Roles | 3 | `.codex/agents/`: explorer, reviewer, docs-researcher |
 
