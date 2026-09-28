@@ -383,6 +383,26 @@ const results = Object.freeze([
       assertEvaluatorTools(calls, baseTools);
     });
   })),
+
+  test('evaluator mode explicitly denies Playwright tools without changing other phases', () => {
+    for (const mode of ['playwright', 'screenshot', 'code-only']) {
+      withHarnessRun({ mode }, ({ result, calls }) => {
+        assert.strictEqual(result.status, 0, result.stderr);
+        const [evaluator] = evaluatorCalls(calls);
+        const denyIndex = evaluator.indexOf('--disallowedTools');
+        if (mode === 'playwright') {
+          assert.strictEqual(denyIndex, -1);
+        } else {
+          assert.ok(denyIndex >= 0, `${mode} must deny the configured Playwright server tools`);
+          assert.strictEqual(evaluator[denyIndex + 1], 'mcp__playwright__*');
+          assert.strictEqual(evaluator.filter(arg => arg === '--disallowedTools').length, 1);
+        }
+        for (const args of calls.filter(args => args[0] === '-p' && args !== evaluator)) {
+          assert.strictEqual(args.includes('--disallowedTools'), false);
+        }
+      });
+    }
+  }),
 ]);
 
 const passed = results.filter(Boolean).length;
