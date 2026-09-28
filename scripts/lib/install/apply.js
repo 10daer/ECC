@@ -497,8 +497,8 @@ function assertOpenCodeHookDeactivationReady(plan, options = {}) {
       }
       continue;
     }
-    if (inactive && (kind === 'plugin' || options.allowVerifiedLegacyRemoval)) continue;
     const recorded = previous.get(key);
+    if (inactive && (kind === 'plugin' || options.allowVerifiedLegacyRemoval || !recorded)) continue;
     if (options.allowVerifiedLegacyRemoval && recorded) {
       const verified = verifyManagedLegacyFile(recorded, {
         targetRoot: plan.targetRoot, installStatePath: plan.installStatePath,
@@ -918,7 +918,9 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
         );
       }
 
-      assertOpenCodeHookDeactivationReady(appliedPlan, { requireInactive: true });
+      // Include preserved user configs omitted from the write plan: they must
+      // still be inactive before we record a completed install.
+      assertOpenCodeHookDeactivationReady(plan, { requireInactive: true });
       finalState = stateWithContentDigests(migration.finalState, appliedPlan);
       if (typeof beforeInstallStateWrite === 'function') {
         beforeInstallStateWrite({ plan: appliedPlan, state: finalState });
