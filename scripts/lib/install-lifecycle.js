@@ -1964,7 +1964,7 @@ function preflightOpenCodeHookDeactivation(record, context, options = {}) {
     // Migration does not replay operations into the old root. Inspect existing
     // activations there, without treating historical merge-json records as new
     // writes; the canonical destination is validated separately below.
-    assertOpenCodeRepairHookDeactivation({ ...legacyPlan, operations: [] }, { requireInactive: true });
+    assertOpenCodeRepairHookDeactivation({ ...legacyPlan, operations: [] }, { allowVerifiedLegacyRemoval: true });
     assertOpenCodeRepairHookDeactivation(rawPlan, options);
     return;
   }
@@ -2298,9 +2298,10 @@ function repairInstalledStates(options = {}) {
         homeDir: context.homeDir, projectRoot: context.projectRoot,
         repoRoot: context.projectRoot, env: context.env,
       });
-      const { getOpenCodeInstallRoots } = require('./install/apply');
+      const { getOpenCodeInstallRoots, assertOpenCodeLeaseCoverage } = require('./install/apply');
       const roots = getOpenCodeInstallRoots({ adapter, targetRoot, homeDir: context.homeDir });
       return withOpenCodeInstallLocks(roots, lease => {
+        assertOpenCodeLeaseCoverage({ adapter, targetRoot, homeDir: context.homeDir }, lease);
         // Discovery precedes acquisition. Never repair from that stale state.
         record = buildDiscoveryRecord(adapter, context, record.legacyLayout === 'opencode'
           ? getLegacyOpencodeLocation(context.homeDir) : null);

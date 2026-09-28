@@ -69,10 +69,22 @@ function disableOpenCodeHookPluginRegistration(content, sourceRelativePath) {
   }, null, 2)}\n`;
 }
 
+function getOpenCodeActivationPathKind(value) {
+  const relative = normalizeOperationPath(value);
+  if (relative === 'opencode.json') return 'config';
+  if (/^plugins\/[^/]+\/package\.json$/.test(relative)) return 'package';
+  if (/^plugins\/(?:[^/]+\.(?:[cm]?js|ts)|[^/]+\/index\.(?:[cm]?js|ts))$/.test(relative)) return 'plugin';
+  return null;
+}
+
+function getOpenCodeSourceActivationKind(operation = {}) {
+  const source = normalizeOperationPath(operation.sourceRelativePath);
+  if (!source.startsWith('.opencode/')) return null;
+  return getOpenCodeActivationPathKind(source.replace(/^\.opencode\/(?:dist\/)?/, ''));
+}
+
 function isOpenCodePluginEntrypoint(operation = {}) {
-  return /^\.opencode\/(?:dist\/)?plugins\/[^/]+\.(?:[cm]?js|ts)$/.test(
-    normalizeOperationPath(operation.sourceRelativePath)
-  );
+  return getOpenCodeSourceActivationKind(operation) === 'plugin';
 }
 
 function getDisabledOpenCodePluginContent() {
@@ -82,8 +94,7 @@ function getDisabledOpenCodePluginContent() {
 }
 
 function isOpenCodeHookActivationOperation(operation = {}) {
-  return normalizeOperationPath(operation.sourceRelativePath) === '.opencode/opencode.json'
-    || isOpenCodePluginEntrypoint(operation);
+  return getOpenCodeSourceActivationKind(operation) !== null;
 }
 
 function isHookRuntimeOperation(operation = {}) {
@@ -146,6 +157,9 @@ function withoutHookRuntimeId(values) {
 }
 
 function withoutOpenCodeHookActivation(operation) {
+  if (getOpenCodeSourceActivationKind(operation) === 'package') {
+    throw new Error(`Unsupported OpenCode package metadata deactivation: ${operation.sourceRelativePath}`);
+  }
   if (
     !isOpenCodeHookActivationOperation(operation)
     || operation.kind !== 'copy-file'
@@ -310,6 +324,8 @@ module.exports = {
   disableUnselectedOpenCodeHooks,
   disableOpenCodeHookPluginRegistration,
   getDisabledOpenCodePluginContent,
+  getOpenCodeActivationPathKind,
+  getOpenCodeSourceActivationKind,
   formatHookCapabilityDisclosure,
   getRecordedHookConsent,
   isHookRuntimeOperation,
