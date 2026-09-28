@@ -43,9 +43,12 @@ const PROTECTED_FILES = new Set([
   'prettier.config.js',
   'prettier.config.cjs',
   'prettier.config.mjs',
-  // Biome
+  // Biome's discovered filenames. Custom --config-path/extends targets need
+  // reference context; an arbitrary biome.* basename is not sufficient.
   'biome.json',
   'biome.jsonc',
+  '.biome.json',
+  '.biome.jsonc',
   // Ruff (Python)
   '.ruff.toml',
   'ruff.toml',
@@ -82,11 +85,9 @@ const PROTECTED_FILES = new Set([
  */
 const PROTECTED_PATTERNS = [
   // eslint.config.base.mjs, prettier.config.shared.cjs, stylelint.config.local.js ...
-  /^(eslint|prettier|stylelint|commitlint|oxlint|biome)\.config(\.[A-Za-z0-9_-]+)*\.(js|mjs|cjs|ts|mts|cts)$/i,
+  /^(eslint|prettier|stylelint|commitlint|oxlint)\.config(\.[A-Za-z0-9_-]+)*\.(js|mjs|cjs|ts|mts|cts)$/i,
   // .eslintrc.base.json, .prettierrc.shared.yml ...
   /^\.(eslintrc|prettierrc|stylelintrc|markdownlintrc)(\.[A-Za-z0-9_-]+)*\.(js|cjs|mjs|json|jsonc|yml|yaml|toml)$/i,
-  // biome.base.json, biome.shared.jsonc
-  /^biome(\.[A-Za-z0-9_-]+)*\.jsonc?$/i,
 ];
 
 function isProtectedName(basename) {

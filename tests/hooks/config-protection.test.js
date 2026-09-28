@@ -332,8 +332,8 @@ function runTests() {
         const names = [
           'eslint.config.base.mjs', 'prettier.config.shared.cjs', '.eslintrc.base.json', 'ESLint.Config.Base.MJS',
           'stylelint.config.local.ts', 'commitlint.config.shared.cts', 'oxlint.config.base.mts',
-          'biome.config.shared.js', '.prettierrc.shared.yml', '.stylelintrc.team.toml',
-          '.markdownlintrc.team.jsonc', 'biome.shared.jsonc', 'BIOME.Team.Base.JSON'
+          '.prettierrc.shared.yml', '.stylelintrc.team.toml',
+          '.markdownlintrc.team.jsonc'
         ];
         for (const name of names) {
           const absPath = path.join(tmpDir, name);
@@ -376,6 +376,34 @@ function runTests() {
         });
         assert.strictEqual(fresh.code, 0, 'Expected first-time qualified config creation to be allowed');
         assert.strictEqual(fresh.stdout, '', 'Allowed qualified creation should not echo raw hook input');
+      });
+    })
+  );
+
+  results.push(
+    test('Biome filenames protect discovered configs without blocking ordinary result files', () => {
+      return withOwnedDirectory(fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-config-protect-biome-')), tmpDir => {
+        // Arbitrary --config-path/extends targets need reference context; their
+        // basename alone does not prove that a file is Biome configuration.
+        const cases = [
+          ['biome.results.json', 0], ['biome.report.jsonc', 0],
+          ['biome.json', 2], ['biome.jsonc', 2], ['.biome.json', 2], ['.biome.jsonc', 2],
+          ['BIOME.JSON', 2], ['.BIOME.JSONC', 2],
+          ['biome.shared.jsonc', 0],
+          ['BIOME.Team.Base.JSON', 0], ['biome.config.shared.js', 0], ['biome.json.bak', 0],
+        ];
+        for (const [name, expected] of cases) {
+          const absPath = path.join(tmpDir, name);
+          const input = { tool_name: 'Write', tool_input: { file_path: absPath, content: '{}' } };
+          // Start each spelling independently on case-insensitive filesystems.
+          fs.rmSync(absPath, { force: true });
+          assert.strictEqual(runHook(input).code, 0, 'First creation should be allowed: ' + name);
+          fs.writeFileSync(absPath, '{}');
+          const result = runHook(input);
+          assert.strictEqual(result.code, expected, 'Unexpected filename classification: ' + name);
+          assert.strictEqual(result.stdout, '', 'No raw input should be echoed: ' + name);
+          assert.strictEqual(fs.readFileSync(absPath, 'utf8'), '{}', 'Hook must not modify the fixture');
+        }
       });
     })
   );
