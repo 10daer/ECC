@@ -247,13 +247,16 @@ function scanShell(input, budget) {
   const commands = [];
   const nested = [];
   const pendingHeredocs = [];
-  let current = { words: [], redirects: [], pipeFrom: null };
+  const rootScope = { parent: null, isolated: false, conditional: false };
+  let scope = rootScope;
+  const command = pipeFrom => ({ words: [], redirects: [], pipeFrom, nested: [], scope });
+  let current = command(null);
   let word = null;
   let quote = null;
   let pendingRedirect = null;
   let i = 0;
   function begin() {
-    if (!word) word = { value: '', start: i, end: i, quoted: false, literal: true };
+    if (!word) word = { value: '', start: i, end: i, quoted: false, literal: true, dynamic: false };
   }
   function flushWord() {
     if (!word) return;
@@ -262,24 +265,35 @@ function scanShell(input, budget) {
     if (pendingRedirect) {
       const redirect = { operator: pendingRedirect, word, body: '' };
       current.redirects.push(redirect);
-      if (pendingRedirect === '<<' || pendingRedirect === '<<-') pendingHeredocs.push(redirect);
+      if (pendingRedirect === '<<' || pendingRedirect === '<<-') pendingHeredocs.push({ redirect, owner: current });
       pendingRedirect = null;
     } else current.words.push(word);
     word = null;
   }
-  function flushCommand(pipe = false) {
+  function flushCommand(pipe = false, background = false) {
     flushWord();
     const previous = current;
+    previous.pipeTo = pipe;
+    previous.background = background;
+    if (previous.closedScope && (pipe || background)) {
+      previous.closedScope.isolated = true;
+      previous.closedScope.pipelineLast = false;
+    }
+    const first = previous.words[0];
+    if (first && !first.quoted && ['if', 'then', 'elif', 'else', 'while', 'until', 'do', 'case', 'for', 'select', 'function'].includes(first.value)) scope.conditional = true;
     if (previous.words.length || previous.redirects.length) commands.push(previous);
-    current = { words: [], redirects: [], pipeFrom: pipe ? previous : null };
+    current = command(pipe ? previous : null);
     pendingRedirect = null;
   }
   function consumeHeredocs() {
-    for (const redirect of pendingHeredocs) {
+    for (const { redirect, owner } of pendingHeredocs) {
       const region = heredocBody(input, i, redirect, budget);
       redirect.body = region.body;
       i = region.end;
-      if (!redirect.word.quoted) nested.push(...scanExpansions(redirect.body, budget));
+      if (!redirect.word.quoted) {
+        const regions = scanExpansions(redirect.body, budget);
+        for (const text of regions) { budget.spend(); nested.push(text); owner.nested.push(text); }
+      }
     }
     pendingHeredocs.length = 0;
   }
@@ -307,9 +321,14 @@ function scanShell(input, budget) {
       word.value += next; i += 2; continue;
     }
     if (hasExpansion(input, i, quote === null)) {
-      begin(); word.literal = false;
+      begin(); word.literal = false; word.dynamic = true;
       const region = executionRegion(input, i, budget);
-      nested.push(region.text); word.value += '\u0000'; i = region.end; continue;
+      nested.push(region.text); current.nested.push(region.text); word.value += '\u0000'; i = region.end; continue;
+    }
+    // Parameter expansions remain opaque values. Escaped/single/ANSI-C
+    // quoted dollars have already been consumed as data above.
+    if (c === '$' && /[A-Za-z0-9_@*#?$!{-]/.test(input[i + 1] || '')) {
+      begin(); word.dynamic = true;
     }
     if (quote === '"') {
       if (c === '"') quote = null;
@@ -329,7 +348,29 @@ function scanShell(input, budget) {
     const braceKeyword = (c === '{' || c === '}') && !word && current.words.length === 0 && /[\s;&|]/.test(input[i + 1] || ' ');
     if (c === '\n' || c === ';' || c === '&' || c === '|' || c === '(' || c === ')' || braceKeyword) {
       const pipe = c === '|' && input[i + 1] !== '|';
-      flushCommand(pipe);
+      const background = c === '&' && input[i + 1] !== '&';
+      if ((c === '&' || c === '|') && input[i + 1] === c) scope.conditional = true;
+      const incomingPipe = Boolean(current.pipeFrom);
+      if (c === '(') {
+        flushWord();
+        // A function definition does not execute its body. Function grammar
+        // is unsupported: keep pre-definition alternatives instead of using
+        // flattened body mutations to certify a later command as safe.
+        if (current.words.length === 1 && !current.words[0].quoted &&
+            /^[A-Za-z_][A-Za-z0-9_]*$/.test(current.words[0].value)) scope.conditional = true;
+      }
+      flushCommand(pipe, background);
+      if (c === '(' || (braceKeyword && c === '{')) {
+        scope = { parent: scope, isolated: c === '(' || incomingPipe, conditional: false, pipelineLast: c === '{' && incomingPipe };
+        current.scope = scope;
+      } else if ((c === ')' || (braceKeyword && c === '}')) && scope.parent) {
+        const closedScope = scope;
+        scope = scope.parent;
+        current.scope = scope;
+        current.closedScope = closedScope;
+        // Ordered metadata only; there is no executable argv in this event.
+        commands.push({ ...command(null), scopeExit: closedScope });
+      }
       i += (c === '&' || c === '|') && input[i + 1] === c ? 2 : 1;
       if (c === '\n') consumeHeredocs();
       continue;
@@ -340,7 +381,7 @@ function scanShell(input, budget) {
         if (word && /^\d+$/.test(word.value)) word = null;
         flushWord();
         const redirect = { operator: delimiter.operator, word: delimiter.word, body: '' };
-        current.redirects.push(redirect); pendingHeredocs.push(redirect);
+        current.redirects.push(redirect); pendingHeredocs.push({ redirect, owner: current });
         i = delimiter.end; pendingRedirect = null; continue;
       }
     }
@@ -359,7 +400,7 @@ function scanShell(input, budget) {
     begin(); word.value += c; i++;
   }
   flushCommand();
-  return { commands, nested };
+  return { commands, nested, rootScope };
 }
 
 module.exports = { createBudget, scanShell, scanExpansions };
