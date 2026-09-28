@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const vm = require('vm');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const workflowPaths = [
@@ -583,7 +584,8 @@ for (const workflowPath of workflowPaths) {
     const publish = workflow.jobs.publish;
     assert.deepStrictEqual(publish.permissions, { contents: 'write', 'id-token': 'write' });
     const checkout = publish.steps.find(step => step.uses?.startsWith('actions/checkout@'));
-    assert.strictEqual(checkout.with.ref, '${{ needs.verify.outputs.release_sha }}');
+    assert.strictEqual(checkout.with.ref, workflowPath === '.github/workflows/release.yml'
+      ? '${{ github.sha }}' : '${{ needs.verify.outputs.release_sha }}');
     assert.strictEqual(checkout.with['persist-credentials'], false);
     assert.strictEqual(checkout.with.path, 'release-gate-source');
     const index = publish.steps.findIndex(step => step.name === 'Recheck verified tag before publish');
@@ -596,6 +598,33 @@ for (const workflowPath of workflowPaths) {
     assert.doesNotMatch(JSON.stringify(publish), /npm ci|npm install|actions:read|checks:read/);
   });
 }
+
+test('tag-push publish binds its event checkout to the verified release before loading code', () => {
+  const workflow = yaml.load(load('.github/workflows/release.yml'));
+  assert.deepStrictEqual(workflow.on, { push: { tags: ['v*'] } });
+  const steps = workflow.jobs.publish.steps;
+  const binding = steps.findIndex(step => step.name === 'Bind gate source to triggering commit');
+  const checkout = steps.findIndex(step => step.name === 'Checkout verified gate source');
+  assert.ok(binding >= 0 && binding < checkout);
+  assert.strictEqual(steps[binding].if, undefined, 'binding must fail the job rather than silently skip');
+  assert.strictEqual(steps[checkout].if, undefined);
+  assert.deepStrictEqual(steps[binding].env, {
+    EVENT_SHA: '${{ github.sha }}',
+    VERIFIED_RELEASE_SHA: '${{ needs.verify.outputs.release_sha }}',
+  });
+  const program = /^node -e "([^\n"]+)"$/.exec(steps[binding].run);
+  assert.ok(program, 'binding must be a fixed environment-only Node check');
+  const execute = env => vm.runInNewContext(program[1], { process: { env: Object.freeze(env) } }, { timeout: 100 });
+  assert.doesNotThrow(() => execute({ EVENT_SHA: releaseSha, VERIFIED_RELEASE_SHA: releaseSha }));
+  for (const env of [
+    {},
+    { EVENT_SHA: releaseSha },
+    { VERIFIED_RELEASE_SHA: releaseSha },
+    { EVENT_SHA: releaseSha, VERIFIED_RELEASE_SHA: 'b'.repeat(40) },
+    { EVENT_SHA: 'invalid', VERIFIED_RELEASE_SHA: 'invalid' },
+    { EVENT_SHA: releaseSha + '\n', VERIFIED_RELEASE_SHA: releaseSha + '\n' },
+  ]) assert.throws(() => execute(env), /Verified release differs from triggering commit/);
+});
 
 test('reusable release requires its input to resolve through the tag namespace', () => {
   const source = load('.github/workflows/reusable-release.yml');
