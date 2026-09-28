@@ -202,6 +202,257 @@ async function artifactSecurityTests(test) {
   });
 }
 
+// Deterministic filesystem boundaries, using private regular files only. Native
+// descriptors are owned here even when a spy returns a different private file.
+async function withAssetIo(asset, overrides, callback) {
+  const target = fs.realpathSync(asset);
+  const methods = ['openSync', 'fstatSync', 'lstatSync', 'readSync', 'closeSync'];
+  const original = Object.fromEntries(methods.map(name => [name, fs[name]]));
+  const live = new Set();
+  const calls = { opens: 0, reads: 0, closes: 0, fstats: 0, requested: [], returned: 0, flags: [] };
+  fs.openSync = function (candidate, flags, ...rest) {
+    if (typeof candidate !== 'string' || path.resolve(candidate) !== target) return original.openSync(candidate, flags, ...rest);
+    calls.opens++;
+    calls.flags.push(flags);
+    const fd = overrides.open
+      ? overrides.open({ candidate, flags, original, calls })
+      : original.openSync(candidate, flags, ...rest);
+    live.add(fd);
+    return fd;
+  };
+  fs.fstatSync = function (fd, ...rest) {
+    const stats = original.fstatSync(fd, ...rest);
+    if (!live.has(fd)) return stats;
+    calls.fstats++;
+    return overrides.fstat ? overrides.fstat(stats, calls) : stats;
+  };
+  fs.lstatSync = function (candidate, ...rest) {
+    const stats = original.lstatSync(candidate, ...rest);
+    return overrides.lstat ? overrides.lstat(path.resolve(candidate), stats, calls) : stats;
+  };
+  fs.readSync = function (fd, buffer, offset, length, position) {
+    if (!live.has(fd)) return original.readSync(fd, buffer, offset, length, position);
+    calls.reads++;
+    calls.requested.push({ length, position, capacity: buffer.length });
+    const count = overrides.read
+      ? overrides.read({ fd, buffer, offset, length, position, original, calls })
+      : original.readSync(fd, buffer, offset, length, position);
+    calls.returned += count;
+    return count;
+  };
+  fs.closeSync = function (fd) {
+    if (!live.has(fd)) return original.closeSync(fd);
+    calls.closes++;
+    // Close the actual fixture descriptor before optionally simulating a close
+    // error. The test never leaks an fd to imitate an ambiguous OS error.
+    original.closeSync(fd);
+    live.delete(fd);
+    if (overrides.close) overrides.close(calls);
+  };
+  try {
+    await callback(calls);
+    assert.strictEqual(live.size, 0, 'All returned descriptors must close');
+  } finally {
+    for (const name of methods) fs[name] = original[name];
+    // Cleanup after a failing assertion/implementation; leaks still fail above.
+    for (const fd of live) original.closeSync(fd);
+  }
+}
+
+function changedStats(stats, changes) {
+  return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, changes);
+}
+
+function assertAssetRefusal(response, status, base, outside) {
+  assert.strictEqual(response.statusCode, status);
+  assert.ok(!response.body.includes('private-fixture-secret'));
+  assert.ok(!response.body.includes(base));
+  assert.ok(!response.body.includes(outside));
+}
+
+async function artifactRaceTests(test) {
+  const withFile = callback => withArtifactHandler(async value => {
+    const parent = path.join(value.base, 'nested');
+    fs.mkdirSync(parent);
+    const asset = path.join(parent, 'asset.txt');
+    fs.writeFileSync(asset, 'inert');
+    fs.writeFileSync(path.join(value.outside, 'asset.txt'), 'private-fixture-secret');
+    await callback({ ...value, parent, asset, fetch: () => value.get('nested/asset.txt') });
+  });
+  await test('sibling reads use one guarded descriptor and at most size plus one bytes', () => withFile(async ({ asset, fetch }) => {
+    await withAssetIo(asset, {}, async calls => {
+      const response = await fetch();
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(response.body, 'inert');
+      assert.deepStrictEqual([calls.opens, calls.closes], [1, 1]);
+      assert.ok(calls.fstats >= 2);
+      assert.strictEqual(typeof calls.flags[0], 'number');
+      for (const flag of [fs.constants.O_NOFOLLOW || 0, fs.constants.O_NONBLOCK || 0]) {
+        assert.strictEqual(calls.flags[0] & flag, flag);
+      }
+      assert.ok(calls.requested.length > 0);
+      assert.ok(calls.requested.every(call => call.capacity === 6 && call.length <= 6 && Number.isInteger(call.position)));
+      assert.strictEqual(calls.returned, 5);
+    });
+  }));
+  await test('a leaf symlink replacement before native open never reads outside bytes', () => withFile(async ({ asset, base, outside, fetch }) => {
+    const probe = path.join(base, 'probe');
+    createTestSymlink(path.join(outside, 'asset.txt'), probe);
+    fs.unlinkSync(probe);
+    await withAssetIo(asset, { open({ candidate, flags, original }) {
+      fs.unlinkSync(asset);
+      fs.symlinkSync(path.join(outside, 'asset.txt'), asset, 'file');
+      return original.openSync(candidate, flags);
+    } }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.strictEqual(calls.reads, 0);
+      assert.ok(calls.closes === 0 || calls.closes === 1);
+    });
+  }));
+  await test('a substituted descriptor is rejected even with an unchanged pathname', () => withFile(async ({ asset, base, outside, fetch }) => {
+    await withAssetIo(asset, { open({ original }) {
+      return original.openSync(path.join(outside, 'asset.txt'), fs.constants.O_RDONLY);
+    } }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
+    });
+  }));
+  await test('an intermediate directory symlink swap before open never reads outside bytes', () => withFile(async ({ asset, parent, base, outside, fetch }) => {
+    const probe = path.join(base, 'probe');
+    createTestSymlink(outside, probe, 'dir');
+    fs.unlinkSync(probe);
+    await withAssetIo(asset, { open({ candidate, flags, original }) {
+      fs.renameSync(parent, `${parent}.saved`);
+      fs.symlinkSync(outside, parent, 'dir');
+      return original.openSync(candidate, flags);
+    } }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
+    });
+  }));
+  await test('parent replacement is refused even with the same leaf inode and simulated stable leaf metadata', () => withFile(async ({ asset, parent, base, outside, fetch }) => {
+    const before = fs.statSync(asset, { bigint: true });
+    const stable = stats => changedStats(stats, { mtimeNs: before.mtimeNs, ctimeNs: before.ctimeNs });
+    await withAssetIo(asset, {
+      open({ candidate, flags, original }) {
+        fs.renameSync(parent, `${parent}.saved`);
+        fs.mkdirSync(parent);
+        fs.renameSync(path.join(`${parent}.saved`, 'asset.txt'), asset);
+        const current = fs.statSync(asset, { bigint: true });
+        assert.deepStrictEqual([current.dev, current.ino], [before.dev, before.ino]);
+        return original.openSync(candidate, flags);
+      },
+      fstat: stable,
+      lstat(candidate, stats) { return candidate === asset ? stable(stats) : stats; }
+    }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
+    });
+  }));
+  await test('simulated ancestor replacement above the artifact base is refused before read', () => withFile(async ({ asset, base, outside, fetch }) => {
+    await withAssetIo(asset, { lstat(candidate, stats, calls) {
+      return calls.opens > 0 && candidate === path.dirname(base)
+        ? changedStats(stats, { ino: stats.ino + 1n }) : stats;
+    } }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
+    });
+  }));
+  for (const change of ['descriptor metadata', 'ancestor identity']) {
+    await test(`simulated ${change} change after reading discards the buffered body`, () => withFile(async ({ asset, parent, base, outside, fetch }) => {
+      await withAssetIo(asset, {
+        fstat(stats, calls) { return change === 'descriptor metadata' && calls.reads > 0
+          ? changedStats(stats, { mtimeNs: stats.mtimeNs + 1n }) : stats; },
+        lstat(candidate, stats, calls) { return change === 'ancestor identity' && calls.reads > 0 && candidate === parent
+          ? changedStats(stats, { ino: stats.ino + 1n }) : stats; }
+      }, async calls => {
+        assertAssetRefusal(await fetch(), 403, base, outside);
+        assert.ok(calls.reads > 0);
+        assert.strictEqual(calls.closes, 1);
+      });
+    }));
+  }
+  await test('retargeting an in-root alias after read discards buffered bytes', () => withFile(async ({ asset, base, outside, get }) => {
+    const alias = path.join(base, 'alias.txt');
+    const other = path.join(base, 'other.txt');
+    fs.writeFileSync(other, 'other');
+    createTestSymlink(asset, alias);
+    await withAssetIo(asset, { read({ fd, buffer, offset, length, position, original, calls }) {
+      const count = original.readSync(fd, buffer, offset, length, position);
+      if (calls.reads === 1) { fs.unlinkSync(alias); fs.symlinkSync(other, alias, 'file'); }
+      return count;
+    } }, async calls => {
+      assertAssetRefusal(await get('alias.txt'), 403, base, outside);
+      assert.strictEqual(calls.closes, 1);
+    });
+  }));
+  for (const size of [67108865n, -1n, 1.5, Infinity]) {
+    await test(`invalid or over-limit sampled size ${size} is refused before open`, () => withFile(async ({ asset, base, outside, fetch }) => {
+      await withAssetIo(asset, { lstat(candidate, stats) { return candidate === asset ? changedStats(stats, { size }) : stats; } }, async calls => {
+        const status = size === 67108865n ? 413 : 403;
+        const response = await fetch();
+        assertAssetRefusal(response, status, base, outside);
+        if (status === 413) assert.deepStrictEqual(JSON.parse(response.body), { error: 'asset too large' });
+        assert.deepStrictEqual([calls.opens, calls.reads, calls.closes], [0, 0, 0]);
+      });
+    }));
+  }
+  await test('non-regular opened descriptors are refused without reading', () => withFile(async ({ asset, base, outside, fetch }) => {
+    await withAssetIo(asset, { fstat(stats) { return changedStats(stats, { isFile: () => false }); } }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
+    });
+  }));
+  for (const kind of ['growth sentinel', 'early EOF']) {
+    await test(`bounded read refuses ${kind}`, () => withFile(async ({ asset, base, outside, fetch }) => {
+      await withAssetIo(asset, { read({ buffer, offset, length }) {
+        if (kind === 'early EOF') return 0;
+        buffer.fill(97, offset, offset + length);
+        return length;
+      } }, async calls => {
+        assertAssetRefusal(await fetch(), 403, base, outside);
+        assert.ok(calls.returned <= 6);
+        assert.ok(calls.requested.every(call => call.length <= 6 && call.capacity === 6));
+        assert.strictEqual(calls.closes, 1);
+      });
+    }));
+  }
+  for (const boundary of ['open', 'fstat', 'read', 'close', 'read and close']) {
+    await test(`${boundary} failure closes only acquired descriptors once and returns no body`, () => withFile(async ({ asset, base, outside, fetch }) => {
+      const failure = code => Object.assign(new Error(`private failure at ${asset}`), { code });
+      const overrides = {};
+      if (boundary === 'open') overrides.open = () => { throw failure('EACCES'); };
+      if (boundary === 'fstat') overrides.fstat = () => { throw failure('EIO'); };
+      if (boundary.includes('read')) overrides.read = () => { throw failure('EIO'); };
+      if (boundary.includes('close')) overrides.close = () => { throw failure(boundary === 'read and close' ? 'ELOOP' : 'EIO'); };
+      await withAssetIo(asset, overrides, async calls => {
+        assertAssetRefusal(await fetch(), 404, base, outside);
+        assert.strictEqual(calls.closes, boundary === 'open' ? 0 : 1);
+      });
+    }));
+  }
+  await test('primary descriptor validation refusal survives a secondary close error', () => withFile(async ({ asset, base, outside, fetch }) => {
+    await withAssetIo(asset, {
+      open({ original }) { return original.openSync(path.join(outside, 'asset.txt'), fs.constants.O_RDONLY); },
+      close() { throw Object.assign(new Error('secondary close error'), { code: 'EIO' }); }
+    }, async calls => {
+      assertAssetRefusal(await fetch(), 403, base, outside);
+      assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
+    });
+  }));
+  await test('empty sibling files and static in-root directory aliases remain supported', () => withFile(async ({ asset, parent, base, get }) => {
+    fs.writeFileSync(asset, '');
+    createTestSymlink(parent, path.join(base, 'inside'), 'dir');
+    await withAssetIo(asset, {}, async calls => {
+      const response = await get('inside/asset.txt');
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(response.body, '');
+      assert.deepStrictEqual([calls.opens, calls.closes, calls.returned], [1, 1, 0]);
+      assert.ok(calls.requested.every(call => call.capacity === 1));
+    });
+  }));
+}
+
 function request(port, method, requestPath, { body = null, headers = {} } = {}) {
   return new Promise((resolve, reject) => {
     const payload = body === null ? null : JSON.stringify(body);
@@ -286,6 +537,7 @@ async function main() {
   const suite = createTestRunner();
   const { test } = suite;
   await artifactSecurityTests(test);
+  await artifactRaceTests(test);
   if (process.argv.includes('--artifact-security-only')) {
     printResults(suite.results);
     return;

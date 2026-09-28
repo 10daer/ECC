@@ -123,6 +123,112 @@ function sendHtml(res, statusCode, html, { csp = true } = {}) {
   res.end(html);
 }
 
+// Sibling assets have an explicit 64 MiB resource limit (413 above it), separate
+// from request-body limits. Reads use at most the sampled size plus one sentinel.
+const MAX_ARTIFACT_ASSET_BYTES = 64 * 1024 * 1024;
+
+function assetReadError(code = 'EARTIFACT_UNSAFE') {
+  return Object.assign(new Error('Artifact sibling read refused'), { code });
+}
+
+function sameAssetIdentity(before, after) {
+  return before.dev === after.dev && before.ino === after.ino && before.mode === after.mode;
+}
+
+function sameAssetFile(before, after) {
+  return after.isFile() && sameAssetIdentity(before, after) && before.size === after.size
+    && (before.mtimeNs ?? before.mtimeMs) === (after.mtimeNs ?? after.mtimeMs)
+    && (before.ctimeNs ?? before.ctimeMs) === (after.ctimeNs ?? after.ctimeMs);
+}
+
+function assetByteLength(stats) {
+  if (typeof stats.size !== 'bigint' && !Number.isSafeInteger(stats.size)) throw assetReadError();
+  const size = BigInt(stats.size);
+  if (size < 0n) throw assetReadError();
+  if (size > BigInt(MAX_ARTIFACT_ASSET_BYTES)) throw assetReadError('EARTIFACT_TOO_LARGE');
+  return Number(size);
+}
+
+function snapshotAssetChain(realTarget) {
+  const root = path.parse(realTarget).root;
+  const parts = path.relative(root, realTarget).split(path.sep).filter(Boolean);
+  const paths = [root];
+  for (const part of parts) paths.push(path.join(paths[paths.length - 1], part));
+  return paths.map((entryPath, index) => {
+    const stats = fs.lstatSync(entryPath, { bigint: true });
+    const leaf = index === paths.length - 1;
+    if (stats.isSymbolicLink() || !(leaf ? stats.isFile() : stats.isDirectory())) throw assetReadError();
+    return { path: entryPath, stats, leaf };
+  });
+}
+
+function revalidateAssetPath({ baseDir, resolved, realBase, realTarget, chain }) {
+  if (fs.realpathSync(baseDir) !== realBase || fs.realpathSync(resolved) !== realTarget) throw assetReadError();
+  for (const entry of chain) {
+    const current = fs.lstatSync(entry.path, { bigint: true });
+    if (current.isSymbolicLink() || !(entry.leaf ? sameAssetFile(entry.stats, current)
+      : current.isDirectory() && sameAssetIdentity(entry.stats, current))) throw assetReadError();
+  }
+}
+
+function readAssetDescriptor(fd, size) {
+  const buffer = Buffer.alloc(size + 1);
+  let bytes = 0;
+  while (bytes < buffer.length) {
+    const requested = buffer.length - bytes;
+    const count = fs.readSync(fd, buffer, bytes, requested, bytes);
+    if (!Number.isInteger(count) || count < 0 || count > requested) throw assetReadError();
+    if (count === 0) break;
+    bytes += count;
+  }
+  if (bytes !== size) throw assetReadError();
+  return buffer.subarray(0, bytes);
+}
+
+// Canonical ancestors are sampled from the filesystem root, not just realBase.
+// Revalidation detects observed replacements, but portable pathname operations
+// are not atomic openat confinement: repeated swap/restore or same-inode content
+// races can evade observations. This helper covers siblings only, not the direct
+// session.file read. O_NOFOLLOW protects the leaf only where the flag exists.
+function readSiblingAsset(baseDir, resolved) {
+  const realBase = fs.realpathSync(baseDir);
+  const realTarget = fs.realpathSync(resolved);
+  const relative = path.relative(realBase, realTarget);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw assetReadError();
+  const chain = snapshotAssetChain(realTarget);
+  const expected = chain[chain.length - 1].stats;
+  const size = assetByteLength(expected);
+  const snapshot = { baseDir, resolved, realBase, realTarget, chain };
+  revalidateAssetPath(snapshot);
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+  let fd;
+  try {
+    fd = fs.openSync(realTarget, flags);
+  } catch (error) {
+    if (error.code === 'ELOOP' || error.code === 'ENOTDIR') throw assetReadError();
+    throw error;
+  }
+  let primaryError;
+  let data;
+  try {
+    if (!sameAssetFile(expected, fs.fstatSync(fd, { bigint: true }))) throw assetReadError();
+    revalidateAssetPath(snapshot);
+    data = readAssetDescriptor(fd, size);
+    if (!sameAssetFile(expected, fs.fstatSync(fd, { bigint: true }))) throw assetReadError();
+    revalidateAssetPath(snapshot);
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    try { fs.closeSync(fd); } catch (error) {
+      // A close error may mean the fd is already released; never retry it or
+      // replace the primary read/validation failure. Close-only failure refuses.
+      if (!primaryError) primaryError = error;
+    }
+  }
+  if (primaryError) throw primaryError;
+  return { data, realTarget };
+}
+
 function createPlanCanvasServer({
   store,
   host = DEFAULT_HOST,
@@ -532,24 +638,12 @@ function createPlanCanvasServer({
       return sendJson(res, 403, { error: 'asset path escapes artifact directory' });
     }
     let realTarget;
-    try {
-      const realBase = fs.realpathSync(baseDir);
-      realTarget = fs.realpathSync(resolved);
-      if (realTarget !== realBase && !realTarget.startsWith(realBase + path.sep)) {
-        return sendJson(res, 403, { error: 'asset path escapes artifact directory' });
-      }
-    } catch {
-      return sendJson(res, 404, { error: 'asset not found' });
-    }
-    // Residual TOCTOU note: the confinement check and the read below are
-    // separate operations. A local writer able to replace the target or its
-    // parent directory entries can still redirect the read between them.
-    // Static confinement assumes trusted local directory writers; it is not
-    // race-free. The document sandbox below is a separate origin boundary.
     let data;
     try {
-      data = fs.readFileSync(realTarget);
-    } catch {
+      ({ data, realTarget } = readSiblingAsset(baseDir, resolved));
+    } catch (error) {
+      if (error.code === 'EARTIFACT_TOO_LARGE') return sendJson(res, 413, { error: 'asset too large' });
+      if (error.code === 'EARTIFACT_UNSAFE') return sendJson(res, 403, { error: 'asset changed or unsafe' });
       return sendJson(res, 404, { error: 'asset not found' });
     }
     // MIME comes from the link/request name first so a symlinked asset keeps
