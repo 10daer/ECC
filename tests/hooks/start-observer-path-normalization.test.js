@@ -28,12 +28,14 @@ const launcher = path.join(
 );
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-observer-path-test-'));
 
+/** Convert a native Windows path to the form accepted by Git Bash. */
 function shellPath(filePath) {
   if (process.platform !== 'win32') return filePath;
   const normalized = filePath.replace(/\\/g, '/');
   return `/${normalized[0].toLowerCase()}${normalized.slice(2)}`;
 }
 
+/** Return the launcher-reported storage directory for one configured root. */
 function storageFor(configuredRoot) {
   const result = spawnSync(bashBinary, [launcher, 'status'], {
     cwd: repoRoot,
