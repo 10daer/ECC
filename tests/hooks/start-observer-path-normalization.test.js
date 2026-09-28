@@ -58,7 +58,9 @@ try {
   fs.mkdirSync(path.join(testRoot, 'unused'), { recursive: true });
 
   const canonicalStorage = storageFor(actualRoot);
-  const lexicalStorage = storageFor(path.join(testRoot, 'unused', '..', 'homunculus'));
+  const lexicalStorage = storageFor(
+    `${testRoot}${path.sep}unused${path.sep}..${path.sep}homunculus`
+  );
   const trailingSlashStorage = storageFor(`${actualRoot}${path.sep}`);
 
   assert.strictEqual(lexicalStorage, canonicalStorage, '.. route must reuse the physical observer key');
