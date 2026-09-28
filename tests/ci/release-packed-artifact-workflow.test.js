@@ -219,13 +219,19 @@ function fixture() {
   }));
   return { runs, checks, jobs, workflows: structuredClone(workflows), repo: { ...repoIdentity } };
 }
+function withItem(data, collection, index, changes) {
+  return {
+    ...data,
+    [collection]: data[collection].map((item, position) => position === index ? { ...item, ...changes } : item),
+  };
+}
 function response(payload, link = null) {
   return { ok: true, status: 200, headers: { get: () => link }, json: async () => payload };
 }
 function fakeApi(data = fixture(), modify = () => null) {
-  const calls = [];
+  let calls = [];
   const fetchImpl = async (url, options) => {
-    calls.push(url);
+    calls = [...calls, url];
     const replacement = modify(url, options, calls);
     if (replacement) return replacement;
     const pathname = new URL(url).pathname.replace(`/repos/${repository}`, '');
@@ -238,7 +244,7 @@ function fakeApi(data = fixture(), modify = () => null) {
     if (pathname === `/git/tags/${tagSha}`) return response({ sha: tagSha, tag: 'v1.2.3', object: { type: 'commit', sha: releaseSha }, verification: { verified: true, reason: 'valid' } });
     throw new Error(`Unexpected synthetic API path ${pathname}`);
   };
-  return { fetchImpl, calls };
+  return { fetchImpl, get calls() { return calls; } };
 }
 const once = { attempts: 1, timeoutMs: 1000, requestTimeoutMs: 100 };
 async function gates(data, modify) {
@@ -263,76 +269,79 @@ test('pre-install verifier loads with built-ins only and still rejects malformed
 });
 
 test('complete trusted CI and default CodeQL categories pass without display-name trust', async () => {
-  const data = fixture();
-  data.runs[0].name = 'Renamed CI';
-  data.runs[1].name = 'Push on main';
+  const data = { ...fixture(), runs: fixture().runs.map((run, index) => ({ ...run, name: index ? 'Push on main' : 'Renamed CI' })) };
   const calls = await gates(data);
   assert.ok(calls.some(url => url.includes('/attempts/1/jobs')));
   assert.ok(calls.some(url => url.includes('/check-suites/101/check-runs')));
 });
 
-for (const [name, mutate] of [
-  ['impostor CI workflow', d => { d.runs[0].workflow_id = 999; d.runs[0].name = 'CI'; }],
-  ['wrong workflow path', d => { d.runs[0].path = '.github/workflows/spoof.yml'; }],
-  ['wrong CI event', d => { d.runs[0].event = 'pull_request'; }],
-  ['wrong main branch', d => { d.runs[0].head_branch = 'release/x'; }],
-  ['wrong run SHA', d => { d.runs[0].head_sha = 'c'.repeat(40); }],
-  ['foreign run repository', d => { d.runs[0].repository.id = 1; }],
-  ['foreign head repository', d => { d.runs[0].head_repository.full_name = 'impostor/ECC'; }],
-  ['untrusted check app', d => { d.checks[0].app.id = 1; }],
-  ['wrong app slug', d => { d.checks[0].app.slug = 'spoof'; }],
-  ['wrong check suite', d => { d.checks[0].check_suite.id = 999; }],
-  ['wrong check SHA', d => { d.checks[0].head_sha = 'c'.repeat(40); }],
-  ['missing required category', d => { d.jobs.pop(); }],
-  ['missing bound check', d => { d.checks.pop(); }],
-  ['new pending category', d => { d.jobs.push({ ...d.jobs[0], id: 999, name: 'Analyze (ruby)', status: 'queued', conclusion: null }); }],
-  ['ambiguous category jobs', d => { d.jobs.push({ ...d.jobs[0], id: 999 }); }],
-  ['wrong attempt job', d => { d.jobs[0].run_attempt = 2; }],
-  ['wrong run job', d => { d.jobs[0].run_id = 90; }],
-  ['wrong job branch', d => { d.jobs[0].head_branch = 'feature'; }],
-  ['foreign check URL', d => { d.jobs[0].check_run_url = 'https://api.github.com/repos/spoof/ECC/check-runs/200'; }],
-  ['job name does not match bound check', d => { d.checks[0].name = 'CodeQL'; }],
-  ['ambiguous workflow metadata', d => { d.workflows.push({ ...d.workflows[0], id: 999 }); }],
-  ['inactive trusted workflow', d => { d.workflows[0].state = 'disabled_manually'; }],
-]) {
+const rejectedFixtures = [
+  ['impostor CI workflow', d => withItem(d, 'runs', 0, { workflow_id: 999, name: 'CI' })],
+  ['wrong workflow path', d => withItem(d, 'runs', 0, { path: '.github/workflows/spoof.yml' })],
+  ['wrong CI event', d => withItem(d, 'runs', 0, { event: 'pull_request' })],
+  ['wrong main branch', d => withItem(d, 'runs', 0, { head_branch: 'release/x' })],
+  ['wrong run SHA', d => withItem(d, 'runs', 0, { head_sha: 'c'.repeat(40) })],
+  ['foreign run repository', d => withItem(d, 'runs', 0, { repository: { ...d.runs[0].repository, id: 1 } })],
+  ['foreign head repository', d => withItem(d, 'runs', 0, { head_repository: { ...d.runs[0].head_repository, full_name: 'impostor/ECC' } })],
+  ['untrusted check app', d => withItem(d, 'checks', 0, { app: { ...d.checks[0].app, id: 1 } })],
+  ['wrong app slug', d => withItem(d, 'checks', 0, { app: { ...d.checks[0].app, slug: 'spoof' } })],
+  ['wrong check suite', d => withItem(d, 'checks', 0, { check_suite: { id: 999 } })],
+  ['wrong check SHA', d => withItem(d, 'checks', 0, { head_sha: 'c'.repeat(40) })],
+  ['missing required category', d => ({ ...d, jobs: d.jobs.slice(0, -1) })],
+  ['missing bound check', d => ({ ...d, checks: d.checks.slice(0, -1) })],
+  ['new pending category', d => ({ ...d, jobs: [...d.jobs, { ...d.jobs[0], id: 999, name: 'Analyze (ruby)', status: 'queued', conclusion: null }] })],
+  ['ambiguous category jobs', d => ({ ...d, jobs: [...d.jobs, { ...d.jobs[0], id: 999 }] })],
+  ['wrong attempt job', d => withItem(d, 'jobs', 0, { run_attempt: 2 })],
+  ['wrong run job', d => withItem(d, 'jobs', 0, { run_id: 90 })],
+  ['wrong job branch', d => withItem(d, 'jobs', 0, { head_branch: 'feature' })],
+  ['foreign check URL', d => withItem(d, 'jobs', 0, { check_run_url: 'https://api.github.com/repos/spoof/ECC/check-runs/200' })],
+  ['job name does not match bound check', d => withItem(d, 'checks', 0, { name: 'CodeQL' })],
+  ['ambiguous workflow metadata', d => ({ ...d, workflows: [...d.workflows, { ...d.workflows[0], id: 999 }] })],
+  ['inactive trusted workflow', d => withItem(d, 'workflows', 0, { state: 'disabled_manually' })],
+];
+for (const [name, change] of rejectedFixtures) {
   test(`release gate rejects ${name}`, async () => {
-    const data = fixture(); mutate(data);
+    const original = fixture();
+    const snapshot = structuredClone(original);
+    const data = change(original);
+    assert.deepStrictEqual(original, snapshot, 'fixture variants must leave their input unchanged');
     await assert.rejects(gates(data));
   });
 }
 
 for (const conclusion of ['failure', 'cancelled', 'skipped', 'neutral', 'timed_out', 'action_required']) {
   test(`required trusted check ${conclusion} fails despite newer spoof success`, async () => {
-    const data = fixture();
-    data.checks[0].conclusion = conclusion;
-    data.checks.push({ ...data.checks[0], id: 999, conclusion: 'success', app: { id: 1, slug: 'spoof' } });
+    const base = withItem(fixture(), 'checks', 0, { conclusion });
+    const data = { ...base, checks: [...base.checks, { ...base.checks[0], id: 999, conclusion: 'success', app: { id: 1, slug: 'spoof' } }] };
     await assert.rejects(gates(data), /concluded/);
   });
 }
 
 test('newer display-name impostor cannot replace a failed trusted CI run', async () => {
-  const data = fixture(); data.runs[0].conclusion = 'failure';
-  data.runs.push({ ...data.runs[0], id: 999, workflow_id: 999, name: 'CI', conclusion: 'success' });
+  const base = withItem(fixture(), 'runs', 0, { conclusion: 'failure' });
+  const data = { ...base, runs: [...base.runs, { ...base.runs[0], id: 999, workflow_id: 999, name: 'CI', conclusion: 'success' }] };
   await assert.rejects(gates(data), /CI concluded failure/);
 });
 
 test('workflow IDs come from exact-path metadata and unrelated spoof results do not gate', async () => {
-  const data = fixture();
-  data.workflows.forEach((workflow, index) => { workflow.id = 900 + index; data.runs[index].workflow_id = workflow.id; });
-  data.runs.push({ ...data.runs[0], id: 999, workflow_id: 999, name: 'CI', conclusion: 'failure' });
-  data.checks.push({ ...data.checks[0], id: 999, conclusion: 'failure', app: { id: 1, slug: 'spoof' } });
+  const base = fixture();
+  const data = {
+    ...base,
+    workflows: base.workflows.map((workflow, index) => ({ ...workflow, id: 900 + index })),
+    runs: [...base.runs.map((run, index) => ({ ...run, workflow_id: 900 + index })), { ...base.runs[0], id: 999, workflow_id: 999, name: 'CI', conclusion: 'failure' }],
+    checks: [...base.checks, { ...base.checks[0], id: 999, conclusion: 'failure', app: { id: 1, slug: 'spoof' } }],
+  };
   await gates(data);
 });
 
 test('newer trusted pending run does not reuse older success', async () => {
-  const data = fixture();
-  data.runs.push({ ...data.runs[1], id: 12, status: 'queued', conclusion: null });
+  const base = fixture();
+  const data = { ...base, runs: [...base.runs, { ...base.runs[1], id: 12, status: 'queued', conclusion: null }] };
   await assert.rejects(gates(data), /Timed out|deadline/);
 });
 
 test('newer trusted attempt cannot reuse previous attempt jobs', async () => {
-  const data = fixture();
-  data.runs[1].run_attempt = 2;
+  const data = withItem(fixture(), 'runs', 1, { run_attempt: 2 });
   await assert.rejects(gates(data, url => url.includes('/attempts/2/jobs') ? response({ total_count: 2, jobs: data.jobs.slice(0, 2).map(job => ({ ...job, run_attempt: 2 })) }) : null));
 });
 
@@ -347,13 +356,75 @@ test('a new trusted run appearing during collection fails readiness', async () =
 });
 
 test('failure on a later check page cannot be hidden', async () => {
-  const data = fixture(); data.checks[2].conclusion = 'failure';
+  const data = withItem(fixture(), 'checks', 2, { conclusion: 'failure' });
   await assert.rejects(gates(data, url => {
     if (!url.includes('/check-runs?')) return null;
     return url.includes('page=2')
       ? response({ total_count: 3, check_runs: data.checks.slice(2) })
       : response({ total_count: 3, check_runs: data.checks.slice(0, 2) }, `<${url}&page=2>; rel="next"`);
   }), /concluded failure/);
+});
+
+// Pending diagnostics must identify the blocked gate without changing its decision.
+for (const [name, change, reason] of [
+  ['missing CI', d => ({ ...d, runs: d.runs.slice(1) }), 'CI run not found for release SHA'],
+  ['missing CodeQL', d => ({ ...d, runs: d.runs.slice(0, 1) }), 'CodeQL run not found for release SHA'],
+  ['running CI', d => withItem(d, 'runs', 0, { status: 'in_progress', conclusion: null }), 'CI is in_progress'],
+  ['queued CodeQL', d => withItem(d, 'runs', 1, { status: 'queued', conclusion: null }), 'CodeQL is queued'],
+  ['missing job', d => ({ ...d, jobs: d.jobs.slice(0, 2) }), 'CodeQL job "Analyze (python)" missing from selected attempt'],
+  ['missing check', d => ({ ...d, checks: d.checks.slice(0, 2) }), 'CodeQL check "Analyze (python)" missing or not bound to trusted job'],
+  ['untrusted check', d => withItem(d, 'checks', 0, { app: { id: 1, slug: 'spoof' } }), 'CodeQL check "Analyze (actions)" missing or not bound to trusted job'],
+  ['running job', d => withItem(d, 'jobs', 0, { status: 'in_progress', conclusion: null }), 'CodeQL job "Analyze (actions)" is in_progress'],
+  ['queued check', d => withItem(d, 'checks', 0, { status: 'queued', conclusion: null }), 'CodeQL check "Analyze (actions)" is queued'],
+]) {
+  test(`attempt exhaustion diagnoses ${name}`, async () => {
+    const original = fixture();
+    const snapshot = structuredClone(original);
+    await assert.rejects(gates(change(original)), error => {
+      assert.match(error.message, /Timed out/);
+      assert.ok(error.message.endsWith(`last pending gate: ${reason}`), error.message);
+      assert.ok(!error.message.includes(inputs.token));
+      return true;
+    });
+    assert.deepStrictEqual(original, snapshot);
+  });
+}
+
+test('attempt exhaustion reports a superseded trusted run', async () => {
+  const data = fixture(); let reads = 0;
+  await assert.rejects(gates(data, url => url.includes('/actions/runs?') && ++reads === 2
+    ? response({ total_count: 3, workflow_runs: [...data.runs, { ...data.runs[1], id: 12, status: 'queued', conclusion: null }] })
+    : null), /last pending gate: Trusted CI or CodeQL run changed during verification$/);
+});
+
+test('global deadline reports the latest pending gate and preserves its cause', async () => {
+  const data = withItem(fixture(), 'runs', 0, { status: 'queued', conclusion: null });
+  let reads = 0; let clock = 0;
+  const api = fakeApi(data, url => url.includes('/actions/runs?') && ++reads > 1
+    ? response({ total_count: 1, workflow_runs: [{ ...data.runs[0], status: 'completed', conclusion: 'success' }] })
+    : null);
+  await assert.rejects(waitForExactShaGates(inputs, api.fetchImpl, async delay => { clock += delay; }, {
+    attempts: 3, delayMs: 10, timeoutMs: 15, requestTimeoutMs: 10, now: () => clock,
+  }), error => {
+    assert.match(error.message, /deadline exceeded; last pending gate: CodeQL run not found for release SHA$/);
+    assert.match(error.cause.message, /deadline exceeded$/);
+    return true;
+  });
+  assert.strictEqual(reads, 2);
+});
+
+test('request deadline before assessment reports that no gate was assessed', async () => {
+  let signal;
+  await assert.rejects(waitForExactShaGates(inputs, async (_url, options) => {
+    signal = options.signal;
+    return { ...response(null), json: () => new Promise(() => {}) };
+  }, async () => {}, { ...once, requestTimeoutMs: 5 }), /deadline exceeded; last pending gate: no gate assessment completed$/);
+  assert.strictEqual(signal.aborted, true);
+});
+
+test('non-deadline errors retain identity even when their message mentions deadline', async () => {
+  const failure = new Error('synthetic deadline text is not a timeout classification');
+  await assert.rejects(gates(fixture(), () => { throw failure; }), error => error === failure);
 });
 
 test('API requests reject redirects and carry abort signals without dependency loading', async () => {
@@ -378,38 +449,44 @@ test('release input and retry bounds reject unsafe or unbounded values', () => {
 });
 
 test('an aborted global deadline covers a stalled retry sleep', async () => {
-  const data = fixture(); data.runs[0].status = 'queued'; data.runs[0].conclusion = null;
+  const data = withItem(fixture(), 'runs', 0, { status: 'queued', conclusion: null });
   let signal;
   await assert.rejects(waitForExactShaGates(inputs, fakeApi(data).fetchImpl, (_delay, provided) => {
     signal = provided;
     assert.ok(signal instanceof AbortSignal, 'abort signal required');
     return new Promise(() => {});
-  }, { attempts: 2, timeoutMs: 20, requestTimeoutMs: 10 }), /deadline/);
+  }, { attempts: 2, timeoutMs: 20, requestTimeoutMs: 10 }), /deadline exceeded; last pending gate: CI is queued$/);
   assert.strictEqual(signal.aborted, true);
 });
 
 test('signed annotated tag binds full ref, object SHA, name and direct commit', async () => {
   assert.strictEqual(await verifySignedAnnotatedTag(inputs, fakeApi().fetchImpl), tagSha);
 });
-for (const [name, pathPart, mutate] of [
-  ['different ref', '/git/ref/', p => { p.ref = 'refs/tags/v0.0.0'; }],
-  ['lightweight tag', '/git/ref/', p => { p.object.type = 'commit'; }],
-  ['malformed object SHA', '/git/ref/', p => { p.object.sha = 'bad'; }],
-  ['wrong signed name', '/git/tags/', p => { p.tag = 'v0.0.0'; }],
-  ['wrong returned object SHA', '/git/tags/', p => { p.sha = 'c'.repeat(40); }],
-  ['unverified signature', '/git/tags/', p => { p.verification.verified = false; }],
-  ['invalid verification reason', '/git/tags/', p => { p.verification.reason = 'unsigned'; }],
-  ['nested tag', '/git/tags/', p => { p.object.type = 'tag'; }],
-  ['wrong target commit', '/git/tags/', p => { p.object.sha = 'c'.repeat(40); }],
+for (const [name, pathPart, change] of [
+  ['different ref', '/git/ref/', p => ({ ...p, ref: 'refs/tags/v0.0.0' })],
+  ['lightweight tag', '/git/ref/', p => ({ ...p, object: { ...p.object, type: 'commit' } })],
+  ['malformed object SHA', '/git/ref/', p => ({ ...p, object: { ...p.object, sha: 'bad' } })],
+  ['wrong signed name', '/git/tags/', p => ({ ...p, tag: 'v0.0.0' })],
+  ['wrong returned object SHA', '/git/tags/', p => ({ ...p, sha: 'c'.repeat(40) })],
+  ['unverified signature', '/git/tags/', p => ({ ...p, verification: { ...p.verification, verified: false } })],
+  ['invalid verification reason', '/git/tags/', p => ({ ...p, verification: { ...p.verification, reason: 'unsigned' } })],
+  ['nested tag', '/git/tags/', p => ({ ...p, object: { ...p.object, type: 'tag' } })],
+  ['wrong target commit', '/git/tags/', p => ({ ...p, object: { ...p.object, sha: 'c'.repeat(40) } })],
 ]) {
   test(`signed tag rejects ${name}`, async () => {
     const base = fakeApi();
+    let observed = [];
     await assert.rejects(verifySignedAnnotatedTag(inputs, async (url, options) => {
       const result = await base.fetchImpl(url, options);
       const payload = await result.json();
-      if (url.includes(pathPart)) mutate(payload);
-      return response(payload);
+      const snapshot = structuredClone(payload);
+      const changed = url.includes(pathPart) ? change(payload) : payload;
+      observed = [...observed, { payload, snapshot }];
+      return response(changed);
     }));
+    for (const { payload, snapshot } of observed) {
+      assert.deepStrictEqual(payload, snapshot, 'tag variants must leave their input unchanged');
+    }
   });
 }
 
@@ -488,7 +565,7 @@ test('stalled headers and response bodies are aborted by the request deadline', 
 });
 
 test('global deadline includes retries and prevents further requests', async () => {
-  const data = fixture(); data.runs[0].status = 'queued'; data.runs[0].conclusion = null;
+  const data = withItem(fixture(), 'runs', 0, { status: 'queued', conclusion: null });
   let clock = 0; let sleeps = 0;
   await assert.rejects(waitForExactShaGates(inputs, fakeApi(data).fetchImpl, async delay => { clock += delay; sleeps += 1; }, {
     attempts: 5, delayMs: 10, timeoutMs: 15, requestTimeoutMs: 10, now: () => clock,

@@ -79,6 +79,8 @@ function setting(value, fallback, maximum) {
   return parsed;
 }
 
+class ReleaseGateDeadlineError extends Error {}
+
 function createGithubClient(inputs, fetchImpl = fetch, options = {}) {
   validateInputs(inputs);
   const now = options.now || (() => performance.now());
@@ -88,7 +90,7 @@ function createGithubClient(inputs, fetchImpl = fetch, options = {}) {
 
   function remaining() {
     const left = deadline - now();
-    if (left <= 0) throw new Error('Release gate global deadline exceeded');
+    if (left <= 0) throw new ReleaseGateDeadlineError('Release gate global deadline exceeded');
     return left;
   }
 
@@ -101,7 +103,7 @@ function createGithubClient(inputs, fetchImpl = fetch, options = {}) {
         new Promise((_, reject) => {
           timer = setTimeout(() => {
             controller.abort();
-            reject(new Error('Release gate request or global deadline exceeded'));
+            reject(new ReleaseGateDeadlineError('Release gate request or global deadline exceeded'));
           }, Math.min(limit, remaining()));
         }),
       ]);
@@ -253,8 +255,9 @@ function selectRuns(runs, inputs, trusted) {
   return { ci: select(trusted.ci, 'push'), codeql: select(trusted.codeql, 'dynamic') };
 }
 
-function statusOf(result, label) {
-  if (!result || result.status !== 'completed') return { state: 'pending' };
+function statusOf(result, label, pendingLabel = label) {
+  if (!result) return { state: 'pending', reason: `${pendingLabel} run not found for release SHA` };
+  if (result.status !== 'completed') return { state: 'pending', reason: `${pendingLabel} is ${result.status}` };
   return result.conclusion === 'success' ? { state: 'passed' }
     : { state: 'failed', reason: `${label} concluded ${result.conclusion}` };
 }
@@ -272,7 +275,7 @@ function assessExactShaGates(selected, checks, jobs, inputs) {
     const matches = jobs.filter(job => job.name === name);
     if (matches.length > 1) throw new Error('Ambiguous required CodeQL job');
     const job = matches[0];
-    if (!job) return { state: 'pending' };
+    if (!job) return { state: 'pending', reason: `CodeQL job "${name}" missing from selected attempt` };
     if (job.run_id !== run.id || job.run_attempt !== run.run_attempt
       || job.head_sha !== inputs.releaseSha || job.head_branch !== 'main') {
       throw new Error('CodeQL job does not belong to the selected run attempt');
@@ -281,9 +284,11 @@ function assessExactShaGates(selected, checks, jobs, inputs) {
       === `https://api.github.com/repos/${inputs.repository}/check-runs/${candidate.id}`);
     if (!check || check.name !== name || check.head_sha !== inputs.releaseSha
       || check.check_suite.id !== run.check_suite_id || check.app.id !== ACTIONS_APP.id
-      || check.app.slug !== ACTIONS_APP.slug) return { state: 'pending' };
-    for (const result of [job, check]) {
-      const assessment = statusOf(result, name);
+      || check.app.slug !== ACTIONS_APP.slug) {
+      return { state: 'pending', reason: `CodeQL check "${name}" missing or not bound to trusted job` };
+    }
+    for (const [kind, result] of [['job', job], ['check', check]]) {
+      const assessment = statusOf(result, name, `CodeQL ${kind} "${name}"`);
       if (assessment.state !== 'passed') return assessment;
     }
   }
@@ -301,30 +306,39 @@ async function waitForExactShaGates(inputs, fetchImpl = fetch, sleep = defaultSl
   const client = options.client || createGithubClient(inputs, fetchImpl, options);
   const attempts = setting(options.attempts ?? process.env.RELEASE_GATE_ATTEMPTS, DEFAULT_ATTEMPTS, DEFAULT_ATTEMPTS);
   const delay = setting(options.delayMs ?? process.env.RELEASE_GATE_DELAY_MS, DEFAULT_DELAY_MS, DEFAULT_DELAY_MS);
-  const trusted = await trustedProducers(client, inputs);
-  const readRuns = async () => selectRuns(await client.pages(
-    `/actions/runs?head_sha=${inputs.releaseSha}&branch=main&per_page=100`, 'workflow_runs', runShape
-  ), inputs, trusted);
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const selected = await readRuns();
-    let assessment = statusOf(selected.ci, 'CI');
-    if (assessment.state === 'passed') assessment = statusOf(selected.codeql, 'CodeQL');
-    if (assessment.state === 'passed') {
-      const run = selected.codeql;
-      const jobs = await client.pages(`/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`, 'jobs', jobShape);
-      const checks = await client.pages(`/check-suites/${run.check_suite_id}/check-runs?filter=all&per_page=100`, 'check_runs', checkShape);
-      assessment = assessExactShaGates(selected, checks, jobs, inputs);
+  let lastReason = 'no gate assessment completed';
+  try {
+    const trusted = await trustedProducers(client, inputs);
+    const readRuns = async () => selectRuns(await client.pages(
+      `/actions/runs?head_sha=${inputs.releaseSha}&branch=main&per_page=100`, 'workflow_runs', runShape
+    ), inputs, trusted);
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const selected = await readRuns();
+      let assessment = statusOf(selected.ci, 'CI');
+      if (assessment.state === 'passed') assessment = statusOf(selected.codeql, 'CodeQL');
       if (assessment.state === 'passed') {
-        // Do not approve an attempt superseded while its jobs/checks were read.
-        const finalRuns = await readRuns();
-        if (JSON.stringify(finalRuns) === JSON.stringify(selected)) return;
-        assessment = { state: 'pending' };
+        const run = selected.codeql;
+        const jobs = await client.pages(`/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`, 'jobs', jobShape);
+        const checks = await client.pages(`/check-suites/${run.check_suite_id}/check-runs?filter=all&per_page=100`, 'check_runs', checkShape);
+        assessment = assessExactShaGates(selected, checks, jobs, inputs);
+        if (assessment.state === 'passed') {
+          // Do not approve an attempt superseded while its jobs/checks were read.
+          const finalRuns = await readRuns();
+          if (JSON.stringify(finalRuns) === JSON.stringify(selected)) return;
+          assessment = { state: 'pending', reason: 'Trusted CI or CodeQL run changed during verification' };
+        }
       }
+      if (assessment.state === 'failed') throw new Error(assessment.reason);
+      lastReason = assessment.reason;
+      if (attempt < attempts) await client.pause(signal => sleep(delay, signal));
     }
-    if (assessment.state === 'failed') throw new Error(assessment.reason);
-    if (attempt < attempts) await client.pause(signal => sleep(delay, signal));
+  } catch (error) {
+    if (error instanceof ReleaseGateDeadlineError) {
+      throw new Error(`${error.message}; last pending gate: ${lastReason}`, { cause: error });
+    }
+    throw error;
   }
-  throw new Error('Timed out waiting for successful exact-SHA CI and CodeQL checks');
+  throw new Error(`Timed out waiting for successful exact-SHA CI and CodeQL checks; last pending gate: ${lastReason}`);
 }
 
 async function main() {
