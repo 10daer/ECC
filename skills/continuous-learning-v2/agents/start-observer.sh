@@ -35,7 +35,7 @@ PYTHON_CMD="${CLV2_PYTHON_CMD:-}"
 # directory can be reached through symlinks or lexical path aliases, which
 # would otherwise make the same project appear to have multiple PID files.
 if [ -d "$PROJECT_DIR" ]; then
-  _CLV2_CANONICAL_PROJECT_DIR=$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P) || _CLV2_CANONICAL_PROJECT_DIR=""
+  _CLV2_CANONICAL_PROJECT_DIR=$(cd -P "$PROJECT_DIR" 2>/dev/null && pwd -P) || _CLV2_CANONICAL_PROJECT_DIR=""
   if [ -n "$_CLV2_CANONICAL_PROJECT_DIR" ]; then
     PROJECT_DIR="$_CLV2_CANONICAL_PROJECT_DIR"
   fi

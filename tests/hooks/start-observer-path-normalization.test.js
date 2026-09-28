@@ -57,6 +57,7 @@ try {
   const actualRoot = path.join(testRoot, 'homunculus');
   const aliasRoot = path.join(testRoot, 'homunculus-alias');
   fs.mkdirSync(actualRoot, { recursive: true });
+  fs.mkdirSync(path.join(actualRoot, 'child'), { recursive: true });
   fs.mkdirSync(path.join(testRoot, 'unused'), { recursive: true });
 
   const canonicalStorage = storageFor(actualRoot);
@@ -80,6 +81,15 @@ try {
     fs.symlinkSync(actualRoot, aliasRoot, 'dir');
     const symlinkStorage = storageFor(aliasRoot);
     assert.strictEqual(symlinkStorage, canonicalStorage, 'symlink route must reuse the physical observer key');
+
+    const childAlias = path.join(testRoot, 'homunculus-child-alias');
+    fs.symlinkSync(path.join(actualRoot, 'child'), childAlias, 'dir');
+    const symlinkDotDotStorage = storageFor(`${childAlias}${path.sep}..`);
+    assert.strictEqual(
+      symlinkDotDotStorage,
+      canonicalStorage,
+      'symlink followed by .. must reuse the physical observer key'
+    );
     console.log('PASS: observer storage key is stable across symlink and .. aliases');
   } catch (error) {
     if (!['EPERM', 'EACCES', 'ENOSYS'].includes(error.code)) throw error;
