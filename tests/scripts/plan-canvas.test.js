@@ -21,6 +21,11 @@ const { createPlanCanvasServer } = require('../../scripts/lib/plan-canvas/server
 
 class SkippedTest extends Error {}
 
+function failureText(error) {
+  try { return error?.stack || error?.message || String(error); }
+  catch { return 'Unprintable thrown value'; }
+}
+
 function createTestRunner(log = console.log) {
   let results = { passed: 0, failed: 0, skipped: 0 };
   return {
@@ -36,7 +41,7 @@ function createTestRunner(log = console.log) {
           log(`  SKIP ${name}: ${error.message}`);
         } else {
           results = { ...results, failed: results.failed + 1 };
-          log(`  FAIL ${name}\n    Error: ${error.stack || error.message}`);
+          log(`  FAIL ${name}\n    Error: ${failureText(error)}`);
         }
       }
     }
@@ -100,6 +105,42 @@ async function withFixtureCleanup(callback, cleanups) {
   if (didThrow) throw primary;
   if (cleanupThrew) throw firstCleanup;
   return result;
+}
+
+// Explicit close and finally cleanup await the same attempt, including failure.
+function onceCleanup(cleanup) {
+  let pending;
+  return () => {
+    if (!pending) pending = Promise.resolve().then(cleanup);
+    return pending;
+  };
+}
+
+async function withResourceScope(callback) {
+  const clients = [];
+  const servers = [];
+  const roots = [];
+  const own = (group, cleanup) => {
+    const close = onceCleanup(cleanup);
+    group.push(close);
+    return close;
+  };
+  const resources = {
+    client: cleanup => own(clients, cleanup),
+    server: cleanup => own(servers, cleanup),
+    root: cleanup => own(roots, cleanup),
+  };
+  return withFixtureCleanup(() => callback(resources), () => [...clients, ...servers, ...roots]);
+}
+
+// Requests are owned before setup writes or awaits. Destroy the response and
+// request independently so one cleanup failure cannot leave the other open.
+function ownHttpClient(req, getResponse, resources) {
+  const cleanup = () => withFixtureCleanup(() => {}, () => {
+    const response = getResponse();
+    return [...(response ? [() => response.destroy()] : []), () => req.destroy()];
+  });
+  return resources ? resources.client(cleanup) : onceCleanup(cleanup);
 }
 
 // Capture fresh real dispatchers without binding sockets. Each request captures
@@ -673,10 +714,13 @@ async function fixtureIsolationTests(test) {
   }
 }
 
-function request(port, method, requestPath, { body = null, headers = {} } = {}) {
-  return new Promise((resolve, reject) => {
+function request(port, method, requestPath, {
+  body = null, headers = {}, resources, transport = http, onData = () => {}
+} = {}) {
+  let response;
+  const pending = new Promise((resolve, reject) => {
     const payload = body === null ? null : JSON.stringify(body);
-    const req = http.request(
+    const req = transport.request(
       {
         host: '127.0.0.1',
         port,
@@ -688,17 +732,24 @@ function request(port, method, requestPath, { body = null, headers = {} } = {}) 
           : headers
       },
       res => {
+        response = res;
+        res.on('error', reject);
         let data = '';
         res.on('data', chunk => {
           data += chunk;
+          onData(chunk);
         });
         res.on('end', () => resolve({ statusCode: res.statusCode, headers: res.headers, body: data }));
       }
     );
+    ownHttpClient(req, () => response, resources);
     req.on('error', reject);
     if (payload) req.write(payload);
     req.end();
   });
+  // Cleanup can reject an abandoned long-poll; awaiters still see this rejection.
+  pending.catch(() => {});
+  return pending;
 }
 
 function jsonBody(res) {
@@ -706,13 +757,16 @@ function jsonBody(res) {
 }
 
 // Open an SSE stream and collect parsed events into `received`.
-function openSse(port, key) {
+function openSse(port, key, { resources, transport = http } = {}) {
   const received = [];
   let close = () => {};
+  let response;
   const ready = new Promise((resolve, reject) => {
-    const req = http.get(
+    const req = transport.get(
       { host: '127.0.0.1', port, path: `/events/${key}`, agent: false },
       res => {
+        response = res;
+        res.on('error', reject);
         let buffer = '';
         res.on('data', chunk => {
           buffer += chunk;
@@ -730,9 +784,10 @@ function openSse(port, key) {
         resolve();
       }
     );
+    close = ownHttpClient(req, () => response, resources);
     req.on('error', reject);
-    close = () => req.destroy();
   });
+  ready.catch(() => {});
   return { received, ready, close: () => close() };
 }
 
@@ -751,6 +806,128 @@ function waitFor(predicate, { timeoutMs = 3000, intervalMs = 20 } = {}) {
   });
 }
 
+// Deterministic ownership checks: no socket/listener or shared module mutation.
+async function integrationCleanupTests(test) {
+  async function capture(callback) {
+    try { return { threw: false, value: await callback() }; }
+    catch (error) { return { threw: true, error }; }
+  }
+  for (const primary of [Object.freeze(new Error('primary integration failure')), 0, false, null, undefined]) {
+    await test(`integration resource cleanup preserves ${String(primary)} and attempts all stages`, async () => {
+      const stages = [];
+      const secondary = new Error('cleanup failure');
+      const result = await capture(() => withResourceScope(async resources => {
+        resources.root(() => { stages.push('root'); throw secondary; });
+        resources.server(() => { stages.push('server'); throw secondary; });
+        resources.client(() => { stages.push('client'); throw secondary; });
+        throw primary;
+      }));
+      assert.strictEqual(result.threw, true);
+      assert.ok(Object.is(result.error, primary));
+      assert.deepStrictEqual(stages, ['client', 'server', 'root']);
+    });
+    await test(`runner records falsy/frozen failure ${String(primary)} without replacing it`, async () => {
+      const output = [];
+      const runner = createTestRunner(line => output.push(line));
+      await runner.test('failure', () => { throw primary; });
+      assert.deepStrictEqual(runner.results, { passed: 0, failed: 1, skipped: 0 });
+      assert.strictEqual(output.length, 1);
+      assert.match(output[0], /FAIL failure/);
+    });
+  }
+  await test('cleanup-only failure reports the first failure after every owned stage', async () => {
+    const first = Object.freeze(new Error('client cleanup'));
+    const stages = [];
+    const result = await capture(() => withResourceScope(resources => {
+      resources.client(() => { stages.push('client'); throw first; });
+      resources.server(() => { stages.push('server'); throw new Error('server cleanup'); });
+      resources.root(() => { stages.push('root'); throw new Error('root cleanup'); });
+    }));
+    assert.strictEqual(result.error, first);
+    assert.deepStrictEqual(stages, ['client', 'server', 'root']);
+  });
+  await test('explicit server close and automatic cleanup share one close attempt', async () => {
+    let attempts = 0;
+    await withResourceScope(async resources => {
+      const close = resources.server(async () => { attempts++; });
+      await close();
+      await close();
+    });
+    assert.strictEqual(attempts, 1);
+  });
+  await test('second acquisition failure still closes the first server and roots', async () => {
+    const primary = new Error('second acquisition');
+    const stages = [];
+    const result = await capture(() => withResourceScope(resources => {
+      resources.root(() => stages.push('root-one'));
+      resources.server(() => stages.push('server-one'));
+      resources.root(() => stages.push('root-two'));
+      throw primary;
+    }));
+    assert.strictEqual(result.error, primary);
+    assert.deepStrictEqual(stages, ['server-one', 'root-one', 'root-two']);
+  });
+  function fakeHttp() {
+    const { EventEmitter } = require('events');
+    const stages = [];
+    const request = new EventEmitter();
+    const response = new EventEmitter();
+    let respond;
+    request.write = () => {};
+    request.end = () => {};
+    request.destroy = () => { stages.push('request'); request.emit('error', new Error('owned request destroyed')); };
+    response.destroy = () => { stages.push('response'); };
+    return {
+      stages, request, response,
+      transport: { get(_options, callback) { respond = callback; return request; }, request(_options, callback) { respond = callback; return request; } },
+      respond() { respond(response); },
+    };
+  }
+  for (const headers of [false, true]) {
+    await test(`SSE failure cleanup owns request before headers=${headers}`, async () => {
+      const fake = fakeHttp();
+      const primary = new Error('SSE assertion');
+      let sse;
+      const result = await capture(() => withResourceScope(async resources => {
+        sse = openSse(1, 'synthetic', { resources, transport: fake.transport });
+        if (headers) { fake.respond(); await sse.ready; }
+        throw primary;
+      }));
+      assert.strictEqual(result.error, primary);
+      assert.deepStrictEqual(fake.stages, headers ? ['response', 'request'] : ['request']);
+      await sse.ready.catch(() => {});
+      await sse.close();
+      assert.strictEqual(fake.stages.filter(stage => stage === 'request').length, 1);
+    });
+  }
+  await test('abandoned long-poll cleanup reaps its client without an unhandled rejection', async () => {
+    const fake = fakeHttp();
+    const primary = new Error('heartbeat assertion');
+    let pending;
+    const chunks = [];
+    const result = await capture(() => withResourceScope(async resources => {
+      pending = request(1, 'GET', '/synthetic', { resources, transport: fake.transport, onData: chunk => chunks.push(chunk.toString()) });
+      fake.respond();
+      fake.response.emit('data', Buffer.from(' '));
+      throw primary;
+    }));
+    assert.strictEqual(result.error, primary);
+    assert.deepStrictEqual(chunks, [' ']);
+    assert.deepStrictEqual(fake.stages, ['response', 'request']);
+    assert.strictEqual((await capture(() => pending)).threw, true);
+  });
+  await test('request setup failure after acquisition closes its client and keeps the original error', async () => {
+    const fake = fakeHttp();
+    const primary = Object.freeze(new Error('write failed'));
+    fake.request.write = () => { throw primary; };
+    const result = await capture(() => withResourceScope(resources => request(1, 'POST', '/synthetic', {
+      body: {}, resources, transport: fake.transport,
+    })));
+    assert.strictEqual(result.error, primary);
+    assert.deepStrictEqual(fake.stages, ['request']);
+  });
+}
+
 async function main() {
   console.log('\n=== Testing plan-canvas server ===\n');
 
@@ -759,425 +936,430 @@ async function main() {
   await artifactSecurityTests(test);
   await artifactRaceTests(test);
   await fixtureIsolationTests(test);
+  await integrationCleanupTests(test);
   if (process.argv.includes('--artifact-security-only')) {
     printResults(suite.results);
     return;
   }
 
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-server-'));
-  const artifact = path.join(tmp, 'demo.plan.md');
-  fs.writeFileSync(artifact, '# Plan: Demo\n\n## Files to Change\n\n| File | Action |\n|---|---|\n| `a.js` | UPDATE |\n');
-  const htmlArtifact = path.join(tmp, 'report.html');
-  fs.writeFileSync(htmlArtifact, '<!DOCTYPE html><html><body><h1>Report</h1></body></html>');
-  fs.writeFileSync(path.join(tmp, 'style.css'), 'body { color: red }');
-  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-outside-'));
-  fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'secret');
+  await withResourceScope(async resources => {
+    const integrationTest = (name, callback) => test(name, () => withResourceScope(owned => callback({
+      request: (port, method, requestPath, options = {}) => request(port, method, requestPath, { ...options, resources: owned }),
+      openSse: (port, key) => openSse(port, key, { resources: owned }),
+      ownServer: canvas => owned.server(() => canvas.close()),
+    })));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-server-'));
+    resources.root(() => fs.rmSync(tmp, { recursive: true, force: true }));
+    const artifact = path.join(tmp, 'demo.plan.md');
+    fs.writeFileSync(artifact, '# Plan: Demo\n\n## Files to Change\n\n| File | Action |\n|---|---|\n| `a.js` | UPDATE |\n');
+    const htmlArtifact = path.join(tmp, 'report.html');
+    fs.writeFileSync(htmlArtifact, '<!DOCTYPE html><html><body><h1>Report</h1></body></html>');
+    fs.writeFileSync(path.join(tmp, 'style.css'), 'body { color: red }');
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-outside-'));
+    resources.root(() => fs.rmSync(outsideDir, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'secret');
 
-  const store = createSessionStore({ stateDir: path.join(tmp, 'state') });
-  let idleFired = false;
-  const canvas = createPlanCanvasServer({
-    store,
-    version: '9.9.9-test',
-    heartbeatMs: 25,
-    idleTimeoutMs: 0,
-    onIdleShutdown: () => {
-      idleFired = true;
-    }
-  });
-  const { port } = await canvas.listen(0);
-
-  let key = null;
-  let htmlKey = null;
-
-  await test('GET /health identifies the app and version', async () => {
-    const res = await request(port, 'GET', '/health');
-    assert.deepStrictEqual(jsonBody(res), { ok: true, app: 'ecc-plan-canvas', version: '9.9.9-test' });
-  });
-
-  await test('requests with a non-loopback Host header are rejected', async () => {
-    const res = await request(port, 'GET', '/health', { headers: { host: 'evil.example.com' } });
-    assert.strictEqual(res.statusCode, 403);
-  });
-
-  await test('requests with a cross-site Origin are rejected', async () => {
-    const res = await request(port, 'POST', '/shutdown', { headers: { origin: 'https://evil.example.com' } });
-    assert.strictEqual(res.statusCode, 403);
-  });
-
-  await test('POST /api/sessions opens a session for an existing artifact', async () => {
-    const res = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
-    assert.strictEqual(res.statusCode, 200);
-    const body = jsonBody(res);
-    assert.strictEqual(body.status, 'open');
-    assert.match(body.key, /^[a-f0-9]{12}$/);
-    key = body.key;
-  });
-
-  await test('POST /api/sessions 404s for a missing artifact', async () => {
-    const res = await request(port, 'POST', '/api/sessions', { body: { file: path.join(tmp, 'nope.md') } });
-    assert.strictEqual(res.statusCode, 404);
-  });
-
-  await test('GET /canvas/:key serves the ECC chrome with CSP', async () => {
-    const res = await request(port, 'GET', `/canvas/${key}`);
-    assert.strictEqual(res.statusCode, 200);
-    assert.ok(res.headers['content-security-policy'].includes("default-src 'self'"));
-    assert.ok(res.body.includes('Plan Canvas'));
-    assert.ok(res.body.includes('pc-session'));
-    assert.ok(res.body.includes('Approve plan'));
-    assert.ok(res.body.includes('sandbox="allow-scripts allow-forms allow-popups"'));
-  });
-
-  await test('markdown artifacts render in the ECC plan template with the SDK', async () => {
-    const res = await request(port, 'GET', `/artifact/${key}/`);
-    assert.strictEqual(res.statusCode, 200);
-    assert.ok(res.body.includes('<h1 id="plan-demo">'));
-    assert.ok(res.body.includes('<table>'));
-    assert.ok(res.body.includes('<script src="/sdk.js">'));
-    assert.strictEqual(res.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
-    // No diagram in this plan → no Mermaid loader shipped.
-    assert.ok(!res.body.includes('mermaid.run'));
-  });
-
-  await test('a plan containing ```mermaid serves the themed Mermaid loader', async () => {
-    const diagram = path.join(tmp, 'flow.plan.md');
-    fs.writeFileSync(diagram, '# Flow\n\n```mermaid\nflowchart LR\n  A --> B\n```\n');
-    const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: diagram } }));
-    const res = await request(port, 'GET', `/artifact/${opened.key}/`);
-    assert.ok(res.body.includes('<pre class="mermaid">'), 'diagram container present');
-    assert.ok(res.body.includes('mermaid.run'), 'loader injected');
-    assert.ok(res.body.includes("securityLevel: 'strict'"), 'sanitizing config present');
-    await request(port, 'POST', '/api/end', { body: { file: diagram } });
-  });
-
-  await test('HTML artifacts pass through with the SDK injected before </body>', async () => {
-    const open = await request(port, 'POST', '/api/sessions', { body: { file: htmlArtifact } });
-    htmlKey = jsonBody(open).key;
-    const res = await request(port, 'GET', `/artifact/${htmlKey}/`);
-    assert.ok(res.body.includes('<h1>Report</h1>'));
-    assert.ok(res.body.includes('<script src="/sdk.js"></script>\n</body>'));
-  });
-
-  await test('sibling assets are served, traversal is blocked', async () => {
-    const ok = await request(port, 'GET', `/artifact/${key}/style.css`);
-    assert.strictEqual(ok.statusCode, 200);
-    assert.ok(ok.body.includes('color: red'));
-    const escape = await request(port, 'GET', `/artifact/${key}/..%2F${path.basename(outsideDir)}%2Fsecret.txt`);
-    assert.strictEqual(escape.statusCode, 403);
-  });
-
-  await test('artifact responses carry a sandbox CSP (direct-navigation hardening)', async () => {
-    const md = await request(port, 'GET', `/artifact/${key}/`);
-    assert.strictEqual(md.statusCode, 200);
-    assert.strictEqual(md.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
-    const html = await request(port, 'GET', `/artifact/${htmlKey}/`);
-    assert.strictEqual(html.statusCode, 200);
-    assert.strictEqual(html.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
-  });
-
-  await test('missing-artifact 404 escapes the file path', async () => {
-    // Quotes and ampersands are escapable on every platform (Windows
-    // rejects < > in filenames, so angle brackets stay out of fixtures).
-    const evilFile = path.join(tmp, `evil'b&xss.plan.md`);
-    fs.writeFileSync(evilFile, '# Evil\n');
-    const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: evilFile } }));
-    fs.rmSync(evilFile);
-    const res = await request(port, 'GET', `/artifact/${opened.key}/`);
-    assert.strictEqual(res.statusCode, 404);
-    assert.ok(!res.body.includes(`evil'b&xss`), 'raw filename must not appear in the 404 page');
-    assert.ok(res.body.includes('evil&#39;b&amp;xss'), 'filename must be HTML-escaped in the 404 page');
-  });
-
-  await test('symlinked sibling assets escaping the artifact dir are blocked', async () => {
-    createTestSymlink(path.join(outsideDir, 'secret.txt'), path.join(tmp, 'evil-link.txt'));
-    createTestSymlink(path.join(tmp, 'style.css'), path.join(tmp, 'ok-link.css'));
-    const blocked = await request(port, 'GET', `/artifact/${key}/evil-link.txt`);
-    assert.strictEqual(blocked.statusCode, 403);
-    const allowed = await request(port, 'GET', `/artifact/${key}/ok-link.css`);
-    assert.strictEqual(allowed.statusCode, 200);
-    assert.ok(allowed.body.includes('color: red'));
-  });
-
-  await test('served HTML siblings carry the sandbox CSP', async () => {
-    fs.writeFileSync(path.join(tmp, 'note.html'), '<!DOCTYPE html><html><body><p>hi</p></body></html>');
-    const res = await request(port, 'GET', `/artifact/${key}/note.html`);
-    assert.strictEqual(res.statusCode, 200);
-    assert.strictEqual(res.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
-  });
-
-  await test('symlinked assets take their MIME from the link name', async () => {
-    fs.writeFileSync(path.join(tmp, 'realfile'), 'body { color: blue }');
-    createTestSymlink(path.join(tmp, 'realfile'), path.join(tmp, 'theme.css'));
-    const res = await request(port, 'GET', `/artifact/${key}/theme.css`);
-    assert.strictEqual(res.statusCode, 200);
-    assert.ok(String(res.headers['content-type']).startsWith('text/css'));
-  });
-
-  await test('static chrome assets are served', async () => {
-    for (const asset of ['/canvas.css', '/client.js', '/sdk.js']) {
-      const res = await request(port, 'GET', asset);
-      assert.strictEqual(res.statusCode, 200, `${asset} should be 200`);
-    }
-  });
-
-  await test('await with timeoutMs returns waiting when idle', async () => {
-    const res = await request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}&timeoutMs=50`);
-    assert.strictEqual(jsonBody(res).status, 'waiting');
-  });
-
-  await test('await returns missing for files without a session', async () => {
-    const res = await request(port, 'GET', `/api/await?file=${encodeURIComponent(path.join(tmp, 'other.md'))}`);
-    assert.strictEqual(jsonBody(res).status, 'missing');
-  });
-
-  await test('browser feedback wakes a blocking await; presence transitions', async () => {
-    const sse = openSse(port, key);
-    await sse.ready;
-    const awaitPromise = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'listening'));
-
-    const post = await request(port, 'POST', `/api/session/${key}/feedback`, {
-      body: {
-        items: [
-          { kind: 'annotation', text: 'tighten this', anchor: { selector: 'h2:nth-of-type(1)', tag: 'h2', snippet: 'Files to Change' } },
-          { kind: 'verdict', verdict: 'request-changes' }
-        ]
+    const store = createSessionStore({ stateDir: path.join(tmp, 'state') });
+    let idleFired = false;
+    const canvas = createPlanCanvasServer({
+      store,
+      version: '9.9.9-test',
+      heartbeatMs: 25,
+      idleTimeoutMs: 0,
+      onIdleShutdown: () => {
+        idleFired = true;
       }
     });
-    assert.strictEqual(jsonBody(post).accepted, 2);
+    const closeCanvas = resources.server(() => canvas.close());
+    const { port } = await canvas.listen(0);
 
-    const result = jsonBody(await awaitPromise);
-    assert.strictEqual(result.status, 'feedback');
-    assert.strictEqual(result.items.length, 2);
-    assert.strictEqual(result.items[0].anchor.selector, 'h2:nth-of-type(1)');
-    assert.strictEqual(result.items[1].verdict, 'request-changes');
+    let key = null;
+    let htmlKey = null;
 
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'thinking'));
-    await waitFor(() => sse.received.some(e => e.event === 'chat-sync' && e.data.chat.length === 2));
-    sse.close();
-  });
-
-  // Regression: feedback sent with nobody parked on `await` used to leave the
-  // pill claiming "agent working" while the message sat undelivered forever.
-  await test('feedback with no listener reports queued, not working', async () => {
-    const queuedArtifact = path.join(tmp, 'queued.plan.md');
-    fs.writeFileSync(queuedArtifact, '# Plan: Queued\n');
-    const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: queuedArtifact } }));
-    const sse = openSse(port, opened.key);
-    await sse.ready;
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'waiting'));
-
-    const post = await request(port, 'POST', `/api/session/${opened.key}/feedback`, {
-      body: { items: [{ kind: 'chat', text: 'anyone there?' }] }
+    await integrationTest('GET /health identifies the app and version', async ({ request }) => {
+      const res = await request(port, 'GET', '/health');
+      assert.deepStrictEqual(jsonBody(res), { ok: true, app: 'ecc-plan-canvas', version: '9.9.9-test' });
     });
-    assert.strictEqual(jsonBody(post).presence, 'queued');
-    assert.strictEqual(canvas.presenceFor(opened.key), 'queued');
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'queued'));
 
-    // Draining it hands the batch over and flips the indicator to thinking.
-    const drained = jsonBody(await request(port, 'GET', `/api/await?key=${opened.key}&timeoutMs=0`));
-    assert.strictEqual(drained.status, 'feedback');
-    assert.strictEqual(canvas.presenceFor(opened.key), 'thinking');
-    sse.close();
-  });
-
-  await test('typing endpoint drives the indicator and reply clears it', async () => {
-    const typingArtifact = path.join(tmp, 'typing.plan.md');
-    fs.writeFileSync(typingArtifact, '# Plan: Typing\n');
-    const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: typingArtifact } }));
-    const sse = openSse(port, opened.key);
-    await sse.ready;
-
-    const typing = await request(port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'typing' } });
-    assert.strictEqual(jsonBody(typing).presence, 'typing');
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'typing'));
-
-    const thinking = await request(port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'thinking' } });
-    assert.strictEqual(jsonBody(thinking).presence, 'thinking');
-
-    const bad = await request(port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'dancing' } });
-    assert.strictEqual(bad.statusCode, 400);
-
-    // A landed reply must take the bubble down, not leave it spinning.
-    await request(port, 'POST', `/api/session/${opened.key}/reply`, { body: { text: 'done' } });
-    assert.strictEqual(canvas.presenceFor(opened.key), 'waiting');
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'waiting'));
-    sse.close();
-  });
-
-  await test('thinking and typing states expire instead of sticking', async () => {
-    const staleArtifact = path.join(tmp, 'stale.plan.md');
-    fs.writeFileSync(staleArtifact, '# Plan: Stale\n');
-    const staleStore = createSessionStore({ stateDir: path.join(tmp, 'stale-state') });
-    const staleCanvas = createPlanCanvasServer({
-      store: staleStore,
-      version: '9.9.9-test',
-      idleTimeoutMs: 0,
-      thinkingStaleMs: 40,
-      typingExpiryMs: 20,
-      presenceSweepMs: 0
+    await integrationTest('requests with a non-loopback Host header are rejected', async ({ request }) => {
+      const res = await request(port, 'GET', '/health', { headers: { host: 'evil.example.com' } });
+      assert.strictEqual(res.statusCode, 403);
     });
-    const bound = await staleCanvas.listen(0);
-    const opened = jsonBody(await request(bound.port, 'POST', '/api/sessions', { body: { file: staleArtifact } }));
 
-    await request(bound.port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'typing' } });
-    assert.strictEqual(staleCanvas.presenceFor(opened.key), 'typing');
-    await new Promise(resolve => setTimeout(resolve, 60));
-    assert.strictEqual(staleCanvas.presenceFor(opened.key), 'waiting');
-
-    // An abandoned agent decays to queued so the human is never told a
-    // stalled session is still being worked on.
-    await request(bound.port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'thinking' } });
-    await request(bound.port, 'POST', `/api/session/${opened.key}/feedback`, {
-      body: { items: [{ kind: 'chat', text: 'still there?' }] }
+    await integrationTest('requests with a cross-site Origin are rejected', async ({ request }) => {
+      const res = await request(port, 'POST', '/shutdown', { headers: { origin: 'https://evil.example.com' } });
+      assert.strictEqual(res.statusCode, 403);
     });
-    assert.strictEqual(staleCanvas.presenceFor(opened.key), 'thinking');
-    await new Promise(resolve => setTimeout(resolve, 60));
-    assert.strictEqual(staleCanvas.presenceFor(opened.key), 'queued');
-    await staleCanvas.close();
-  });
 
-  // The stuck pill only self-heals if the decay is pushed to an idle browser
-  // that is not making any requests of its own.
-  await test('presence sweep pushes the decayed state to an idle browser', async () => {
-    const sweepArtifact = path.join(tmp, 'sweep.plan.md');
-    fs.writeFileSync(sweepArtifact, '# Plan: Sweep\n');
-    const sweepStore = createSessionStore({ stateDir: path.join(tmp, 'sweep-state') });
-    const sweepCanvas = createPlanCanvasServer({
-      store: sweepStore,
-      version: '9.9.9-test',
-      idleTimeoutMs: 0,
-      thinkingStaleMs: 50,
-      presenceSweepMs: 20
+    await integrationTest('POST /api/sessions opens a session for an existing artifact', async ({ request }) => {
+      const res = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
+      assert.strictEqual(res.statusCode, 200);
+      const body = jsonBody(res);
+      assert.strictEqual(body.status, 'open');
+      assert.match(body.key, /^[a-f0-9]{12}$/);
+      key = body.key;
     });
-    const bound = await sweepCanvas.listen(0);
-    const opened = jsonBody(await request(bound.port, 'POST', '/api/sessions', { body: { file: sweepArtifact } }));
-    const sse = openSse(bound.port, opened.key);
-    await sse.ready;
 
-    await request(bound.port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'thinking' } });
-    await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'thinking'));
+    await integrationTest('POST /api/sessions 404s for a missing artifact', async ({ request }) => {
+      const res = await request(port, 'POST', '/api/sessions', { body: { file: path.join(tmp, 'nope.md') } });
+      assert.strictEqual(res.statusCode, 404);
+    });
 
-    const before = sse.received.length;
-    await waitFor(() =>
-      sse.received.slice(before).some(e => e.event === 'presence' && e.data.state === 'waiting')
-    );
-    sse.close();
-    await sweepCanvas.close();
-  });
+    await integrationTest('GET /canvas/:key serves the ECC chrome with CSP', async ({ request }) => {
+      const res = await request(port, 'GET', `/canvas/${key}`);
+      assert.strictEqual(res.statusCode, 200);
+      assert.ok(res.headers['content-security-policy'].includes("default-src 'self'"));
+      assert.ok(res.body.includes('Plan Canvas'));
+      assert.ok(res.body.includes('pc-session'));
+      assert.ok(res.body.includes('Approve plan'));
+      assert.ok(res.body.includes('sandbox="allow-scripts allow-forms allow-popups"'));
+    });
 
-  await test('long-poll heartbeat whitespace arrives before the payload', async () => {
-    const chunks = [];
-    const done = new Promise((resolve, reject) => {
-      const req = http.get(
-        { host: '127.0.0.1', port, path: `/api/await?file=${encodeURIComponent(artifact)}`, agent: false },
-        res => {
-          res.on('data', chunk => chunks.push(chunk.toString()));
-          res.on('end', resolve);
+    await integrationTest('markdown artifacts render in the ECC plan template with the SDK', async ({ request }) => {
+      const res = await request(port, 'GET', `/artifact/${key}/`);
+      assert.strictEqual(res.statusCode, 200);
+      assert.ok(res.body.includes('<h1 id="plan-demo">'));
+      assert.ok(res.body.includes('<table>'));
+      assert.ok(res.body.includes('<script src="/sdk.js">'));
+      assert.strictEqual(res.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
+      // No diagram in this plan → no Mermaid loader shipped.
+      assert.ok(!res.body.includes('mermaid.run'));
+    });
+
+    await integrationTest('a plan containing ```mermaid serves the themed Mermaid loader', async ({ request }) => {
+      const diagram = path.join(tmp, 'flow.plan.md');
+      fs.writeFileSync(diagram, '# Flow\n\n```mermaid\nflowchart LR\n  A --> B\n```\n');
+      const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: diagram } }));
+      const res = await request(port, 'GET', `/artifact/${opened.key}/`);
+      assert.ok(res.body.includes('<pre class="mermaid">'), 'diagram container present');
+      assert.ok(res.body.includes('mermaid.run'), 'loader injected');
+      assert.ok(res.body.includes("securityLevel: 'strict'"), 'sanitizing config present');
+      await request(port, 'POST', '/api/end', { body: { file: diagram } });
+    });
+
+    await integrationTest('HTML artifacts pass through with the SDK injected before </body>', async ({ request }) => {
+      const open = await request(port, 'POST', '/api/sessions', { body: { file: htmlArtifact } });
+      htmlKey = jsonBody(open).key;
+      const res = await request(port, 'GET', `/artifact/${htmlKey}/`);
+      assert.ok(res.body.includes('<h1>Report</h1>'));
+      assert.ok(res.body.includes('<script src="/sdk.js"></script>\n</body>'));
+    });
+
+    await integrationTest('sibling assets are served, traversal is blocked', async ({ request }) => {
+      const ok = await request(port, 'GET', `/artifact/${key}/style.css`);
+      assert.strictEqual(ok.statusCode, 200);
+      assert.ok(ok.body.includes('color: red'));
+      const escape = await request(port, 'GET', `/artifact/${key}/..%2F${path.basename(outsideDir)}%2Fsecret.txt`);
+      assert.strictEqual(escape.statusCode, 403);
+    });
+
+    await integrationTest('artifact responses carry a sandbox CSP (direct-navigation hardening)', async ({ request }) => {
+      const md = await request(port, 'GET', `/artifact/${key}/`);
+      assert.strictEqual(md.statusCode, 200);
+      assert.strictEqual(md.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
+      const html = await request(port, 'GET', `/artifact/${htmlKey}/`);
+      assert.strictEqual(html.statusCode, 200);
+      assert.strictEqual(html.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
+    });
+
+    await integrationTest('missing-artifact 404 escapes the file path', async ({ request }) => {
+      // Quotes and ampersands are escapable on every platform (Windows
+      // rejects < > in filenames, so angle brackets stay out of fixtures).
+      const evilFile = path.join(tmp, `evil'b&xss.plan.md`);
+      fs.writeFileSync(evilFile, '# Evil\n');
+      const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: evilFile } }));
+      fs.rmSync(evilFile);
+      const res = await request(port, 'GET', `/artifact/${opened.key}/`);
+      assert.strictEqual(res.statusCode, 404);
+      assert.ok(!res.body.includes(`evil'b&xss`), 'raw filename must not appear in the 404 page');
+      assert.ok(res.body.includes('evil&#39;b&amp;xss'), 'filename must be HTML-escaped in the 404 page');
+    });
+
+    await integrationTest('symlinked sibling assets escaping the artifact dir are blocked', async ({ request }) => {
+      createTestSymlink(path.join(outsideDir, 'secret.txt'), path.join(tmp, 'evil-link.txt'));
+      createTestSymlink(path.join(tmp, 'style.css'), path.join(tmp, 'ok-link.css'));
+      const blocked = await request(port, 'GET', `/artifact/${key}/evil-link.txt`);
+      assert.strictEqual(blocked.statusCode, 403);
+      const allowed = await request(port, 'GET', `/artifact/${key}/ok-link.css`);
+      assert.strictEqual(allowed.statusCode, 200);
+      assert.ok(allowed.body.includes('color: red'));
+    });
+
+    await integrationTest('served HTML siblings carry the sandbox CSP', async ({ request }) => {
+      fs.writeFileSync(path.join(tmp, 'note.html'), '<!DOCTYPE html><html><body><p>hi</p></body></html>');
+      const res = await request(port, 'GET', `/artifact/${key}/note.html`);
+      assert.strictEqual(res.statusCode, 200);
+      assert.strictEqual(res.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
+    });
+
+    await integrationTest('symlinked assets take their MIME from the link name', async ({ request }) => {
+      fs.writeFileSync(path.join(tmp, 'realfile'), 'body { color: blue }');
+      createTestSymlink(path.join(tmp, 'realfile'), path.join(tmp, 'theme.css'));
+      const res = await request(port, 'GET', `/artifact/${key}/theme.css`);
+      assert.strictEqual(res.statusCode, 200);
+      assert.ok(String(res.headers['content-type']).startsWith('text/css'));
+    });
+
+    await integrationTest('static chrome assets are served', async ({ request }) => {
+      for (const asset of ['/canvas.css', '/client.js', '/sdk.js']) {
+        const res = await request(port, 'GET', asset);
+        assert.strictEqual(res.statusCode, 200, `${asset} should be 200`);
+      }
+    });
+
+    await integrationTest('await with timeoutMs returns waiting when idle', async ({ request }) => {
+      const res = await request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}&timeoutMs=50`);
+      assert.strictEqual(jsonBody(res).status, 'waiting');
+    });
+
+    await integrationTest('await returns missing for files without a session', async ({ request }) => {
+      const res = await request(port, 'GET', `/api/await?file=${encodeURIComponent(path.join(tmp, 'other.md'))}`);
+      assert.strictEqual(jsonBody(res).status, 'missing');
+    });
+
+    await integrationTest('browser feedback wakes a blocking await; presence transitions', async ({ request, openSse }) => {
+      const sse = openSse(port, key);
+      await sse.ready;
+      const awaitPromise = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'listening'));
+
+      const post = await request(port, 'POST', `/api/session/${key}/feedback`, {
+        body: {
+          items: [
+            { kind: 'annotation', text: 'tighten this', anchor: { selector: 'h2:nth-of-type(1)', tag: 'h2', snippet: 'Files to Change' } },
+            { kind: 'verdict', verdict: 'request-changes' }
+          ]
         }
+      });
+      assert.strictEqual(jsonBody(post).accepted, 2);
+
+      const result = jsonBody(await awaitPromise);
+      assert.strictEqual(result.status, 'feedback');
+      assert.strictEqual(result.items.length, 2);
+      assert.strictEqual(result.items[0].anchor.selector, 'h2:nth-of-type(1)');
+      assert.strictEqual(result.items[1].verdict, 'request-changes');
+
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'thinking'));
+      await waitFor(() => sse.received.some(e => e.event === 'chat-sync' && e.data.chat.length === 2));
+      await sse.close();
+    });
+
+    // Regression: feedback sent with nobody parked on `await` used to leave the
+    // pill claiming "agent working" while the message sat undelivered forever.
+    await integrationTest('feedback with no listener reports queued, not working', async ({ request, openSse }) => {
+      const queuedArtifact = path.join(tmp, 'queued.plan.md');
+      fs.writeFileSync(queuedArtifact, '# Plan: Queued\n');
+      const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: queuedArtifact } }));
+      const sse = openSse(port, opened.key);
+      await sse.ready;
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'waiting'));
+
+      const post = await request(port, 'POST', `/api/session/${opened.key}/feedback`, {
+        body: { items: [{ kind: 'chat', text: 'anyone there?' }] }
+      });
+      assert.strictEqual(jsonBody(post).presence, 'queued');
+      assert.strictEqual(canvas.presenceFor(opened.key), 'queued');
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'queued'));
+
+      // Draining it hands the batch over and flips the indicator to thinking.
+      const drained = jsonBody(await request(port, 'GET', `/api/await?key=${opened.key}&timeoutMs=0`));
+      assert.strictEqual(drained.status, 'feedback');
+      assert.strictEqual(canvas.presenceFor(opened.key), 'thinking');
+      await sse.close();
+    });
+
+    await integrationTest('typing endpoint drives the indicator and reply clears it', async ({ request, openSse }) => {
+      const typingArtifact = path.join(tmp, 'typing.plan.md');
+      fs.writeFileSync(typingArtifact, '# Plan: Typing\n');
+      const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: typingArtifact } }));
+      const sse = openSse(port, opened.key);
+      await sse.ready;
+
+      const typing = await request(port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'typing' } });
+      assert.strictEqual(jsonBody(typing).presence, 'typing');
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'typing'));
+
+      const thinking = await request(port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'thinking' } });
+      assert.strictEqual(jsonBody(thinking).presence, 'thinking');
+
+      const bad = await request(port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'dancing' } });
+      assert.strictEqual(bad.statusCode, 400);
+
+      // A landed reply must take the bubble down, not leave it spinning.
+      await request(port, 'POST', `/api/session/${opened.key}/reply`, { body: { text: 'done' } });
+      assert.strictEqual(canvas.presenceFor(opened.key), 'waiting');
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'waiting'));
+      await sse.close();
+    });
+
+    await integrationTest('thinking and typing states expire instead of sticking', async ({ request, ownServer }) => {
+      const staleArtifact = path.join(tmp, 'stale.plan.md');
+      fs.writeFileSync(staleArtifact, '# Plan: Stale\n');
+      const staleStore = createSessionStore({ stateDir: path.join(tmp, 'stale-state') });
+      const staleCanvas = createPlanCanvasServer({
+        store: staleStore,
+        version: '9.9.9-test',
+        idleTimeoutMs: 0,
+        thinkingStaleMs: 40,
+        typingExpiryMs: 20,
+        presenceSweepMs: 0
+      });
+      const closeStaleCanvas = ownServer(staleCanvas);
+      const bound = await staleCanvas.listen(0);
+      const opened = jsonBody(await request(bound.port, 'POST', '/api/sessions', { body: { file: staleArtifact } }));
+
+      await request(bound.port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'typing' } });
+      assert.strictEqual(staleCanvas.presenceFor(opened.key), 'typing');
+      await new Promise(resolve => setTimeout(resolve, 60));
+      assert.strictEqual(staleCanvas.presenceFor(opened.key), 'waiting');
+
+      // An abandoned agent decays to queued so the human is never told a
+      // stalled session is still being worked on.
+      await request(bound.port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'thinking' } });
+      await request(bound.port, 'POST', `/api/session/${opened.key}/feedback`, {
+        body: { items: [{ kind: 'chat', text: 'still there?' }] }
+      });
+      assert.strictEqual(staleCanvas.presenceFor(opened.key), 'thinking');
+      await new Promise(resolve => setTimeout(resolve, 60));
+      assert.strictEqual(staleCanvas.presenceFor(opened.key), 'queued');
+      await closeStaleCanvas();
+    });
+
+    // The stuck pill only self-heals if the decay is pushed to an idle browser
+    // that is not making any requests of its own.
+    await integrationTest('presence sweep pushes the decayed state to an idle browser', async ({ request, openSse, ownServer }) => {
+      const sweepArtifact = path.join(tmp, 'sweep.plan.md');
+      fs.writeFileSync(sweepArtifact, '# Plan: Sweep\n');
+      const sweepStore = createSessionStore({ stateDir: path.join(tmp, 'sweep-state') });
+      const sweepCanvas = createPlanCanvasServer({
+        store: sweepStore,
+        version: '9.9.9-test',
+        idleTimeoutMs: 0,
+        thinkingStaleMs: 50,
+        presenceSweepMs: 20
+      });
+      const closeSweepCanvas = ownServer(sweepCanvas);
+      const bound = await sweepCanvas.listen(0);
+      const opened = jsonBody(await request(bound.port, 'POST', '/api/sessions', { body: { file: sweepArtifact } }));
+      const sse = openSse(bound.port, opened.key);
+      await sse.ready;
+
+      await request(bound.port, 'POST', `/api/session/${opened.key}/typing`, { body: { state: 'thinking' } });
+      await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'thinking'));
+
+      const before = sse.received.length;
+      await waitFor(() =>
+        sse.received.slice(before).some(e => e.event === 'presence' && e.data.state === 'waiting')
       );
-      req.on('error', reject);
+      await sse.close();
+      await closeSweepCanvas();
     });
-    // Heartbeats tick every 25ms in this test server; wait for a few first.
-    await waitFor(() => chunks.join('').length >= 3);
-    assert.ok(/^\s+$/.test(chunks.join('')), 'expected only whitespace before payload');
-    await request(port, 'POST', `/api/session/${key}/feedback`, { body: { items: [{ kind: 'chat', text: 'wake up' }] } });
-    await done;
-    const full = chunks.join('');
-    assert.strictEqual(JSON.parse(full.trim()).status, 'feedback');
-  });
 
-  await test('agent reply lands in the chat via SSE chat-sync', async () => {
-    const sse = openSse(port, key);
-    await sse.ready;
-    const res = await request(port, 'POST', `/api/session/${key}/reply`, { body: { text: 'reworked, please re-check' } });
-    assert.strictEqual(jsonBody(res).status, 'sent');
-    await waitFor(() =>
-      sse.received.some(
-        e => e.event === 'chat-sync' && e.data.chat.some(m => m.role === 'agent' && m.text.includes('reworked'))
-      )
-    );
-    sse.close();
-  });
-
-  await test('live reload: editing the artifact emits an SSE reload event', async () => {
-    const sse = openSse(port, key);
-    await sse.ready;
-    fs.appendFileSync(artifact, '\n## Addendum\n');
-    await waitFor(() => sse.received.some(e => e.event === 'reload'), { timeoutMs: 4000 });
-    sse.close();
-  });
-
-  await test('send-and-end delivers the final batch and ends the session', async () => {
-    const awaitPromise = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
-    await waitFor(() => canvas.presenceFor(key) === 'listening');
-    await request(port, 'POST', `/api/session/${key}/feedback`, {
-      body: { items: [{ kind: 'chat', text: 'looks good, wrapping up' }], endSession: true }
+    await integrationTest('long-poll heartbeat whitespace arrives before the payload', async ({ request }) => {
+      const chunks = [];
+      const done = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`, {
+        onData: chunk => chunks.push(chunk.toString()),
+      });
+      // Heartbeats tick every 25ms in this test server; wait for a few first.
+      await waitFor(() => chunks.join('').length >= 3);
+      assert.ok(/^\s+$/.test(chunks.join('')), 'expected only whitespace before payload');
+      await request(port, 'POST', `/api/session/${key}/feedback`, { body: { items: [{ kind: 'chat', text: 'wake up' }] } });
+      await done;
+      const full = chunks.join('');
+      assert.strictEqual(JSON.parse(full.trim()).status, 'feedback');
     });
-    const result = jsonBody(await awaitPromise);
-    assert.strictEqual(result.status, 'feedback');
-    assert.strictEqual(result.sessionEnded, true);
-    assert.strictEqual(result.endedBy, 'user');
-    const after = await request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
-    assert.strictEqual(jsonBody(after).status, 'ended');
-  });
 
-  await test('user-ended sessions return 409 on plain reopen, open with reopen:true', async () => {
-    const refused = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
-    assert.strictEqual(refused.statusCode, 409);
-    assert.strictEqual(jsonBody(refused).status, 'user-ended');
-    const forced = await request(port, 'POST', '/api/sessions', { body: { file: artifact, reopen: true } });
-    assert.strictEqual(forced.statusCode, 200);
-  });
-
-  await test('agent end via POST /api/end allows plain reopen', async () => {
-    const res = await request(port, 'POST', '/api/end', { body: { file: artifact } });
-    assert.strictEqual(jsonBody(res).endedBy, 'agent');
-    const reopened = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
-    assert.strictEqual(reopened.statusCode, 200);
-  });
-
-  await test('feedback on an ended session is refused with 409', async () => {
-    await request(port, 'POST', `/api/end`, { body: { file: htmlArtifact } });
-    const res = await request(port, 'POST', `/api/session/${htmlKey}/feedback`, {
-      body: { items: [{ kind: 'chat', text: 'too late' }] }
+    await integrationTest('agent reply lands in the chat via SSE chat-sync', async ({ request, openSse }) => {
+      const sse = openSse(port, key);
+      await sse.ready;
+      const res = await request(port, 'POST', `/api/session/${key}/reply`, { body: { text: 'reworked, please re-check' } });
+      assert.strictEqual(jsonBody(res).status, 'sent');
+      await waitFor(() =>
+        sse.received.some(
+          e => e.event === 'chat-sync' && e.data.chat.some(m => m.role === 'agent' && m.text.includes('reworked'))
+        )
+      );
+      await sse.close();
     });
-    assert.strictEqual(res.statusCode, 409);
-  });
 
-  await test('GET / lists sessions in the ECC shell', async () => {
-    const res = await request(port, 'GET', '/');
-    assert.ok(res.body.includes('Plan Canvas sessions'));
-    assert.ok(res.body.includes('demo.plan.md'));
-  });
+    await integrationTest('live reload: editing the artifact emits an SSE reload event', async ({ openSse }) => {
+      const sse = openSse(port, key);
+      await sse.ready;
+      fs.appendFileSync(artifact, '\n## Addendum\n');
+      await waitFor(() => sse.received.some(e => e.event === 'reload'), { timeoutMs: 4000 });
+      await sse.close();
+    });
 
-  await test('POST /shutdown triggers the shutdown callback', async () => {
-    const res = await request(port, 'POST', '/shutdown');
-    assert.strictEqual(jsonBody(res).status, 'stopping');
-    await waitFor(() => idleFired);
-  });
+    await integrationTest('send-and-end delivers the final batch and ends the session', async ({ request }) => {
+      const awaitPromise = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
+      await waitFor(() => canvas.presenceFor(key) === 'listening');
+      await request(port, 'POST', `/api/session/${key}/feedback`, {
+        body: { items: [{ kind: 'chat', text: 'looks good, wrapping up' }], endSession: true }
+      });
+      const result = jsonBody(await awaitPromise);
+      assert.strictEqual(result.status, 'feedback');
+      assert.strictEqual(result.sessionEnded, true);
+      assert.strictEqual(result.endedBy, 'user');
+      const after = await request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+      assert.strictEqual(jsonBody(after).status, 'ended');
+    });
 
-  await test('close() settles a held long-poll instead of hanging', async () => {
-    await request(port, 'POST', '/api/sessions', { body: { file: artifact, reopen: true } });
-    const held = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
-    await waitFor(() => canvas.presenceFor(store.findByFile(artifact).key) === 'listening');
-    await canvas.close();
-    const result = jsonBody(await held);
-    assert.strictEqual(result.status, 'waiting');
-    assert.ok(result.note.includes('shutting down'));
-  });
+    await integrationTest('user-ended sessions return 409 on plain reopen, open with reopen:true', async ({ request }) => {
+      const refused = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
+      assert.strictEqual(refused.statusCode, 409);
+      assert.strictEqual(jsonBody(refused).status, 'user-ended');
+      const forced = await request(port, 'POST', '/api/sessions', { body: { file: artifact, reopen: true } });
+      assert.strictEqual(forced.statusCode, 200);
+    });
 
-  fs.rmSync(tmp, { recursive: true, force: true });
-  fs.rmSync(outsideDir, { recursive: true, force: true });
+    await integrationTest('agent end via POST /api/end allows plain reopen', async ({ request }) => {
+      const res = await request(port, 'POST', '/api/end', { body: { file: artifact } });
+      assert.strictEqual(jsonBody(res).endedBy, 'agent');
+      const reopened = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
+      assert.strictEqual(reopened.statusCode, 200);
+    });
+
+    await integrationTest('feedback on an ended session is refused with 409', async ({ request }) => {
+      await request(port, 'POST', `/api/end`, { body: { file: htmlArtifact } });
+      const res = await request(port, 'POST', `/api/session/${htmlKey}/feedback`, {
+        body: { items: [{ kind: 'chat', text: 'too late' }] }
+      });
+      assert.strictEqual(res.statusCode, 409);
+    });
+
+    await integrationTest('GET / lists sessions in the ECC shell', async ({ request }) => {
+      const res = await request(port, 'GET', '/');
+      assert.ok(res.body.includes('Plan Canvas sessions'));
+      assert.ok(res.body.includes('demo.plan.md'));
+    });
+
+    await integrationTest('POST /shutdown triggers the shutdown callback', async ({ request }) => {
+      const res = await request(port, 'POST', '/shutdown');
+      assert.strictEqual(jsonBody(res).status, 'stopping');
+      await waitFor(() => idleFired);
+    });
+
+    await integrationTest('close() settles a held long-poll instead of hanging', async ({ request }) => {
+      await request(port, 'POST', '/api/sessions', { body: { file: artifact, reopen: true } });
+      const held = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
+      await waitFor(() => canvas.presenceFor(store.findByFile(artifact).key) === 'listening');
+      await closeCanvas();
+      const result = jsonBody(await held);
+      assert.strictEqual(result.status, 'waiting');
+      assert.ok(result.note.includes('shutting down'));
+    });
+  });
 
   console.log('\n' + '='.repeat(40));
   printResults(suite.results);
   console.log('='.repeat(40));
 }
 
+// Stay nonzero if setup or cleanup stalls without a live handle or summary.
+process.exitCode = 1;
 main().catch(err => {
-  console.error(err);
+  console.error(failureText(err));
   console.log('Passed: 0');
   console.log('Failed: 1');
-  process.exit(1);
+  process.exitCode = 1;
 });
