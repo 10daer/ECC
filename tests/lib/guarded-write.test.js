@@ -117,8 +117,15 @@ test('a parent replacement before native open is refused even when the file iden
   const parent = path.join(root, 'plugins');
   fs.mkdirSync(parent);
   const file = path.join(parent, 'entry.js');
-  fs.writeFileSync(file, 'old activation bytes');
-  const fileIdentity = fs.statSync(file, { bigint: true });
+  const setupFd = fs.openSync(file, 'wx', 0o600);
+  let fileIdentity;
+  try {
+    fs.writeFileSync(setupFd, 'old activation bytes');
+    fileIdentity = fs.fstatSync(setupFd, { bigint: true });
+  } finally {
+    // Close before the parent swap, including on setup failure, for Windows.
+    fs.closeSync(setupFd);
+  }
   const originalOpen = fs.openSync;
   const originalClose = fs.closeSync;
   const originalTruncate = fs.ftruncateSync;

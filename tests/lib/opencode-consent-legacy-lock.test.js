@@ -14,6 +14,7 @@ const { withHookConsent } = require('../../scripts/lib/install/hook-consent');
 const { repairInstalledStates, buildDoctorReport } = load(require.resolve('../../scripts/lib/install-lifecycle'));
 const { createInstallState, readInstallState, writeInstallState } = require('../../scripts/lib/install-state');
 const { withOpenCodeInstallLocks } = load(require.resolve('../../scripts/lib/install/opencode-install-lock'));
+const { removeVerifiedLegacyFile } = require('../../scripts/lib/install/opencode-legacy-migration');
 
 const SOURCE_RELATIVE_PATH = path.join('skills', 'skill-comply', 'SKILL.md');
 const SKILL_CONTENT = '---\nname: skill-comply\ndescription: Synthetic migration fixture.\n---\n\n# Inert fixture\n';
@@ -382,6 +383,70 @@ function runTests() {
         else assert.ok(failedRemoval, 'The actual cleanup removal was attempted');
       } finally { fileSystem.renameSync = originalRename; }
       assertBothLocksReleased(value);
+    });
+  }
+  for (const boundary of ['existing', 'missing', 'read-error', 'stat-error']) {
+    test(`legacy hash uses trusted read-only flags at the ${boundary} boundary`, value => {
+      const setupFd = fs.openSync(value.legacyFile, 'r');
+      let stat;
+      try { stat = fs.fstatSync(setupFd, { bigint: true }); }
+      finally { fs.closeSync(setupFd); }
+      const opened = new Set();
+      const flagsSeen = [];
+      const contents = [];
+      let closes = 0;
+      let quarantinePath;
+      const injectedError = new Error(`Synthetic ${boundary}`);
+      const facade = {
+        ...fs,
+        constants: { ...fs.constants,
+          O_RDONLY: fs.constants.O_RDONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
+          O_NOFOLLOW: 0 },
+        openSync(file, flags) {
+          quarantinePath = file;
+          flagsSeen.push(flags);
+          if (boundary === 'missing') fs.unlinkSync(file);
+          const fd = fs.openSync(file, flags);
+          opened.add(fd);
+          return fd;
+        },
+        fstatSync(fd, options) {
+          if (boundary === 'stat-error') throw injectedError;
+          return fs.fstatSync(fd, options);
+        },
+        readFileSync(fd) {
+          if (boundary === 'read-error') throw injectedError;
+          const content = fs.readFileSync(fd);
+          contents.push(content.toString('utf8'));
+          return content;
+        },
+        closeSync(fd) {
+          assert.ok(opened.has(fd), 'close only an owned hash descriptor');
+          fs.closeSync(fd);
+          opened.delete(fd);
+          closes++;
+        },
+      };
+      try {
+        const remove = () => removeVerifiedLegacyFile({ destinationPath: value.legacyFile,
+          stat, digest: sha256(SKILL_CONTENT) }, { targetRoot: value.legacyRoot }, facade);
+        if (boundary === 'existing') assert.strictEqual(remove(), true);
+        else if (boundary === 'missing') assert.throws(remove, error => error.code === 'ENOENT');
+        else assert.throws(remove, error => error === injectedError);
+        assert.deepStrictEqual(flagsSeen,
+          [fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)]);
+        assert.strictEqual(opened.size, 0);
+        assert.strictEqual(closes, boundary === 'missing' ? 0 : 1);
+        if (boundary === 'existing') assert.deepStrictEqual(contents, [SKILL_CONTENT]);
+        if (boundary === 'read-error' || boundary === 'stat-error') {
+          assert.strictEqual(fs.readFileSync(value.legacyFile, 'utf8'), SKILL_CONTENT);
+        } else {
+          assert.strictEqual(fs.existsSync(value.legacyFile), false);
+        }
+        assert.strictEqual(fs.existsSync(quarantinePath), false);
+      } finally {
+        for (const fd of opened) fs.closeSync(fd);
+      }
     });
   }
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
