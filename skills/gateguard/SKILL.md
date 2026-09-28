@@ -199,9 +199,9 @@ credit, sibling collapse, and the denial cap do not apply." A target is
 sensitive, judged on the same lowercased project-relative path as its class
 **and** on its real (symlink-resolved) location, when either matches:
 
-- its file name is `.env` or starts with `.env.`, ends in `.pem`, `.key`,
-  `.p12`, or `.pfx`, or starts with `id_rsa`, `id_ed25519`, `credentials`, or
-  `secrets.`;
+- its file name is `.env`, `.netrc`, or `.pgpass`, starts with `.env.`, ends
+  in `.pem`, `.key`, `.p12`, or `.pfx`, or starts with `id_rsa`, `id_ed25519`,
+  `id_ecdsa`, `id_dsa`, `credentials`, or `secrets.`;
 - any path segment is exactly `auth`, `authn`, `authz`, `security`,
   `secrets`, `payment`, `payments`, `billing`, or `migrations` (whole
   segments only: `src/author.py`, `docs/authoring.md`, and

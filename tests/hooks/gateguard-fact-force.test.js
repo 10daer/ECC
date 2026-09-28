@@ -6136,7 +6136,8 @@ function runTests() {
   const sensLine = 'Sensitive target: prior-search credit, sibling collapse, and the denial cap do not apply.';
   const sensTargets = [
     '.env', '.env.local', 'config/.env.production', 'certs/server.pem', 'certs/server.key', 'certs/client.p12',
-    'certs/client.pfx', 'keys/id_rsa', 'keys/id_rsa.pub', 'keys/id_ed25519', 'config/credentials.json',
+    'certs/client.pfx', 'keys/id_rsa', 'keys/id_rsa.pub', 'keys/id_ed25519', 'keys/id_ecdsa', 'keys/id_dsa',
+    '.netrc', 'home/.pgpass', 'config/credentials.json',
     'config/secrets.yaml', 'src/auth/login_flow.py', 'src/authn/token_check.py', 'src/authz/policy_rules.py',
     'src/security/hardening.py', 'src/secrets/vault_client.py', 'src/payment/charge_card.py',
     'src/payments/refund_flow.py', 'src/billing/invoice_maker.py', 'db/migrations/0001_initial.py',

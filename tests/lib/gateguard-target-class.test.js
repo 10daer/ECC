@@ -321,6 +321,7 @@ test('isSensitiveTarget matches every listed basename, segment and prefix rule',
     '.env', '.env.local', '.env.production.local', 'config/.env', 'config/.env.test',
     'certs/server.pem', 'certs/server.key', 'certs/client.p12', 'certs/client.pfx',
     'home/id_rsa', 'home/id_rsa.pub', 'id_ed25519', 'home/id_ed25519.pub',
+    'keys/id_ecdsa', 'keys/id_ecdsa.pub', 'keys/id_dsa', '.netrc', 'home/.pgpass',
     'credentials', 'config/credentials.json', 'aws/credentials', 'config/secrets.yaml', 'secrets.json',
     'src/auth/login.py', 'src/authn/x.ts', 'src/authz/policy.go', 'lib/security/x.js',
     'src/secrets/vault.py', 'src/payment/charge.py', 'src/payments/x.py', 'app/billing/invoice.rb',
@@ -339,7 +340,8 @@ test('isSensitiveTarget is segment-exact and basename-exact (no substring matche
     'src/author.py', 'docs/authoring.md', 'lib/paymentutils.py', 'src/authentication/x.py',
     'src/securityutils/x.py', 'src/billingreport.py', 'src/migration.py', 'src/environment.py',
     'envoy.yaml', 'src/keyboard.py', 'src/key.py', 'src/secretsmanager.py', 'src/my_credentials.py',
-    'docs/workflows/ci.md', 'github/workflows/ci.yml', '.github/ci.yml', 'src/app.js', 'README.md', 'src/.envrc'
+    'docs/workflows/ci.md', 'github/workflows/ci.yml', '.github/ci.yml', 'src/app.js', 'README.md', 'src/.envrc',
+    'src/netrc.py', '.netrc.bak', 'src/pgpass_reader.py'
   ];
   for (const p of ordinary) assert.strictEqual(isSensitiveTarget(p), false, p);
 });
