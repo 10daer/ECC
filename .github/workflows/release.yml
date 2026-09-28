@@ -205,10 +205,16 @@ jobs:
           ECC_RELEASE_SHA256: ${{ needs.verify.outputs.package_sha256 }}
         run: node -e "const crypto = require('crypto'); const fs = require('fs'); const file = process.env.ECC_RELEASE_PACKAGE; const expected = process.env.ECC_RELEASE_SHA256; if (!/^ecc-universal-[0-9A-Za-z.+-]+\.tgz$/.test(file || '')) throw new Error('Unexpected packed filename'); if (!/^[a-f0-9]{64}$/.test(expected || '')) throw new Error('Invalid packed SHA-256'); const archives = fs.readdirSync('.').filter(name => name.endsWith('.tgz')); if (archives.length !== 1 || archives[0] !== file) throw new Error('Expected exactly one downloaded archive'); const actual = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); if (actual !== expected) throw new Error('Downloaded publish artifact SHA-256 mismatch')"
 
+      - name: Bind gate source to triggering commit
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          VERIFIED_RELEASE_SHA: ${{ needs.verify.outputs.release_sha }}
+        run: node -e "const actual = process.env.EVENT_SHA; const expected = process.env.VERIFIED_RELEASE_SHA; if (typeof actual !== 'string' || actual.length !== 40 || !/^[a-f0-9]{40}$/.test(actual) || expected !== actual) throw new Error('Verified release differs from triggering commit')"
+
       - name: Checkout verified gate source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.verify.outputs.release_sha }}
+          ref: ${{ github.sha }}
           path: release-gate-source
           persist-credentials: false
           sparse-checkout: scripts/ci/verify-release-gates.js
