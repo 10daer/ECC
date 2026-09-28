@@ -542,10 +542,10 @@ function createPlanCanvasServer({
       return sendJson(res, 404, { error: 'asset not found' });
     }
     // Residual TOCTOU note: the confinement check and the read below are
-    // separate operations, so a local actor racing a symlink swap between
-    // them could redirect the read. Accepted for a loopback-local dev tool:
-    // anyone able to win that race already has arbitrary local file write,
-    // and served HTML is sandboxed (see below) while other types are inert.
+    // separate operations. A local writer able to replace the target or its
+    // parent directory entries can still redirect the read between them.
+    // Static confinement assumes trusted local directory writers; it is not
+    // race-free. The document sandbox below is a separate origin boundary.
     let data;
     try {
       data = fs.readFileSync(realTarget);
@@ -558,7 +558,7 @@ function createPlanCanvasServer({
       || CONTENT_TYPES[path.extname(realTarget).toLowerCase()]
       || 'application/octet-stream';
     const headers = { 'content-type': type, 'cache-control': 'no-store' };
-    if (type.startsWith('text/html')) {
+    if (type.startsWith('text/html') || type === 'image/svg+xml') {
       headers['content-security-policy'] = ARTIFACT_CSP;
     }
     res.writeHead(200, headers);

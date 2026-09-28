@@ -5,6 +5,7 @@
  * browser chrome (fetch + SSE) and the agent CLI (long-poll) do.
  *
  * Run with: node tests/scripts/plan-canvas.test.js
+ * Offline artifact checks: add --artifact-security-only (no listener).
  */
 
 const assert = require('assert');
@@ -16,16 +17,189 @@ const path = require('path');
 const { createSessionStore } = require('../../scripts/lib/plan-canvas/sessions');
 const { createPlanCanvasServer } = require('../../scripts/lib/plan-canvas/server');
 
-async function test(name, fn) {
+class SkippedTest extends Error {}
+
+function createTestRunner(log = console.log) {
+  let results = { passed: 0, failed: 0, skipped: 0 };
+  return {
+    get results() { return results; },
+    async test(name, fn) {
+      try {
+        await fn();
+        results = { ...results, passed: results.passed + 1 };
+        log(`  PASS ${name}`);
+      } catch (error) {
+        if (error instanceof SkippedTest) {
+          results = { ...results, skipped: results.skipped + 1 };
+          log(`  SKIP ${name}: ${error.message}`);
+        } else {
+          results = { ...results, failed: results.failed + 1 };
+          log(`  FAIL ${name}\n    Error: ${error.stack || error.message}`);
+        }
+      }
+    }
+  };
+}
+
+function createTestSymlink(target, link, type = 'file', { symlink = fs.symlinkSync, platform = process.platform } = {}) {
   try {
-    await fn();
-    console.log(`  ✓ ${name}`);
-    return true;
-  } catch (err) {
-    console.log(`  ✗ ${name}`);
-    console.log(`    Error: ${err.stack || err.message}`);
-    return false;
+    symlink(target, link, type);
+  } catch (error) {
+    if (error.code === 'ENOSYS' || error.code === 'ENOTSUP'
+      || (platform === 'win32' && error.code === 'EPERM')) {
+      throw new SkippedTest(`symlink creation unavailable (${platform}, ${error.code})`);
+    }
+    throw error;
   }
+}
+
+function printResults(results) {
+  console.log(`Passed: ${results.passed}`);
+  console.log(`Failed: ${results.failed}`);
+  console.log(`Skipped: ${results.skipped}`);
+  process.exitCode = results.failed > 0 ? 1 : 0;
+}
+
+// Capture the real dispatcher without binding a socket. Artifact bodies are
+// only compared as inert response bytes, never executed in a browser.
+async function withArtifactHandler(callback) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-artifact-'));
+  let canvas;
+  try {
+    const base = path.join(root, 'artifacts');
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(base);
+    fs.mkdirSync(outside);
+    const session = { key: '0123456789ab', file: path.join(base, 'main.md') };
+    fs.writeFileSync(session.file, '# Inert fixture\n');
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'private-fixture-secret');
+    let handler;
+    const originalCreateServer = http.createServer;
+    http.createServer = requestHandler => {
+      handler = requestHandler;
+      return {
+        listen() { throw new Error('Artifact tests must not open a listener'); },
+        close(done) { done(); }
+      };
+    };
+    try {
+      canvas = createPlanCanvasServer({ store: { get: key => key === session.key ? session : null }, idleTimeoutMs: 0 });
+    } finally {
+      http.createServer = originalCreateServer;
+    }
+    const get = asset => new Promise(resolve => {
+      const response = { headersSent: false };
+      response.writeHead = (statusCode, headers) => {
+        response.statusCode = statusCode;
+        response.headers = headers;
+        response.headersSent = true;
+      };
+      response.end = data => resolve({ statusCode: response.statusCode, headers: response.headers, body: String(data || '') });
+      handler({ method: 'GET', headers: { host: '127.0.0.1' }, url: `/artifact/${session.key}/${asset}` }, response);
+    });
+    await callback({ base, outside, session, get });
+  } finally {
+    if (canvas) await canvas.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function artifactSecurityTests(test) {
+  const sandbox = 'sandbox allow-scripts allow-forms allow-popups';
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>window.inertFixture = true;</script></svg>';
+  await test('SVG sibling documents keep their MIME and use the artifact sandbox', () => withArtifactHandler(async ({ base, get }) => {
+    fs.writeFileSync(path.join(base, 'shape.svg'), svg);
+    const response = await get('shape.svg');
+    assert.strictEqual(response.statusCode, 200);
+    assert.strictEqual(response.headers['content-type'], 'image/svg+xml');
+    assert.strictEqual(response.headers['content-security-policy'], sandbox);
+    assert.strictEqual(response.body, svg);
+  }));
+  await test('SVG symlink request and target MIME fallback both receive sandbox CSP', () => withArtifactHandler(async ({ base, get }) => {
+    fs.writeFileSync(path.join(base, 'extensionless'), svg);
+    fs.writeFileSync(path.join(base, 'shape.svg'), svg);
+    createTestSymlink(path.join(base, 'extensionless'), path.join(base, 'by-name.svg'));
+    createTestSymlink(path.join(base, 'shape.svg'), path.join(base, 'by-target'));
+    for (const alias of ['by-name.svg', 'by-target']) {
+      const response = await get(alias);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(response.headers['content-type'], 'image/svg+xml');
+      assert.strictEqual(response.headers['content-security-policy'], sandbox);
+      assert.strictEqual(response.body, svg);
+    }
+  }));
+  await test('HTML and Markdown artifact policies and ordinary CSS MIME are preserved', () => withArtifactHandler(async ({ base, session, get }) => {
+    fs.writeFileSync(path.join(base, 'note.html'), '<html><body>inert HTML</body></html>');
+    fs.writeFileSync(path.join(base, 'style.css'), 'body { color: red }');
+    for (const asset of ['', 'note.html']) {
+      const response = await get(asset);
+      assert.strictEqual(response.statusCode, 200);
+      assert.strictEqual(response.headers['content-type'], 'text/html; charset=utf-8');
+      assert.strictEqual(response.headers['content-security-policy'], sandbox);
+    }
+    session.file = path.join(base, 'note.html');
+    const html = await get('');
+    assert.strictEqual(html.headers['content-security-policy'], sandbox);
+    assert.ok(html.body.includes('<script src="/sdk.js"></script>'));
+    const css = await get('style.css');
+    assert.strictEqual(css.statusCode, 200);
+    assert.strictEqual(css.headers['content-type'], 'text/css; charset=utf-8');
+    assert.strictEqual(css.headers['content-security-policy'], undefined);
+    assert.strictEqual(css.body, 'body { color: red }');
+  }));
+  await test('outside file and directory symlinks are refused without exposing their bytes', () => withArtifactHandler(async ({ base, outside, get }) => {
+    createTestSymlink(path.join(outside, 'secret.txt'), path.join(base, 'outside.txt'));
+    createTestSymlink(outside, path.join(base, 'outside-dir'), 'dir');
+    for (const asset of ['outside.txt', 'outside-dir/secret.txt']) {
+      const response = await get(asset);
+      assert.strictEqual(response.statusCode, 403);
+      assert.ok(!response.body.includes('private-fixture-secret'));
+    }
+  }));
+  await test('internal CSS symlink MIME uses the requested extension', () => withArtifactHandler(async ({ base, get }) => {
+    fs.writeFileSync(path.join(base, 'raw-style'), 'body { color: blue }');
+    createTestSymlink(path.join(base, 'raw-style'), path.join(base, 'theme.css'));
+    const response = await get('theme.css');
+    assert.strictEqual(response.statusCode, 200);
+    assert.strictEqual(response.headers['content-type'], 'text/css; charset=utf-8');
+    assert.strictEqual(response.body, 'body { color: blue }');
+  }));
+  await test('broken sibling links return 404', () => withArtifactHandler(async ({ base, get }) => {
+    createTestSymlink(path.join(base, 'missing.txt'), path.join(base, 'broken.txt'));
+    assert.strictEqual((await get('broken.txt')).statusCode, 404);
+  }));
+  await test('encoded lexical traversal stays forbidden', () => withArtifactHandler(async ({ get }) => {
+    const response = await get('..%2Foutside%2Fsecret.txt');
+    assert.strictEqual(response.statusCode, 403);
+    assert.ok(!response.body.includes('private-fixture-secret'));
+  }));
+  await test('missing paths escape angle brackets and quotes under restrictive CSP', () => withArtifactHandler(async ({ base, session, get }) => {
+    // This is a missing-path string, not a platform-dependent filename.
+    session.file = path.join(base, '<svg "quoted" & \'single\'>.md');
+    const response = await get('');
+    assert.strictEqual(response.statusCode, 404);
+    assert.ok(response.body.includes('&lt;svg &quot;quoted&quot; &amp; &#39;single&#39;&gt;.md'));
+    assert.ok(!response.body.includes('<svg'));
+    assert.ok(response.headers['content-security-policy'].includes("default-src 'self'"));
+  }));
+  await test('known unavailable symlink capability is counted separately from passes', async () => {
+    const suite = createTestRunner(() => {});
+    await suite.test('synthetic Windows privilege boundary', () => createTestSymlink('target', 'link', 'file', {
+      platform: 'win32', symlink() { throw Object.assign(new Error('privilege unavailable'), { code: 'EPERM' }); }
+    }));
+    assert.deepStrictEqual(suite.results, { passed: 0, failed: 0, skipped: 1 });
+  });
+  await test('unexpected symlink and ordinary fixture errors count as failures', async () => {
+    const suite = createTestRunner(() => {});
+    await suite.test('unexpected existing link', () => createTestSymlink('target', 'link', 'file', {
+      platform: 'win32', symlink() { throw Object.assign(new Error('already exists'), { code: 'EEXIST' }); }
+    }));
+    await suite.test('ordinary write error', () => { throw Object.assign(new Error('fixture write failed'), { code: 'EIO' }); });
+    await suite.test('non-Windows permission error', () => createTestSymlink('target', 'link', 'file', {
+      platform: 'darwin', symlink() { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }); }
+    }));
+    assert.deepStrictEqual(suite.results, { passed: 0, failed: 3, skipped: 0 });
+  });
 }
 
 function request(port, method, requestPath, { body = null, headers = {} } = {}) {
@@ -109,8 +283,13 @@ function waitFor(predicate, { timeoutMs = 3000, intervalMs = 20 } = {}) {
 async function main() {
   console.log('\n=== Testing plan-canvas server ===\n');
 
-  let passed = 0;
-  let failed = 0;
+  const suite = createTestRunner();
+  const { test } = suite;
+  await artifactSecurityTests(test);
+  if (process.argv.includes('--artifact-security-only')) {
+    printResults(suite.results);
+    return;
+  }
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-server-'));
   const artifact = path.join(tmp, 'demo.plan.md');
@@ -137,36 +316,36 @@ async function main() {
   let key = null;
   let htmlKey = null;
 
-  if (await test('GET /health identifies the app and version', async () => {
+  await test('GET /health identifies the app and version', async () => {
     const res = await request(port, 'GET', '/health');
     assert.deepStrictEqual(jsonBody(res), { ok: true, app: 'ecc-plan-canvas', version: '9.9.9-test' });
-  })) passed++; else failed++;
+  });
 
-  if (await test('requests with a non-loopback Host header are rejected', async () => {
+  await test('requests with a non-loopback Host header are rejected', async () => {
     const res = await request(port, 'GET', '/health', { headers: { host: 'evil.example.com' } });
     assert.strictEqual(res.statusCode, 403);
-  })) passed++; else failed++;
+  });
 
-  if (await test('requests with a cross-site Origin are rejected', async () => {
+  await test('requests with a cross-site Origin are rejected', async () => {
     const res = await request(port, 'POST', '/shutdown', { headers: { origin: 'https://evil.example.com' } });
     assert.strictEqual(res.statusCode, 403);
-  })) passed++; else failed++;
+  });
 
-  if (await test('POST /api/sessions opens a session for an existing artifact', async () => {
+  await test('POST /api/sessions opens a session for an existing artifact', async () => {
     const res = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
     assert.strictEqual(res.statusCode, 200);
     const body = jsonBody(res);
     assert.strictEqual(body.status, 'open');
     assert.match(body.key, /^[a-f0-9]{12}$/);
     key = body.key;
-  })) passed++; else failed++;
+  });
 
-  if (await test('POST /api/sessions 404s for a missing artifact', async () => {
+  await test('POST /api/sessions 404s for a missing artifact', async () => {
     const res = await request(port, 'POST', '/api/sessions', { body: { file: path.join(tmp, 'nope.md') } });
     assert.strictEqual(res.statusCode, 404);
-  })) passed++; else failed++;
+  });
 
-  if (await test('GET /canvas/:key serves the ECC chrome with CSP', async () => {
+  await test('GET /canvas/:key serves the ECC chrome with CSP', async () => {
     const res = await request(port, 'GET', `/canvas/${key}`);
     assert.strictEqual(res.statusCode, 200);
     assert.ok(res.headers['content-security-policy'].includes("default-src 'self'"));
@@ -174,9 +353,9 @@ async function main() {
     assert.ok(res.body.includes('pc-session'));
     assert.ok(res.body.includes('Approve plan'));
     assert.ok(res.body.includes('sandbox="allow-scripts allow-forms allow-popups"'));
-  })) passed++; else failed++;
+  });
 
-  if (await test('markdown artifacts render in the ECC plan template with the SDK', async () => {
+  await test('markdown artifacts render in the ECC plan template with the SDK', async () => {
     const res = await request(port, 'GET', `/artifact/${key}/`);
     assert.strictEqual(res.statusCode, 200);
     assert.ok(res.body.includes('<h1 id="plan-demo">'));
@@ -185,9 +364,9 @@ async function main() {
     assert.strictEqual(res.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
     // No diagram in this plan → no Mermaid loader shipped.
     assert.ok(!res.body.includes('mermaid.run'));
-  })) passed++; else failed++;
+  });
 
-  if (await test('a plan containing ```mermaid serves the themed Mermaid loader', async () => {
+  await test('a plan containing ```mermaid serves the themed Mermaid loader', async () => {
     const diagram = path.join(tmp, 'flow.plan.md');
     fs.writeFileSync(diagram, '# Flow\n\n```mermaid\nflowchart LR\n  A --> B\n```\n');
     const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: diagram } }));
@@ -196,34 +375,34 @@ async function main() {
     assert.ok(res.body.includes('mermaid.run'), 'loader injected');
     assert.ok(res.body.includes("securityLevel: 'strict'"), 'sanitizing config present');
     await request(port, 'POST', '/api/end', { body: { file: diagram } });
-  })) passed++; else failed++;
+  });
 
-  if (await test('HTML artifacts pass through with the SDK injected before </body>', async () => {
+  await test('HTML artifacts pass through with the SDK injected before </body>', async () => {
     const open = await request(port, 'POST', '/api/sessions', { body: { file: htmlArtifact } });
     htmlKey = jsonBody(open).key;
     const res = await request(port, 'GET', `/artifact/${htmlKey}/`);
     assert.ok(res.body.includes('<h1>Report</h1>'));
     assert.ok(res.body.includes('<script src="/sdk.js"></script>\n</body>'));
-  })) passed++; else failed++;
+  });
 
-  if (await test('sibling assets are served, traversal is blocked', async () => {
+  await test('sibling assets are served, traversal is blocked', async () => {
     const ok = await request(port, 'GET', `/artifact/${key}/style.css`);
     assert.strictEqual(ok.statusCode, 200);
     assert.ok(ok.body.includes('color: red'));
     const escape = await request(port, 'GET', `/artifact/${key}/..%2F${path.basename(outsideDir)}%2Fsecret.txt`);
     assert.strictEqual(escape.statusCode, 403);
-  })) passed++; else failed++;
+  });
 
-  if (await test('artifact responses carry a sandbox CSP (direct-navigation hardening)', async () => {
+  await test('artifact responses carry a sandbox CSP (direct-navigation hardening)', async () => {
     const md = await request(port, 'GET', `/artifact/${key}/`);
     assert.strictEqual(md.statusCode, 200);
     assert.strictEqual(md.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
     const html = await request(port, 'GET', `/artifact/${htmlKey}/`);
     assert.strictEqual(html.statusCode, 200);
     assert.strictEqual(html.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
-  })) passed++; else failed++;
+  });
 
-  if (await test('missing-artifact 404 escapes the file path', async () => {
+  await test('missing-artifact 404 escapes the file path', async () => {
     // Quotes and ampersands are escapable on every platform (Windows
     // rejects < > in filenames, so angle brackets stay out of fixtures).
     const evilFile = path.join(tmp, `evil'b&xss.plan.md`);
@@ -234,61 +413,51 @@ async function main() {
     assert.strictEqual(res.statusCode, 404);
     assert.ok(!res.body.includes(`evil'b&xss`), 'raw filename must not appear in the 404 page');
     assert.ok(res.body.includes('evil&#39;b&amp;xss'), 'filename must be HTML-escaped in the 404 page');
-  })) passed++; else failed++;
+  });
 
-  if (await test('symlinked sibling assets escaping the artifact dir are blocked', async () => {
-    try {
-      fs.symlinkSync(path.join(outsideDir, 'secret.txt'), path.join(tmp, 'evil-link.txt'));
-      fs.symlinkSync(path.join(tmp, 'style.css'), path.join(tmp, 'ok-link.css'));
-    } catch {
-      console.log('    SKIP: symlink creation unavailable on this platform');
-      return;
-    }
+  await test('symlinked sibling assets escaping the artifact dir are blocked', async () => {
+    createTestSymlink(path.join(outsideDir, 'secret.txt'), path.join(tmp, 'evil-link.txt'));
+    createTestSymlink(path.join(tmp, 'style.css'), path.join(tmp, 'ok-link.css'));
     const blocked = await request(port, 'GET', `/artifact/${key}/evil-link.txt`);
     assert.strictEqual(blocked.statusCode, 403);
     const allowed = await request(port, 'GET', `/artifact/${key}/ok-link.css`);
     assert.strictEqual(allowed.statusCode, 200);
     assert.ok(allowed.body.includes('color: red'));
-  })) passed++; else failed++;
+  });
 
-  if (await test('served HTML siblings carry the sandbox CSP', async () => {
+  await test('served HTML siblings carry the sandbox CSP', async () => {
     fs.writeFileSync(path.join(tmp, 'note.html'), '<!DOCTYPE html><html><body><p>hi</p></body></html>');
     const res = await request(port, 'GET', `/artifact/${key}/note.html`);
     assert.strictEqual(res.statusCode, 200);
     assert.strictEqual(res.headers['content-security-policy'], 'sandbox allow-scripts allow-forms allow-popups');
-  })) passed++; else failed++;
+  });
 
-  if (await test('symlinked assets take their MIME from the link name', async () => {
-    try {
-      fs.writeFileSync(path.join(tmp, 'realfile'), 'body { color: blue }');
-      fs.symlinkSync(path.join(tmp, 'realfile'), path.join(tmp, 'theme.css'));
-    } catch {
-      console.log('    SKIP: symlink creation unavailable on this platform');
-      return;
-    }
+  await test('symlinked assets take their MIME from the link name', async () => {
+    fs.writeFileSync(path.join(tmp, 'realfile'), 'body { color: blue }');
+    createTestSymlink(path.join(tmp, 'realfile'), path.join(tmp, 'theme.css'));
     const res = await request(port, 'GET', `/artifact/${key}/theme.css`);
     assert.strictEqual(res.statusCode, 200);
     assert.ok(String(res.headers['content-type']).startsWith('text/css'));
-  })) passed++; else failed++;
+  });
 
-  if (await test('static chrome assets are served', async () => {
+  await test('static chrome assets are served', async () => {
     for (const asset of ['/canvas.css', '/client.js', '/sdk.js']) {
       const res = await request(port, 'GET', asset);
       assert.strictEqual(res.statusCode, 200, `${asset} should be 200`);
     }
-  })) passed++; else failed++;
+  });
 
-  if (await test('await with timeoutMs returns waiting when idle', async () => {
+  await test('await with timeoutMs returns waiting when idle', async () => {
     const res = await request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}&timeoutMs=50`);
     assert.strictEqual(jsonBody(res).status, 'waiting');
-  })) passed++; else failed++;
+  });
 
-  if (await test('await returns missing for files without a session', async () => {
+  await test('await returns missing for files without a session', async () => {
     const res = await request(port, 'GET', `/api/await?file=${encodeURIComponent(path.join(tmp, 'other.md'))}`);
     assert.strictEqual(jsonBody(res).status, 'missing');
-  })) passed++; else failed++;
+  });
 
-  if (await test('browser feedback wakes a blocking await; presence transitions', async () => {
+  await test('browser feedback wakes a blocking await; presence transitions', async () => {
     const sse = openSse(port, key);
     await sse.ready;
     const awaitPromise = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
@@ -313,11 +482,11 @@ async function main() {
     await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'thinking'));
     await waitFor(() => sse.received.some(e => e.event === 'chat-sync' && e.data.chat.length === 2));
     sse.close();
-  })) passed++; else failed++;
+  });
 
   // Regression: feedback sent with nobody parked on `await` used to leave the
   // pill claiming "agent working" while the message sat undelivered forever.
-  if (await test('feedback with no listener reports queued, not working', async () => {
+  await test('feedback with no listener reports queued, not working', async () => {
     const queuedArtifact = path.join(tmp, 'queued.plan.md');
     fs.writeFileSync(queuedArtifact, '# Plan: Queued\n');
     const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: queuedArtifact } }));
@@ -337,9 +506,9 @@ async function main() {
     assert.strictEqual(drained.status, 'feedback');
     assert.strictEqual(canvas.presenceFor(opened.key), 'thinking');
     sse.close();
-  })) passed++; else failed++;
+  });
 
-  if (await test('typing endpoint drives the indicator and reply clears it', async () => {
+  await test('typing endpoint drives the indicator and reply clears it', async () => {
     const typingArtifact = path.join(tmp, 'typing.plan.md');
     fs.writeFileSync(typingArtifact, '# Plan: Typing\n');
     const opened = jsonBody(await request(port, 'POST', '/api/sessions', { body: { file: typingArtifact } }));
@@ -361,9 +530,9 @@ async function main() {
     assert.strictEqual(canvas.presenceFor(opened.key), 'waiting');
     await waitFor(() => sse.received.some(e => e.event === 'presence' && e.data.state === 'waiting'));
     sse.close();
-  })) passed++; else failed++;
+  });
 
-  if (await test('thinking and typing states expire instead of sticking', async () => {
+  await test('thinking and typing states expire instead of sticking', async () => {
     const staleArtifact = path.join(tmp, 'stale.plan.md');
     fs.writeFileSync(staleArtifact, '# Plan: Stale\n');
     const staleStore = createSessionStore({ stateDir: path.join(tmp, 'stale-state') });
@@ -393,11 +562,11 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 60));
     assert.strictEqual(staleCanvas.presenceFor(opened.key), 'queued');
     await staleCanvas.close();
-  })) passed++; else failed++;
+  });
 
   // The stuck pill only self-heals if the decay is pushed to an idle browser
   // that is not making any requests of its own.
-  if (await test('presence sweep pushes the decayed state to an idle browser', async () => {
+  await test('presence sweep pushes the decayed state to an idle browser', async () => {
     const sweepArtifact = path.join(tmp, 'sweep.plan.md');
     fs.writeFileSync(sweepArtifact, '# Plan: Sweep\n');
     const sweepStore = createSessionStore({ stateDir: path.join(tmp, 'sweep-state') });
@@ -422,9 +591,9 @@ async function main() {
     );
     sse.close();
     await sweepCanvas.close();
-  })) passed++; else failed++;
+  });
 
-  if (await test('long-poll heartbeat whitespace arrives before the payload', async () => {
+  await test('long-poll heartbeat whitespace arrives before the payload', async () => {
     const chunks = [];
     const done = new Promise((resolve, reject) => {
       const req = http.get(
@@ -443,9 +612,9 @@ async function main() {
     await done;
     const full = chunks.join('');
     assert.strictEqual(JSON.parse(full.trim()).status, 'feedback');
-  })) passed++; else failed++;
+  });
 
-  if (await test('agent reply lands in the chat via SSE chat-sync', async () => {
+  await test('agent reply lands in the chat via SSE chat-sync', async () => {
     const sse = openSse(port, key);
     await sse.ready;
     const res = await request(port, 'POST', `/api/session/${key}/reply`, { body: { text: 'reworked, please re-check' } });
@@ -456,17 +625,17 @@ async function main() {
       )
     );
     sse.close();
-  })) passed++; else failed++;
+  });
 
-  if (await test('live reload: editing the artifact emits an SSE reload event', async () => {
+  await test('live reload: editing the artifact emits an SSE reload event', async () => {
     const sse = openSse(port, key);
     await sse.ready;
     fs.appendFileSync(artifact, '\n## Addendum\n');
     await waitFor(() => sse.received.some(e => e.event === 'reload'), { timeoutMs: 4000 });
     sse.close();
-  })) passed++; else failed++;
+  });
 
-  if (await test('send-and-end delivers the final batch and ends the session', async () => {
+  await test('send-and-end delivers the final batch and ends the session', async () => {
     const awaitPromise = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
     await waitFor(() => canvas.presenceFor(key) === 'listening');
     await request(port, 'POST', `/api/session/${key}/feedback`, {
@@ -478,44 +647,44 @@ async function main() {
     assert.strictEqual(result.endedBy, 'user');
     const after = await request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
     assert.strictEqual(jsonBody(after).status, 'ended');
-  })) passed++; else failed++;
+  });
 
-  if (await test('user-ended sessions return 409 on plain reopen, open with reopen:true', async () => {
+  await test('user-ended sessions return 409 on plain reopen, open with reopen:true', async () => {
     const refused = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
     assert.strictEqual(refused.statusCode, 409);
     assert.strictEqual(jsonBody(refused).status, 'user-ended');
     const forced = await request(port, 'POST', '/api/sessions', { body: { file: artifact, reopen: true } });
     assert.strictEqual(forced.statusCode, 200);
-  })) passed++; else failed++;
+  });
 
-  if (await test('agent end via POST /api/end allows plain reopen', async () => {
+  await test('agent end via POST /api/end allows plain reopen', async () => {
     const res = await request(port, 'POST', '/api/end', { body: { file: artifact } });
     assert.strictEqual(jsonBody(res).endedBy, 'agent');
     const reopened = await request(port, 'POST', '/api/sessions', { body: { file: artifact } });
     assert.strictEqual(reopened.statusCode, 200);
-  })) passed++; else failed++;
+  });
 
-  if (await test('feedback on an ended session is refused with 409', async () => {
+  await test('feedback on an ended session is refused with 409', async () => {
     await request(port, 'POST', `/api/end`, { body: { file: htmlArtifact } });
     const res = await request(port, 'POST', `/api/session/${htmlKey}/feedback`, {
       body: { items: [{ kind: 'chat', text: 'too late' }] }
     });
     assert.strictEqual(res.statusCode, 409);
-  })) passed++; else failed++;
+  });
 
-  if (await test('GET / lists sessions in the ECC shell', async () => {
+  await test('GET / lists sessions in the ECC shell', async () => {
     const res = await request(port, 'GET', '/');
     assert.ok(res.body.includes('Plan Canvas sessions'));
     assert.ok(res.body.includes('demo.plan.md'));
-  })) passed++; else failed++;
+  });
 
-  if (await test('POST /shutdown triggers the shutdown callback', async () => {
+  await test('POST /shutdown triggers the shutdown callback', async () => {
     const res = await request(port, 'POST', '/shutdown');
     assert.strictEqual(jsonBody(res).status, 'stopping');
     await waitFor(() => idleFired);
-  })) passed++; else failed++;
+  });
 
-  if (await test('close() settles a held long-poll instead of hanging', async () => {
+  await test('close() settles a held long-poll instead of hanging', async () => {
     await request(port, 'POST', '/api/sessions', { body: { file: artifact, reopen: true } });
     const held = request(port, 'GET', `/api/await?file=${encodeURIComponent(artifact)}`);
     await waitFor(() => canvas.presenceFor(store.findByFile(artifact).key) === 'listening');
@@ -523,17 +692,14 @@ async function main() {
     const result = jsonBody(await held);
     assert.strictEqual(result.status, 'waiting');
     assert.ok(result.note.includes('shutting down'));
-  })) passed++; else failed++;
+  });
 
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.rmSync(outsideDir, { recursive: true, force: true });
 
   console.log('\n' + '='.repeat(40));
-  console.log(`Passed: ${passed}`);
-  console.log(`Failed: ${failed}`);
+  printResults(suite.results);
   console.log('='.repeat(40));
-
-  process.exit(failed > 0 ? 1 : 0);
 }
 
 main().catch(err => {
