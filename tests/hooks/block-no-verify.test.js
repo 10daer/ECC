@@ -1812,7 +1812,138 @@ const stickyEnvironmentCases = Object.freeze([
   ["readonly print flag assignment prevents later reset", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly -p GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; unset GIT_CONFIG_PARAMETERS; git commit"],
   ["readonly print flag safe Git control", 0, "readonly -p GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"]
 ]);
-for (const [family, expected, command] of stickyEnvironmentCases) {
+// Append assignments are shell syntax before a command or in declarations.
+// env's NAME+=VALUE is a different, literal variable name, not shell append.
+const appendEnvironmentCases = [
+  ['prefix from unset', 'GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"'],
+  ['export from unset', 'export GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'";'],
+  ['declare from unset', 'declare -x GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'";'],
+  ['typeset from unset', 'typeset -x GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'";'],
+  ['standalone then export', 'GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"; export GIT_CONFIG_PARAMETERS;'],
+  ['append to exported safe parameters', 'export GIT_CONFIG_PARAMETERS="\'color.ui=false\'"; GIT_CONFIG_PARAMETERS+=" \'core.hooksPath=/dev/null\'";'],
+  ['append split declaration', 'export GIT_CONFIG_PARAMETERS="\'core.hooks"; export GIT_CONFIG_PARAMETERS+="Path=/dev/null\'";'],
+  ['append split standalone', 'GIT_CONFIG_PARAMETERS="\'core.hooks"; GIT_CONFIG_PARAMETERS+="Path=/dev/null\'"; export GIT_CONFIG_PARAMETERS;'],
+  ['append split prefix from local', 'GIT_CONFIG_PARAMETERS="\'core.hooks"; GIT_CONFIG_PARAMETERS+="Path=/dev/null\'"'],
+  ['multiple prefix operands', 'GIT_CONFIG_PARAMETERS="\'core.hooks" GIT_CONFIG_PARAMETERS+="Path=/dev/null\'"'],
+  ['count triplet prefix', 'GIT_CONFIG_COUNT+=1 GIT_CONFIG_KEY_0+=core.hooksPath GIT_CONFIG_VALUE_0+=/dev/null'],
+  ['count triplet declaration', 'export GIT_CONFIG_COUNT+=1 GIT_CONFIG_KEY_0+=core.hooksPath GIT_CONFIG_VALUE_0+=/dev/null;'],
+  ['split key declaration', 'export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core. GIT_CONFIG_VALUE_0=/dev/null; declare -x GIT_CONFIG_KEY_0+=hooksPath;'],
+  ['split key prefix', 'GIT_CONFIG_KEY_0=core.; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0+=hooksPath GIT_CONFIG_VALUE_0=/dev/null'],
+  ['conditional append possible', 'false && export GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'";'],
+  ['append cannot erase prior unknown-value alternative', 'export GIT_CONFIG_PARAMETERS="\'core.hooksPath=/dev/null\'"; GIT_CONFIG_PARAMETERS+="$UNKNOWN";'],
+  ['dynamic prefix cannot erase prior alternative', 'export GIT_CONFIG_PARAMETERS="\'core.hooksPath=/dev/null\'"; GIT_CONFIG_PARAMETERS+="$UNKNOWN"'],
+  ['dynamic declaration retains new literal operand', 'export GIT_CONFIG_PARAMETERS=""; export GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'$UNKNOWN";'],
+  ['dynamic prefix retains new literal operand', 'GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'$UNKNOWN"'],
+];
+const appendCases = [];
+for (const [family, setup] of appendEnvironmentCases) {
+  appendCases.push([`append ${family}`, 2, `${setup} git commit`]);
+  appendCases.push([`append ${family} safe Git control`, 0, `${setup} git status`]);
+}
+appendCases.push(
+  ['unexported append stays local', 0, 'GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"; git commit'],
+  ['export attribute removal remains effective', 0, 'export GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"; export -n GIT_CONFIG_PARAMETERS; git commit'],
+  ['explicit unset removes appended state', 0, 'export GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"; unset GIT_CONFIG_PARAMETERS; git commit'],
+  ['child environment reset removes appended state', 0, 'export GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"; env -i git commit'],
+  ['env append-like name is literal data', 0, 'env GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'" git commit'],
+  ['env append-like name after reset is literal data', 0, 'export GIT_CONFIG_PARAMETERS="\'core.hooksPath=/dev/null\'"; env -i GIT_CONFIG_PARAMETERS+= git commit'],
+  ['env literal name does not reset real exported key', 2, 'export GIT_CONFIG_PARAMETERS="\'core.hooksPath=/dev/null\'"; env GIT_CONFIG_PARAMETERS+= git commit'],
+  ['quoted shell assignment name stays data', 0, '"GIT_CONFIG_PARAMETERS+=\'core.hooksPath=/dev/null\'" git commit'],
+  ['readonly safe value cannot acquire appended override', 0, 'declare -rx GIT_CONFIG_PARAMETERS=""; GIT_CONFIG_PARAMETERS+="\'core.hooksPath=/dev/null\'"; git commit'],
+  ['readonly unsafe value cannot lose override through append', 2, 'export GIT_CONFIG_PARAMETERS="\'core.hooksPath=/dev/null\'"; readonly GIT_CONFIG_PARAMETERS; GIT_CONFIG_PARAMETERS+="x"; git commit'],
+  ['ordinary append parameters do not disable hooks', 0, 'export GIT_CONFIG_PARAMETERS="\'color.ui="; GIT_CONFIG_PARAMETERS+="false\'"; git commit'],
+  ['empty appended count is not an override', 0, 'export GIT_CONFIG_COUNT=0; GIT_CONFIG_COUNT+=""; git commit'],
+);
+
+appendCases.push(...[
+  [
+    "unknown prior export commit",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; export GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "unknown prior export status",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; export GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "unknown prior standalone commit",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "unknown prior standalone status",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS; git status"
+  ],
+  [
+    "unknown prior prefix commit",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\" git commit"
+  ],
+  [
+    "unknown prior prefix status",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\" git status"
+  ],
+  [
+    "unknown repeated prefix commit",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"$UNKNOWN\" GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\" git commit"
+  ],
+  [
+    "unknown repeated prefix status",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"$UNKNOWN\" GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\" git status"
+  ],
+  [
+    "three ordered prefix operands commit",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.\" GIT_CONFIG_PARAMETERS+=\"hooks\" GIT_CONFIG_PARAMETERS+=\"Path=/dev/null'\" git commit"
+  ],
+  [
+    "three ordered prefix operands status",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.\" GIT_CONFIG_PARAMETERS+=\"hooks\" GIT_CONFIG_PARAMETERS+=\"Path=/dev/null'\" git status"
+  ],
+  [
+    "unknown count followed by literal append commit",
+    2,
+    "export GIT_CONFIG_COUNT=\"$UNKNOWN\" GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; GIT_CONFIG_COUNT+=1; git commit"
+  ],
+  [
+    "unknown count followed by literal append status",
+    0,
+    "export GIT_CONFIG_COUNT=\"$UNKNOWN\" GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; GIT_CONFIG_COUNT+=1; git status"
+  ],
+  [
+    "unknown prior child context commit",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; sh -c \"GIT_CONFIG_PARAMETERS+=\\\"'core.hooksPath=/dev/null'\\\"; git commit\""
+  ],
+  [
+    "unknown prior child context status",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"$UNKNOWN\"; sh -c \"GIT_CONFIG_PARAMETERS+=\\\"'core.hooksPath=/dev/null'\\\"; git status\""
+  ],
+  [
+    "literal prior is not unresolved '$UNKNOWN'",
+    0,
+    "GIT_CONFIG_PARAMETERS='$UNKNOWN'; export GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal prior is not unresolved \\$UNKNOWN",
+    0,
+    "GIT_CONFIG_PARAMETERS=\\$UNKNOWN; export GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal prior is not unresolved \"\\$UNKNOWN\"",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"\\$UNKNOWN\"; export GIT_CONFIG_PARAMETERS+=\"'core.hooksPath=/dev/null'\"; git commit"
+  ]
+]);
+
+for (const [family, expected, command] of [...stickyEnvironmentCases, ...appendCases]) {
   if (test(`${family} ${expected}: ${JSON.stringify(command)}`, () => {
     const result = runHook(command);
     assert.strictEqual(result.code, expected, result.stderr);
