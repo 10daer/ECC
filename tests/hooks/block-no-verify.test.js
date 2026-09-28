@@ -4,6 +4,10 @@
 
 const assert = require('assert');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const vm = require('vm');
+const hook = require('../../scripts/hooks/block-no-verify');
 const { spawnSync } = require('child_process');
 
 const runner = path.join(__dirname, '..', '..', 'scripts', 'hooks', 'run-with-flags.js');
@@ -20,25 +24,10 @@ function test(name, fn) {
   }
 }
 
-function runHook(input, env = {}) {
+function runHook(input) {
   const rawInput = typeof input === 'string' ? input : JSON.stringify(input);
-  const result = spawnSync('node', [runner, 'pre:bash:block-no-verify', 'scripts/hooks/block-no-verify.js', 'minimal,standard,strict'], {
-    input: rawInput,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ECC_HOOK_PROFILE: 'standard',
-      ...env
-    },
-    timeout: 15000,
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
-
-  return {
-    code: Number.isInteger(result.status) ? result.status : 1,
-    stdout: result.stdout || '',
-    stderr: result.stderr || ''
-  };
+  const result = hook.run(rawInput);
+  return { code: result.exitCode, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
 let passed = 0;
@@ -219,6 +208,103 @@ if (test('still allows -tn (n is the -t template path, not a flag)', () => {
   assert.strictEqual(r.code, 0, `expected exit 0, got ${r.code}: ${r.stderr}`);
 })) passed++; else failed++;
 
+
+// --- Quoted/heredoc candidates: preserve blocking, prevent flag leakage ---
+
+const executingPayloads = [
+  // Quoted heredoc delimiter disables shell expansion but Python still consumes code; unsupported interpreter language remains conservative on a literal bypass phrase.
+  ['hyphenated Python heredoc delimiter', 'python3 - <<\'PY-SCRIPT\'\nprint("git commit -n")\nPY-SCRIPT\nbash -n x.sh'],
+  ['block double-quoted git executable', '"git" commit -n -m x'],
+  ['block single-quoted git executable', "'git' commit -n -m x"],
+  ['block git executable assembled with empty single quotes', "g''it commit -n -m x"],
+  ['block git executable assembled with empty double quotes', 'g""it commit --no-verify -m x'],
+  ['block git executable assembled from quoted prefix', "'g'it commit -n -m x"],
+  ['block git executable assembled from quoted middle', "g'i't commit -n -m x"],
+  ['block git executable assembled with an escape', 'g\\it commit -n -m x'],
+  ['block double-quoted git plus exe suffix', '"git".exe commit -n -m x'],
+  ['block single-quoted git plus exe suffix', "'git'.exe commit -n -m x"],
+  ['block hooksPath after double-quoted git plus exe suffix', '"git".exe -c core.hooksPath=/tmp/no commit -m x'],
+  ['block hooksPath after single-quoted git plus exe suffix', "'git'.exe -c core.hooksPath=/tmp/no commit -m x"],
+  ['block double-quoted git with quote-assembled exe suffix', '"git".e""xe commit -n -m x'],
+  ['block single-quoted git with quote-assembled exe suffix', "'git'.e''xe commit -n -m x"],
+  ['block quoted git with escaped exe suffix', '"git".\\exe commit -n -m x'],
+  ['block hooksPath after quote-assembled exe suffix', '"git".e""xe -c core.hooksPath=/tmp/no commit -m x'],
+  ['quoted hash does not hide a later commit bypass', 'echo "#"; git commit -n -m x'],
+  ['hash text in quotes does not hide a later commit bypass', 'echo "not # a comment" && git commit --no-verify -m x'],
+  ['word-internal hash does not hide a later commit bypass', 'echo foo#bar; git commit -n -m x'],
+  ['word-internal hash does not hide a later push bypass', 'printf %s foo#bar && git push --no-verify'],
+  ['pipe echo data to bash', "echo 'git commit -n -m x' | bash"],
+  ['pipe printf data to sh', "printf '%s\\n' 'git commit --no-verify -m x' | sh"],
+  ['execute data through xargs and bash -c', "printf '%s\\n' 'git commit -n -m x' | xargs -I CMD bash -c CMD"],
+  ['execute command substitution text through bash', "echo '$(git commit -n -m x)' | bash"],
+  ['execute bash here-string', "bash <<< 'git commit -n -m x'"],
+  ['execute sh here-string', "sh -s <<< 'git commit --no-verify -m x'"],
+  ['block backtick command substitution', 'echo "`git commit -n -m x`"'],
+  ['block substitution after quoted parenthesis', 'echo "$(printf \')\'; git commit -n -m x)"'],
+  ['block substitution after case parenthesis', 'echo "$(case x in x) :;; esac; git commit -n -m x)"'],
+  ['block bash --noprofile -c', "bash --noprofile -c 'git commit -n -m x'"],
+  ['block bash -O extglob -c', "bash -O extglob -c 'git commit -n -m x'"],
+  ['block bash -o pipefail -c', "bash -o pipefail -c 'git commit -n -m x'"],
+  ['block bash -c after option terminator', "bash -c -- 'git commit -n -m x'"],
+  ['block sh -c after option terminator', "sh -c -- 'git commit --no-verify -m x'"],
+  ['block heredoc piped to bash', 'cat <<EOF | bash\ngit commit -n -m x\nEOF'],
+  ['block heredoc piped to sudo bash', 'cat <<EOF | sudo bash\ngit commit --no-verify -m x\nEOF'],
+  ['block heredoc on leading redirection', '<<EOF bash\ngit commit -n -m x\nEOF'],
+  ['block executable command after CRLF heredoc', 'python3 - <<\'PY\'\r\nprint("git commit -n")\r\nPY\r\ngit commit -n -m x'],
+  ['block bash -c double-quoted payload', 'bash -c "git commit -n -m x"'],
+  ['block eval payload', 'eval "git commit --no-verify -m x"'],
+  ['block bash heredoc payload', 'bash <<EOF\ngit commit -n -m x\nEOF'],
+  ['block second command in a chain', 'git commit -m ok; git commit --no-verify -m x'],
+  ['block third command in a chain', 'git add -A && git commit -m ok && git push --no-verify'],
+  ['block combined short flag after a clean command', 'git commit -m ok; git commit -am x -n'],
+  ['block bypass in a whitespace-separated command sequence', 'git commit -m ok            git push --no-verify'],
+  ['block ANSI-C quoted git executable', "$'git' commit -n -m x"],
+  ['block ANSI-C quoted git with long flag', "$'git' commit --no-verify -m x"],
+  ['block line-continued commit bypass', 'git commit \\\n--no-verify -m x'],
+  ['block heredoc line-continued commit bypass', 'cat <<EOF | bash\ngit commit \\\n--no-verify -m x\nEOF'],
+];
+
+for (const [name, command] of executingPayloads) {
+  if (test(name, () => {
+    const r = runHook({ tool_input: { command } });
+    assert.strictEqual(r.code, 2, `expected exit 2, got ${r.code}: ${r.stderr}`);
+  })) passed++; else failed++;
+}
+
+const nonLeakingPayloads = [
+  // Inside double quotes a backslash before dot remains literal, so decoded executable is git\.exe, not git.exe.
+  ['allows the distinct executable with a literal escaped dot', '"git""\\.exe" commit -n -m x'],
+  // A complete echo operand is data; accepted role repair intentionally corrects the authored broad-blocking expectation.
+  ['allows quoted echo data (corrected author expectation)', 'echo "git commit -n"'],
+  ['python heredoc string with later bash -n', 'python3 - <<\'PY\'\nold="git add -A\\nif ! git diff --cached --quiet; then\\n  git commit -q -m \\"vault sync"\nPY\nbash -n vault-sync.sh'],
+  ['assignment string with later bash -n', 'old="git commit -q -m x"; bash -n x.sh'],
+  ['plain commit followed by later-line bash -n', 'git commit -m x\nbash -n s.sh'],
+  ['plain commit followed by grep -n', 'git commit -m x; grep -n foo f.txt'],
+  ['JSON string followed by sed -n', 'printf \'%s\' \'{"cmd":"git commit -q -m \\"x\\""}\' | node x.js; sed -n 1p f'],
+  ['non-shell heredoc after bash argument', "bash -c 'cat' <<EOF\ngit commit -q -m x\nEOF\nbash -n y.sh"],
+  ['separate commits do not inherit bash -n', 'git commit -m x   ;   git commit --no-edit   ;   bash -n x.sh   ;   git commit -tn'],
+  ['double-quoted literal does not inherit grep -n', 'echo "git commit -q -m x"; grep -n needle file'],
+  ['single-quoted push literal does not inherit later flag', "note='git push'; printf '%s\\n' --no-verify"],
+  ['Python heredoc line does not inherit sed flag', 'python3 <<EOF\nprint("git commit -q -m x")\nEOF\nsed --no-verify file'],
+  ['assignment literal does not inherit grep long flag', "payload='git commit -m x'; grep --no-verify file"],
+  ['printf literal does not inherit bash -n', 'printf \'%s\' "git commit -m x"; bash -n script.sh'],
+  ['assignment literal does not inherit quoted echo -n data', 'old="git commit -q"; echo " -n"'],
+  ['push literal does not inherit quoted printf long flag data', "payload='git push'; printf ' --no-verify'"],
+  ['printf literal does not inherit later quoted echo -n data', 'printf "%s" "git commit -q"; echo " -n"'],
+  ['quoted git executable does not inherit later grep -n', '"git" status; grep -n needle file'],
+  ['assembled git executable does not inherit later bash -n', "g''it status && bash -n script.sh"],
+  ['quoted git executable does not inherit quoted echo -n data', "'git' status; echo \" -n\""],
+  ['quoted git commit does not inherit later bash -n', '"git" commit -m x; bash -n y.sh'],
+  ['ANSI-C quoted status does not inherit later grep -n', "$'git' status; grep -n needle file"],
+  ['heredoc python string line ending in backslash does not inherit later bash -n', 'python3 - <<\'PY\'\nprint("git commit -q \\\n")\nPY\nbash -n x.sh'],
+];
+
+for (const [name, command] of nonLeakingPayloads) {
+  if (test(name, () => {
+    const r = runHook({ tool_input: { command } });
+    assert.strictEqual(r.code, 0, `expected exit 0, got ${r.code}: ${r.stderr}`);
+  })) passed++; else failed++;
+}
 // --- Optional stuck values (-u, -S) and long-option prefixes ---
 
 if (test('allows -uno (n is the -u untracked-files mode, not a flag)', () => {
@@ -250,6 +336,401 @@ if (test('allows --no-verbose (not a prefix of --no-verify)', () => {
   const r = runHook({ tool_input: { command: 'git commit --no-verbose -m "msg"' } });
   assert.strictEqual(r.code, 0, `expected exit 0, got ${r.code}: ${r.stderr}`);
 })) passed++; else failed++;
+
+
+// Finite literal role regressions: supplied command strings are never executed.
+for (const command of [
+  "git commit -m \"$(git push --no-verify)\"",
+  "git commit -m \"$(git -c core.hooksPath=/dev/null push)\"",
+  "git commit --message=\"$(git push --no-veri)\"",
+  "git commit -m \"`git push --no-verify`\"",
+  "echo '#'; git push --no-verify",
+  "'bash' -c 'git push --no-verify'",
+  "printf '%s' 'git commit --no-verify'; git push --no-verify",
+  "printf '%s' 'git push --no-verify' | sh",
+  "printf '%s' 'git push --no-verify' | sudo -u root bash",
+  "git commit -m \"$(printf '%s' 'git push --no-verify' | sh)\"",
+  "echo $(echo $(git push --no-verify))",
+  "cat <(git push --no-verify)",
+  "cat <<EOF\n'$(git push --no-verify)'\nEOF",
+  "cat <<EOF\n`git push --no-verify`\nEOF",
+  "bash <<'EOF'\ngit push --no-verify\nEOF",
+  "cat <<'EOF' | bash\ngit push --no-verify\nEOF",
+  "cat <<-EOF | sh\n\tgit push --no-verify\n\tEOF",
+  "cat <<A <<B\nsafe\nA\n$(git push --no-verify)\nB",
+  "A=$(git push --no-verify) echo safe",
+  "A=x command -- git push --no-verify",
+  "command -p git commit --no-verif",
+  "exec -a git /usr/bin/git commit --no-verify",
+  "env -u HOME git push --no-verify",
+  "sudo -u git git push --no-verify",
+  "eval 'git' 'push' '--no-verify'",
+  "bash -lc 'git push --no-verify' 'data'",
+  "sh -c -- 'git commit --no-verify' arg0",
+  "(git commit -m safe; git push --no-verify)",
+  "if true; then git push --no-verify; fi",
+  "echo safe # git commit -m safe\ngit push --no-verify",
+  "g\\\nit push --no-verify",
+  "git com''mit --no-verify",
+  "git commit --no-veri # actual option",
+  "git push '--no-verify'",
+  "custom-wrapper 'git push --no-verify'",
+  "python -c 'os.system(\"git push --no-verify\")'",
+  "python3 <<'PY'\nprint(\"git commit -n\")\nPY"
+]) {
+  if (test(`literal denied: ${JSON.stringify(command)}`, () => {
+    const result = runHook({ tool_input: { command } });
+    assert.strictEqual(result.code, 2, result.stderr);
+    assert.deepStrictEqual(runHook({ tool_input: { command } }), result, 'Second call must not inherit lexical state');
+  })) passed++; else failed++;
+}
+for (const command of [
+  "printf '%s' 'git commit --no-verify'",
+  "printf '%s' eval 'git commit --no-verify'",
+  "echo 'git commit' --no-verify",
+  "bash -c 'echo ok' 'git push --no-verify'",
+  "'bash' -c 'printf %s safe' 'git push --no-verify'",
+  "git commit -m --no-verify",
+  "git commit -Skeyn -m x",
+  "git commit -- --no-verify",
+  "git push '--no-verify;literal'",
+  "git push '--no-verify)literal'",
+  "git commit -m '$(git push --no-verify)'",
+  "printf '%s' '$(git push --no-verify)'",
+  "echo \"\\$(git push --no-verify)\"",
+  "echo \"\\`git push --no-verify\\`\"",
+  "cat <<'EOF'\n$(git push --no-verify)\nEOF",
+  "cat <<\\EOF\ngit push --no-verify\nEOF",
+  "cat <<EOF\ngit push --no-verify\nEOF",
+  "cat <<EOF\n\\$(git push --no-verify)\nEOF",
+  "cat <<'EOF'\ntext\nEOF\ngit commit -m safe",
+  "echo 'git commit --no-verify' | cat",
+  "printf '%s' 'git push --no-verify' | grep git",
+  "cat <<'EOF' | cat\ngit push --no-verify\nEOF",
+  "bash -c cat <<'EOF'\ngit push --no-verify\nEOF",
+  "echo '# git push --no-verify'",
+  "echo safe # git push --no-verify",
+  "git commit -m safe # --no-verify",
+  "payload='git push --no-verify'",
+  "command -v git push --no-verify",
+  "command -pV git commit --no-verify",
+  "exec -a git echo 'push --no-verify'",
+  "env -u git echo 'git push --no-verify'",
+  "sudo -u git echo 'git push --no-verify'",
+  "git commit -m safe > --no-verify",
+  "git commit -m safe 2> --no-verify",
+  "printf '%s' 'git push --no-verify'; git push origin main",
+  "git -C '/tmp/git push --no-verify' status",
+  "echo 'git commit --no-verify' > log",
+  "bash script.sh 'git push --no-verify'"
+]) {
+  if (test(`literal allowed: ${JSON.stringify(command)}`, () => {
+    const result = runHook({ tool_input: { command } });
+    assert.strictEqual(result.code, 0, result.stderr);
+    assert.deepStrictEqual(runHook({ tool_input: { command } }), result, 'Second call must not inherit lexical state');
+  })) passed++; else failed++;
+}
+
+if (test('bounded wide quoted data remains data', () => {
+  assert.strictEqual(runHook(`printf '%s' ${"'git push --no-verify' ".repeat(2000)}`).code, 0);
+})) passed++; else failed++;
+if (test('deep nested substitutions fail closed within the work budget', () => {
+  assert.strictEqual(runHook('echo ' + '$('.repeat(120) + 'git push --no-verify' + ')'.repeat(120)).code, 2);
+})) passed++; else failed++;
+
+for (const command of [
+  'echo note{git push --no-verify}',
+  'printf %s note{git push --no-verify}',
+  'echo "$(printf %s case)"',
+  "echo 'case x in x) git push --no-verify;; esac'",
+]) {
+  if (test(`literal role control: ${JSON.stringify(command)}`, () => {
+    assert.strictEqual(runHook(command).code, 0);
+  })) passed++; else failed++;
+}
+if (test('moderate nested execution identifies the actual Git bypass', () => {
+  const result = runHook('echo ' + '$('.repeat(8) + 'git push --no-verify' + ')'.repeat(8));
+  assert.strictEqual(result.code, 2);
+  assert.match(result.stderr, /git push/);
+})) passed++; else failed++;
+
+if (test('escaped backtick inside substitution does not hide a later command', () => {
+  const result = runHook('echo "`printf %s \\`; git push --no-verify`"');
+  assert.strictEqual(result.code, 2);
+  assert.match(result.stderr, /git push/);
+})) passed++; else failed++;
+
+
+// Review regressions: literal option roles and nested execution boundaries.
+for (const [expected, commands] of [
+  [2, [
+    "bash +x -c 'git push --no-verify'",
+    "bash +o posix -c 'git push --no-verify'",
+    "bash +o errexit -c 'git push --no-verify'",
+    "bash +O extglob -c 'git commit -n'",
+    "bash +xo posix -c 'git push --no-verify'",
+    "bash +oO posix extglob -c 'git push --no-verify'",
+    "bash -c +x 'git push --no-verify'",
+    "bash -co posix 'git push --no-verify'",
+    "bash +c 'git push --no-verify'",
+    "bash +x -c -- 'git push --no-verify'",
+    "bash +x -c - 'git push --no-verify'",
+    "bash +unknown -c 'git push --no-verify'",
+    "echo \"$(cat <<'EOF'\n)\nEOF\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<EOF\n)\nEOF\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<')'\ntext\n)\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<E'OF'\n)\nEOF\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<\\EOF\n)\nEOF\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<-EOF\n\t)\n\tEOF\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<A <<'B'\n)\nA\n)\nB\ngit push --no-verify\n)\"",
+    "echo \"$(cat <<'EOF' # delimiter is pending\n)\nEOF\ngit push --no-verify\n)\"",
+    "echo \"$(echo $(cat <<'EOF'\n)\nEOF\ngit push --no-verify\n))\"",
+    "echo \"$(cat <<EOF\n)\n$(git push --no-verify)\nEOF\n)\"",
+    "echo \"`echo \\`git push --no-verify\\``\"",
+    "echo \"`echo \\$(git push --no-verify)`\"",
+    "echo \"`git push --no-verify`\"",
+    "echo \"$(echo $(git push --no-verify))\"",
+  ]],
+  [0, [
+    "bash +x -c 'echo safe' 'git push --no-verify'",
+    "bash +o posix -c 'echo safe' 'git push --no-verify'",
+    "bash +O extglob -c 'echo safe' 'git push --no-verify'",
+    "bash +oO posix extglob -c 'echo safe' 'git push --no-verify'",
+    "bash -co posix 'echo safe' 'git push --no-verify'",
+    "bash -c +x 'echo safe' 'git push --no-verify'",
+    "bash +x script.sh 'git push --no-verify'",
+    "bash -- +x -c 'git push --no-verify'",
+    "echo \"$(cat <<'EOF'\n)\ngit push --no-verify\nEOF\n)\"",
+    "echo \"$(cat <<EOF\n)\ngit push --no-verify\nEOF\n)\"",
+    "echo \"$(cat <<')'\ngit push --no-verify\n)\n)\"",
+    "echo \"$(cat <<E'OF'\n)\n$(git push --no-verify)\nEOF\n)\"",
+    "echo \"$(cat <<-EOF\n\t)\n\tgit push --no-verify\n\tEOF\n)\"",
+    "echo \"$(cat <<A <<'B'\n)\nA\ngit push --no-verify\n)\nB\n)\"",
+    "echo \"\\`git push --no-verify\\`\"",
+    "echo '`echo \\`git push --no-verify\\``'",
+    "echo \"`echo 'git push --no-verify'`\"",
+    "printf '%s' 'git push --no-verify'",
+  ]],
+]) {
+  for (const command of commands) {
+    if (test(`review boundary ${expected}: ${JSON.stringify(command)}`, () => {
+      const result = runHook(command);
+      assert.strictEqual(result.code, expected, result.stderr);
+      if (expected === 2) assert.match(result.stderr, /git (push|commit)/, 'The literal bypass, not budget exhaustion, must be identified');
+    })) passed++; else failed++;
+  }
+}
+
+// Nearby delimiter roles use the same lexer and must not become heredocs.
+for (const [expected, command] of [
+  [2, "echo \"$(cat <<\\\n EOF\n)\nEOF\ngit push --no-verify\n)\""],
+  [0, "echo \"$(cat <<\\\n EOF\n)\ngit push --no-verify\nEOF\n)\""],
+  [2, "echo \"$(cat <<<EOF\ngit push --no-verify\n)\""],
+  [0, "echo \"$(cat <<<EOF\nprintf '%s' 'git push --no-verify'\n)\""],
+  [2, "echo \"$(cat <<\"EOF\"\n)\nEOF\ngit push --no-verify\n)\""],
+  [0, "echo \"$(cat <<\"EOF\"\n)\n$(git push --no-verify)\nEOF\n)\""],
+  [2, "echo \"$(cat <<''\n)\n\ngit push --no-verify\n)\""],
+  [0, "echo \"$(cat <<''\n)\ngit push --no-verify\n\n)\""],
+]) {
+  if (test(`delimiter role ${expected}: ${JSON.stringify(command)}`, () => {
+    const result = runHook(command);
+    assert.strictEqual(result.code, expected, result.stderr);
+    if (expected === 2) assert.match(result.stderr, /git push/);
+  })) passed++; else failed++;
+}
+
+// Private VM instrumentation loads the exact source without changing the host
+// globals, module cache, production API or executing any supplied command.
+function countedClassification(command, quota) {
+  const context = vm.createContext({});
+  vm.runInContext(`
+    globalThis.copiedElements = 0;
+    const originalSlice = Array.prototype.slice;
+    Array.prototype.slice = function(start = 0, end = this.length) {
+      const a = start < 0 ? Math.max(0, this.length + start) : Math.min(this.length, start);
+      const b = end < 0 ? Math.max(0, this.length + end) : Math.min(this.length, end);
+      globalThis.copiedElements += Math.max(0, b - a);
+      return originalSlice.call(this, start, end);
+    };
+  `, context);
+  const lexer = { exports: {} };
+  const hookModule = { exports: {} };
+  const hooks = path.join(__dirname, '../../scripts/hooks');
+  const load = (file, module, require) => vm.compileFunction(fs.readFileSync(file, 'utf8').replace(/^#![^\n]*\n/, ''), ['module', 'require'], { parsingContext: context, filename: file })(module, require);
+  load(path.join(hooks, 'lib/shell-scan.js'), lexer, () => { throw new Error('Unexpected scanner dependency'); });
+  let spent = 0;
+  let valueReads = 0;
+  const instrumentedLexer = {
+    ...lexer.exports,
+    createBudget(length) {
+      const budget = lexer.exports.createBudget(length);
+      return { spend(amount = 1) {
+        spent += amount;
+        // Throw in the module's own realm so its fail-closed catch is exercised.
+        if (quota !== undefined && spent > quota) vm.runInContext('throw new RangeError("Test work quota exceeded")', context);
+        budget.spend(amount);
+      } };
+    },
+    scanShell(text, budget) {
+      const scan = lexer.exports.scanShell(text, budget);
+      for (const command of scan.commands) {
+        for (const word of command.words) {
+          const value = word.value;
+          Object.defineProperty(word, 'value', { get() { valueReads++; return value; } });
+        }
+      }
+      return scan;
+    },
+  };
+  load(path.join(hooks, 'block-no-verify.js'), hookModule, name => {
+    assert.strictEqual(name, './lib/shell-scan');
+    return instrumentedLexer;
+  });
+  return { result: hookModule.exports.run(command), copiedElements: context.copiedElements, spent, valueReads };
+}
+for (const n of [64, 128]) {
+  if (test(`opaque Git candidates avoid quadratic suffix copies at ${n}`, () => {
+    const command = 'unknown ' + 'git '.repeat(n);
+    const result = countedClassification(command);
+    assert.strictEqual(result.result.exitCode, 0);
+    assert.ok(result.copiedElements <= 2 * (n + 1), JSON.stringify(result));
+    assert.ok(result.valueReads <= 12 * (n + 1), JSON.stringify(result));
+  })) passed++; else failed++;
+  if (test(`repeated global-option traversal spends the shared quota at ${n}`, () => {
+    const result = countedClassification('unknown git ' + '-c git '.repeat(n), 3000);
+    assert.strictEqual(result.result.exitCode, 2, JSON.stringify(result));
+    assert.match(result.result.stderr, /work budget/);
+    assert.ok(result.spent >= 3000 && result.spent < 3100, JSON.stringify(result));
+    assert.ok(result.valueReads < 6000, JSON.stringify(result));
+  })) passed++; else failed++;
+}
+
+
+// Unquoted heredoc ending delimiters use logical lines; quoted ones do not.
+for (const quoted of [false, true]) {
+  for (const stripTabs of [false, true]) {
+    for (const nested of [false, true]) {
+      for (const backslashes of [1, 2, 3, 4]) {
+        const delimiter = quoted ? "'EOF'" : 'EOF';
+        const tab = stripTabs ? '\t' : '';
+        let command = `cat <<${stripTabs ? '-' : ''}${delimiter}\n${tab}EO${'\\'.repeat(backslashes)}\nF\ngit push --no-verify\n${tab}EOF\n`;
+        if (nested) command = `echo "$( ${command})"`;
+        const expected = !quoted && backslashes === 1 ? 2 : 0;
+        if (test(`heredoc logical ending quoted=${quoted} tabs=${stripTabs} nested=${nested} escapes=${backslashes}`, () => {
+          const result = runHook(command);
+          assert.strictEqual(result.code, expected, result.stderr);
+          if (expected === 2) assert.match(result.stderr, /git push/);
+        })) passed++; else failed++;
+      }
+    }
+  }
+}
+for (const [expected, command] of [
+  [2, 'cat <<EOF\nE\\\nO\\\nF\ngit push --no-verify\n'],
+  [0, "cat <<'EOF'\nE\\\nO\\\nF\ngit push --no-verify\nEOF\n"],
+  [0, 'cat <<-EOF\n\tEO\\\n\tF\ngit push --no-verify\n\tEOF\n'],
+  [2, 'cat <<EOF\nhello\nEOF\ngit push --no-verify\n'],
+  [2, 'cat <<EOF\n$\\\n(git push --no-verify)\nEOF\n'],
+  [0, "cat <<'EOF'\n$\\\n(git push --no-verify)\nEOF\n"],
+  [0, 'cat <<EOF\n\\$\\\n(git push --no-verify)\nEOF\n'],
+  [2, "echo \"$(cat <<EOF\nEO\\\nF\ngit push --no-verify\n)\""],
+  [0, "echo \"$(cat <<'EOF'\nEO\\\nF\n)\ngit push --no-verify\nEOF\n)\""],
+]) {
+  if (test(`joined heredoc role ${expected}: ${JSON.stringify(command)}`, () => {
+    const result = runHook(command);
+    assert.strictEqual(result.code, expected, result.stderr);
+    if (expected === 2) assert.match(result.stderr, /git push/);
+  })) passed++; else failed++;
+}
+for (const option of ['-oerrexit', '+oerrexit', '-xoerrexit', '+xoerrexit', '-o errexit', '+o errexit', '-coerrexit']) {
+  for (const [expected, code, tail] of [
+    [2, 'git push --no-verify', ''],
+    [0, 'echo safe', " 'git push --no-verify'"],
+  ]) {
+    const command = `zsh ${option} -c '${code}'${tail}`;
+    if (test(`zsh named option role ${expected}: ${command}`, () => {
+      const result = runHook(command);
+      assert.strictEqual(result.code, expected, result.stderr);
+      if (expected === 2) assert.match(result.stderr, /git push/);
+    })) passed++; else failed++;
+  }
+}
+for (const [expected, command] of [
+  [2, "zsh -coerrexit 'git push --no-verify'"],
+  [0, "zsh -coerrexit 'echo safe' 'git push --no-verify'"],
+  [0, "zsh -oerrexit script.sh 'git push --no-verify'"],
+  [0, "zsh +oerrexit -- script.sh 'git push --no-verify'"],
+  [2, "bash +o errexit -c 'git push --no-verify'"],
+  [0, "bash +o errexit -c 'echo safe' 'git push --no-verify'"],
+]) {
+  if (test(`shell-specific option control ${expected}: ${command}`, () => {
+    assert.strictEqual(runHook(command).code, expected);
+  })) passed++; else failed++;
+}
+
+
+// Named option arity is only modeled for Bash and the scoped zsh o grammar.
+// For other literal shell names these are opaque, not guessed script operands.
+for (const shell of ['sh', 'dash', 'ksh']) {
+  for (const option of ['-oerrexit', '+oerrexit', '-o errexit', '+o errexit', '-Oextglob', '+Oextglob', '-O extglob', '+O extglob']) {
+    for (const [expected, payload] of [[2, 'git push --no-verify'], [0, 'echo safe']]) {
+      const command = `${shell} ${option} -c '${payload}'`;
+      if (test(`opaque shell named option ${expected}: ${command}`, () => {
+        const result = runHook(command);
+        assert.strictEqual(result.code, expected, result.stderr);
+        if (expected === 2) assert.match(result.stderr, /git push/);
+      })) passed++; else failed++;
+    }
+  }
+  for (const [expected, tail] of [
+    [2, "-oerrexit -c 'echo safe' 'git push --no-verify'"],
+    [2, "-O extglob script.sh 'git push --no-verify'"],
+    [0, "-c 'echo safe' 'git push --no-verify'"],
+    [2, "-c 'git push --no-verify'"],
+    [0, "script.sh 'git push --no-verify'"],
+    [2, "-s <<'EOF'\ngit push --no-verify\nEOF"],
+    [0, "-s <<'EOF'\necho safe\nEOF"],
+  ]) {
+    if (test(`opaque versus supported ${shell}: ${JSON.stringify(tail)}`, () => {
+      // The first two are intentionally conservative refusals, including
+      // potentially inert positional data; no execution semantics are claimed.
+      const result = runHook(`${shell} ${tail}`);
+      assert.strictEqual(result.code, expected, result.stderr);
+      if (expected === 2) assert.match(result.stderr, /git push/);
+    })) passed++; else failed++;
+  }
+}
+
+const pureOnly = process.argv.includes('--pure-only');
+if (pureOnly) console.log('Pure classifier mode: 3 bounded Node routing checks omitted.');
+else {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-no-verify-'));
+  try {
+    for (const [name, input, disabled, code, direct] of [
+      ['raw stdin passes through direct hook', 'git status', false, 0, true],
+      ['JSON bypass blocks through runner', JSON.stringify({ tool_input: { command: 'git push --no-verify' } }), false, 2],
+      ['disabled hook is silent', 'git push --no-verify', true, 0],
+    ]) {
+      if (test(name, () => {
+        const args = direct ? [path.join(__dirname, '../../scripts/hooks/block-no-verify.js')] : [runner, 'pre:bash:block-no-verify', 'scripts/hooks/block-no-verify.js', 'minimal,standard,strict'];
+        const result = spawnSync(process.execPath, args, {
+          input, encoding: 'utf8', timeout: 3000,
+          env: { PATH: path.dirname(process.execPath), HOME: home, USERPROFILE: home, TMPDIR: home, TMP: home, TEMP: home,
+            ECC_HOOK_PROFILE: 'standard', ECC_HOOK_CONFIG: path.join(home, 'absent.json'),
+            ECC_DISABLED_HOOKS: disabled ? 'pre:bash:block-no-verify' : '' },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        assert.ifError(result.error);
+        assert.strictEqual(result.status, code, result.stderr);
+        if (code === 0) assert.strictEqual(result.stdout, direct ? input : '');
+        if (disabled) assert.strictEqual(result.stderr, '');
+        if (code === 2) assert.match(result.stderr, /BLOCKED/);
+      })) passed++; else failed++;
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
 
 console.log('─'.repeat(50));
 console.log(`Passed: ${passed}  Failed: ${failed}`);
