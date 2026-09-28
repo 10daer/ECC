@@ -103,6 +103,7 @@ async function render(responses) {
   const timers = [];
   const timeouts = [];
   const queue = responses.slice();
+  const listeners = new Map();
   let jsonReads = 0;
   const document = {
     getElementById(id) { if (!elements.has(id)) elements.set(id, element(null, context)); return elements.get(id); },
@@ -115,7 +116,7 @@ async function render(responses) {
   const code = html.slice(start + '<script>'.length, end);
   vm.runInNewContext(code, {
     document,
-    window: { addEventListener() {}, devicePixelRatio: 1 },
+    window: { addEventListener(name, listener) { listeners.set(name, listener); }, devicePixelRatio: 1 },
     AbortController,
     setInterval(fn) { timers.push(fn); },
     // Timers are collected rather than run, so a test can fire the request
@@ -145,6 +146,7 @@ async function render(responses) {
     elements,
     context,
     jsonReads() { return jsonReads; },
+    resizeAgain() { listeners.get('resize')(); },
     writesTo(id) { return elements.get(id).writes; },
     labelOf(id) { return elements.get(id).attributes['aria-label']; },
     // Fire every pending request timeout, then let the rejections propagate.
@@ -515,6 +517,44 @@ let failures = 0;
     } catch (error) {
       failures += 1;
       console.error(`${name}: ${error.message}`);
+    }
+  }
+
+  for (const [name, malformed] of [
+    ['events', { events: [null] }],
+    ['lanes', { lanes: [null] }],
+    ['drawing', { projection: { agents: [null] } }],
+  ]) {
+    try {
+      const retained = populatedView({ events: [{ level: 'advisory', kind: 'accepted', message: 'retained event' }] });
+      const invalid = populatedView({
+        events: [{ level: 'resolution', kind: 'rejected', message: 'invalid event' }],
+        lanes: [{ label: 'rejected lane', kind: 'lane', taskIds: ['task-clear'] }],
+        projection: { agents: [{ agentId: 'task-clear', point: [1, 0], maxRisk: 0.1 }] },
+        ...malformed,
+      });
+      const repaired = await render([
+        { ok: true, data: retained }, { ok: true, data: invalid }, { ok: true, data: newBody },
+      ]);
+      const eventsBefore = textOf(repaired.elements.get('events'));
+      const lanesBefore = textOf(repaired.elements.get('lanes'));
+      const markersBefore = markerShapes(repaired.context);
+      await repaired.pollAgain();
+      assert.strictEqual(textOf(repaired.elements.get('events')), eventsBefore, `${name}: retain previous events`);
+      assert.strictEqual(textOf(repaired.elements.get('lanes')), lanesBefore, `${name}: retain previous lanes`);
+      assert.strictEqual(repaired.elements.get('status').textContent, 'offline');
+      const drawStart = repaired.context.log.length;
+      assert.doesNotThrow(() => repaired.resizeAgain(), `${name}: resize must use the last accepted view`);
+      assert.deepStrictEqual(markerShapes({ log: repaired.context.log.slice(drawStart) }), markersBefore);
+      assert.match(repaired.labelOf('c'), /unavailable.*unknown/i);
+      assert.match(repaired.elements.get('announce').textContent, /unavailable.*unknown/i);
+      await repaired.pollAgain();
+      assert.match(textOf(repaired.elements.get('lanes')), /newest/);
+      assert.doesNotMatch(repaired.labelOf('c'), /unavailable/i);
+      passed += 1;
+    } catch (error) {
+      failures += 1;
+      console.error(`render rollback ${name}: ${error.message}`);
     }
   }
 
