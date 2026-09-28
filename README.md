@@ -42,8 +42,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/affaan-m/ECC/stargazers"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.ecc.tools%2Fbadge%2Fstars&style=flat" alt="Stars" /></a>
-  <a href="https://github.com/affaan-m/ECC/network/members"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.ecc.tools%2Fbadge%2Fforks&style=flat" alt="Forks" /></a>
+  <a href="https://github.com/affaan-m/ECC"><img src="https://img.shields.io/github/stars/affaan-m/ECC?style=flat" alt="GitHub stars" /></a>
+  <a href="https://github.com/affaan-m/ECC/forks"><img src="https://img.shields.io/github/forks/affaan-m/ECC?style=flat" alt="GitHub forks" /></a>
   <a href="https://github.com/affaan-m/ECC/graphs/contributors"><img src="https://img.shields.io/github/contributors/affaan-m/ECC?style=flat" alt="Contributors" /></a>
   <a href="https://github.com/marketplace/ecc-tools"><img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.ecc.tools%2Fbadge%2Finstalls&logo=github" alt="GitHub App installs" /></a>
 </p>
@@ -152,8 +152,8 @@ Access to 68 agents, 292 skills, and 94 legacy command shims, plus hooks, rules,
 <p align="center">
   <a href="https://www.star-history.com/affaan-m/ecc">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/star-history-dark.svg" />
-      <img src="assets/star-history-light.svg" alt="ECC star history: first 40,000 stars, January 18 to February 7, 2026" width="100%" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=affaan-m/ECC&type=Date&theme=dark" />
+      <img src="https://api.star-history.com/svg?repos=affaan-m/ECC&type=Date" alt="Live star history chart for affaan-m/ECC" width="100%" />
     </picture>
   </a>
 </p>
@@ -170,8 +170,33 @@ Access to 68 agents, 292 skills, and 94 legacy command shims, plus hooks, rules,
 For Claude Code plugin setup, updates, scope changes, and hook-profile changes:
 
 ```bash
-npx ecc-universal@2.2.1 setup
+npx ecc-universal@2.2.2 setup
 ```
+
+#### Windows first-time walkthrough
+
+If you are new to command-line tools, use this copy-and-paste path:
+
+1. Install Node.js 18 or newer, Git, and Claude Code.
+2. Open **PowerShell** from the Windows Start menu.
+3. Confirm that each prerequisite is available:
+
+   ```powershell
+   node --version
+   git --version
+   claude --version
+   ```
+
+4. Run the guided installer:
+
+   ```powershell
+   npx ecc-universal@2.2.2 setup
+   ```
+
+5. For a typical personal setup, choose **Global user**, choose **Standard** hooks, and confirm.
+6. Start a new Claude Code session and run `/plugin list` to verify that `ecc@ecc` is enabled.
+
+This path does not require cloning the repository. If any prerequisite command is not found, install or repair that prerequisite before rerunning ECC setup.
 
 If npm reports a version or cache error, confirm the registry version before retrying:
 
@@ -183,12 +208,12 @@ ECC 2.2 supports the same guided setup through modern package runners:
 
 | Package runner | Guided setup command |
 |---|---|
-| npm / npx | `npx ecc-universal@2.2.1 setup` |
-| pnpm | `pnpm dlx ecc-universal@2.2.1 setup` |
-| Yarn 2+ | `yarn dlx ecc-universal@2.2.1 setup` |
-| Bun | `bunx ecc-universal@2.2.1 setup` |
+| npm / npx | `npx ecc-universal@2.2.2 setup` |
+| pnpm | `pnpm dlx ecc-universal@2.2.2 setup` |
+| Yarn 2+ | `yarn dlx ecc-universal@2.2.2 setup` |
+| Bun | `bunx ecc-universal@2.2.2 setup` |
 
-The examples select [the published ECC 2.2.1 release](https://www.npmjs.com/package/ecc-universal/v/2.2.1), matching this repository's release version. A version pin is not a security audit or an integrity check. Review the release source and registry integrity before running package code; use a reviewed checkout for unreleased changes.
+The examples select [the published ECC 2.2.2 release](https://www.npmjs.com/package/ecc-universal/v/2.2.2), matching this repository's release version. A version pin is not a security audit or an integrity check. Review the release source and registry integrity before running package code; use a reviewed checkout for unreleased changes.
 
 Yarn Classic 1 does not provide `yarn dlx`; use `npx`, install the package globally, or upgrade Yarn for a temporary one-shot run.
 
@@ -197,7 +222,7 @@ The wizard inventories the official marketplace and every native Claude install 
 To configure more than one coding agent in one reviewed flow, use the multi-harness wizard:
 
 ```bash
-npx ecc-universal@2.2.1 install --guided
+npx ecc-universal@2.2.2 install --guided
 ```
 
 It lets you select any combination of Claude Code, Codex, and Kimi Code, shows each install channel and destination, preflights every selection before the first write, and asks for one final confirmation.
@@ -211,7 +236,7 @@ It lets you select any combination of Claude Code, Codex, and Kimi Code, shows e
 For automation, make every provider-specific choice explicit:
 
 ```bash
-npx ecc-universal@2.2.1 install --guided \
+npx ecc-universal@2.2.2 install --guided \
   --harness claude --harness codex --harness kimi \
   --claude-scope local --claude-hooks standard \
   --profile core --yes
@@ -220,16 +245,16 @@ npx ecc-universal@2.2.1 install --guided \
 Verify the native guided Codex path and managed Kimi path without writing first:
 
 ```bash
-npx ecc-universal@2.2.1 install --guided --harness codex --dry-run
-npx ecc-universal@2.2.1 install --profile core --target kimi --dry-run
+npx ecc-universal@2.2.2 install --guided --harness codex --dry-run
+npx ecc-universal@2.2.2 install --profile core --target kimi --dry-run
 ```
 
 Additional package-name commands are also available through the 2.2 alias:
 
 ```bash
-npx ecc-universal@2.2.1 consult "security reviews" --target claude
-npx ecc-universal@2.2.1 install --profile minimal --target claude --with capability:machine-learning
-npx ecc-universal@2.2.1 doctor --target kimi
+npx ecc-universal@2.2.2 consult "security reviews" --target claude
+npx ecc-universal@2.2.2 install --profile minimal --target claude --with capability:machine-learning
+npx ecc-universal@2.2.2 doctor --target kimi
 ```
 
 Do not use `npx ecc-install --profile minimal --target claude`: `ecc-install` is a binary name inside `ecc-universal`, not a separately published npm package.
@@ -378,7 +403,7 @@ cd ECC
 | Qwen CLI | `./install.sh --profile minimal --target qwen` | See the [Qwen guide](docs/QWEN-GUIDE.md) |
 | Hermes | `./install.sh --profile minimal --target hermes` | See the [Hermes setup guide](docs/HERMES-SETUP.md) |
 | OpenClaw | `./install.sh --profile minimal --target openclaw` | Managed home-directory install |
-| Kimi Code CLI | `./install.sh --profile minimal --target kimi` | Project-local `.kimi-code/` install · [Get Kimi Code](https://www.kimi.com/code?aff=ecc) |
+| Kimi Code CLI | `./install.sh --profile minimal --target kimi` | Project-local `.kimi-code/` install · [Get Kimi Code](https://www.kimi.ai/code?aff=ecc) |
 | CodeBuddy | `./install.sh --profile minimal --target codebuddy` | Project-local `.codebuddy/` install |
 | JoyCode | `./install.sh --profile minimal --target joycode` | Project-local `.joycode/` install |
 
@@ -401,7 +426,7 @@ Deep per-harness notes (feature parity, hook adapters, limitations) live in [Pla
 Use this when you want ECC's rules, agents, commands, platform config, and core workflows without runtime hooks:
 
 ```bash
-npx ecc-universal@2.2.1 install --profile minimal --target claude
+npx ecc-universal@2.2.2 install --profile minimal --target claude
 ```
 
 From a source checkout, the equivalent command is:
@@ -586,11 +611,11 @@ If you installed from the universal package, run these commands from the same
 project directory used for installation:
 
 ```bash
-npx ecc-universal@2.2.1 list-installed
-npx ecc-universal@2.2.1 doctor
-npx ecc-universal@2.2.1 repair
-npx ecc-universal@2.2.1 uninstall --dry-run
-npx ecc-universal@2.2.1 uninstall
+npx ecc-universal@2.2.2 list-installed
+npx ecc-universal@2.2.2 doctor
+npx ecc-universal@2.2.2 repair
+npx ecc-universal@2.2.2 uninstall --dry-run
+npx ecc-universal@2.2.2 uninstall
 ```
 
 From a source checkout, inspect the managed state before reinstalling:
@@ -779,7 +804,7 @@ The `ito-compute-cli` package is currently unpublished. Build it locally from th
 
 ## What's New
 
-Current release: **2.2.1** (2026-08-31). Highlights of the 2.2 line:
+Current release: **2.2.2** (2026-08-31). Highlights of the 2.2 line:
 
 - Guided, manifest-driven setup across Claude Code, Codex, and Kimi Code, with install-state ownership, doctor, repair, and uninstall.
 - Native Antigravity install, a thin Pi adapter, and the packed-artifact release gate tested on Linux, macOS, and Windows.
@@ -1196,7 +1221,7 @@ ECC's Memory Vault gives Claude, Codex, Hermes, OpenClaw, Kimi, and other harnes
 Skill-only, minimal, manual, and Claude plugin installs do not put the Memory Vault runtime on `PATH`. Install the npm runtime separately before using the CLI or optional MCP server:
 
 ```bash
-npm install -g ecc-universal@2.2.1
+npm install -g ecc-universal@2.2.2
 ecc memory init --scope project
 ecc memory search "authentication migration" --target-harness codex
 ecc memory doctor
@@ -1591,7 +1616,7 @@ opencode
 
 **Option 2: Install as npm package**
 ```bash
-npm install ecc-universal@2.2.1
+npm install ecc-universal@2.2.2
 ```
 
 Then add to your `opencode.json`:

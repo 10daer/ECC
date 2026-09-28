@@ -103,6 +103,9 @@ const CLI_RESUME_SESSION_SENTINEL = 'CLI_RESUME_CONTEXT_SHOULD_NOT_BE_INJECTED';
 const CLI_CLEAR_SESSION_SENTINEL = 'CLI_CLEAR_CONTEXT_SHOULD_NOT_BE_INJECTED';
 const DESKTOP_CLEAR_SESSION_SENTINEL = 'DESKTOP_CLEAR_CONTEXT_SHOULD_NOT_BE_INJECTED';
 const PROJECT_ONLY_SESSION_SENTINEL = 'PROJECT_ONLY_CONTEXT_SHOULD_BE_INJECTED';
+const SAME_REPO_WORKTREE_SENTINEL = 'SAME_REPO_WORKTREE_CONTEXT_SHOULD_BE_INJECTED';
+const REPO_FIELD_SESSION_SENTINEL = 'REPO_FIELD_CONTEXT_SHOULD_BE_INJECTED';
+const UNRELATED_REPO_SESSION_SENTINEL = 'UNRELATED_REPO_CONTEXT_SHOULD_NOT_BE_INJECTED';
 
 function buildSessionStartFixture(content, options = {}) {
   const title = options.title ?? '# Session';
@@ -113,9 +116,39 @@ function buildSessionStartFixture(content, options = {}) {
   if (worktree) {
     lines.push(`**Worktree:** ${worktree}`);
   }
+  if (options.repo) {
+    lines.push(`**Repo:** ${options.repo}`);
+  }
   lines.push('', content, '');
 
   return lines.join('\n');
+}
+
+function initGitRepoWithWorktrees(baseDir, worktreeNames) {
+  const mainrepo = path.join(baseDir, 'mainrepo');
+  execFileSync('git', ['init', '-q', mainrepo]);
+  execFileSync('git', ['config', 'user.email', 't@t.local'], { cwd: mainrepo });
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: mainrepo });
+  fs.writeFileSync(path.join(mainrepo, 'README.md'), 'seed\n');
+  execFileSync('git', ['add', '-A'], { cwd: mainrepo });
+  execFileSync('git', ['commit', '-q', '-m', 'seed'], { cwd: mainrepo });
+  const worktrees = {};
+  for (const name of worktreeNames) {
+    const target = path.join(baseDir, name);
+    execFileSync('git', ['worktree', 'add', '-q', '-b', name, target, 'HEAD'], { cwd: mainrepo });
+    worktrees[name] = target;
+  }
+  return { mainrepo, worktrees };
+}
+
+function gitCommonDirRealpath(dir) {
+  const out = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: dir, encoding: 'utf8' }).trim();
+  const resolved = path.resolve(dir, out);
+  try {
+    return fs.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 // Test helper
@@ -145,9 +178,10 @@ async function asyncTest(name, fn) {
 }
 
 // Run a script and capture output
-function runScript(scriptPath, input = '', env = {}) {
+function runScript(scriptPath, input = '', env = {}, cwd = process.cwd()) {
   return new Promise((resolve, reject) => {
     const proc = spawn('node', [scriptPath], {
+      cwd,
       env: { ...process.env, ...env },
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -953,6 +987,119 @@ async function runTests() {
   else failed++;
 
   if (
+    await asyncTest('injects a same-repository session recorded in a different worktree (#3160)', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-samerepo-home-'));
+      const sessionsDir = getCanonicalSessionsDir(isoHome);
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.mkdirSync(path.join(isoHome, '.claude', 'skills', 'learned'), { recursive: true });
+      const repoBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-samerepo-'));
+      const { worktrees } = initGitRepoWithWorktrees(repoBase, ['wt-a', 'wt-b']);
+
+      const sessionFile = path.join(sessionsDir, '2026-02-11-samerepo-session.tmp');
+      fs.writeFileSync(
+        sessionFile,
+        buildSessionStartFixture(SAME_REPO_WORKTREE_SENTINEL, {
+          project: 'wt-a',
+          worktree: worktrees['wt-a']
+        })
+      );
+
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+          HOME: isoHome,
+          USERPROFILE: isoHome
+        }, worktrees['wt-b']);
+        assert.strictEqual(result.code, 0);
+        const additionalContext = getSessionStartAdditionalContext(result.stdout);
+        assert.ok(additionalContext.includes(SAME_REPO_WORKTREE_SENTINEL), 'Should inject a session recorded in another worktree of the same repository');
+        assert.ok(result.stderr.includes('(match: repo)'), `Should report repository identity match, stderr: ${result.stderr}`);
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+        fs.rmSync(repoBase, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
+    await asyncTest('scopes sessions by recorded repository identity when the worktree path is gone (#3160)', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-repofield-home-'));
+      const sessionsDir = getCanonicalSessionsDir(isoHome);
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.mkdirSync(path.join(isoHome, '.claude', 'skills', 'learned'), { recursive: true });
+      const repoBase = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-repofield-'));
+      const { mainrepo, worktrees } = initGitRepoWithWorktrees(repoBase, ['wt-b']);
+
+      const sessionFile = path.join(sessionsDir, '2026-02-11-repofield-session.tmp');
+      fs.writeFileSync(
+        sessionFile,
+        buildSessionStartFixture(REPO_FIELD_SESSION_SENTINEL, {
+          project: 'wt-removed',
+          worktree: path.join(repoBase, 'wt-removed'),
+          repo: gitCommonDirRealpath(mainrepo)
+        })
+      );
+
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+          HOME: isoHome,
+          USERPROFILE: isoHome
+        }, worktrees['wt-b']);
+        assert.strictEqual(result.code, 0);
+        const additionalContext = getSessionStartAdditionalContext(result.stdout);
+        assert.ok(additionalContext.includes(REPO_FIELD_SESSION_SENTINEL), 'Should match on the recorded common git dir when the recorded worktree path no longer resolves');
+        assert.ok(result.stderr.includes('(match: repo)'), `Should report repository identity match, stderr: ${result.stderr}`);
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+        fs.rmSync(repoBase, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
+    await asyncTest('never injects a session from an unrelated repository (#3160)', async () => {
+      const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-unrelated-home-'));
+      const sessionsDir = getCanonicalSessionsDir(isoHome);
+      fs.mkdirSync(sessionsDir, { recursive: true });
+      fs.mkdirSync(path.join(isoHome, '.claude', 'skills', 'learned'), { recursive: true });
+      const repoBaseX = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-repox-'));
+      const repoX = initGitRepoWithWorktrees(repoBaseX, ['wt-x']);
+      const repoBaseY = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-3160-repoy-'));
+      const repoY = initGitRepoWithWorktrees(repoBaseY, ['wt-y']);
+
+      const sessionFile = path.join(sessionsDir, '2026-02-11-unrelated-session.tmp');
+      fs.writeFileSync(
+        sessionFile,
+        buildSessionStartFixture(UNRELATED_REPO_SESSION_SENTINEL, {
+          project: 'wt-x',
+          worktree: repoX.worktrees['wt-x'],
+          repo: gitCommonDirRealpath(repoX.mainrepo)
+        })
+      );
+
+      try {
+        const result = await runScript(path.join(scriptsDir, 'session-start.js'), '', {
+          HOME: isoHome,
+          USERPROFILE: isoHome
+        }, repoY.worktrees['wt-y']);
+        assert.strictEqual(result.code, 0);
+        const additionalContext = getSessionStartAdditionalContext(result.stdout);
+        assert.ok(!additionalContext.includes(UNRELATED_REPO_SESSION_SENTINEL), 'Should never inject a session from an unrelated repository');
+        assert.ok(result.stderr.includes('No worktree/project session match found'), `Should log no-match reason, stderr: ${result.stderr}`);
+      } finally {
+        fs.rmSync(isoHome, { recursive: true, force: true });
+        fs.rmSync(repoBaseX, { recursive: true, force: true });
+        fs.rmSync(repoBaseY, { recursive: true, force: true });
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
     await asyncTest('reports learned skills count', async () => {
       const isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-skills-start-'));
       const learnedDir = path.join(isoHome, '.claude', 'skills', 'learned');
@@ -1259,6 +1406,7 @@ async function runTests() {
         assert.ok(content.includes(`**Project:** ${project}`), 'Should persist project metadata');
         assert.ok(content.includes(`**Branch:** ${branch}`), 'Should persist branch metadata');
         assert.ok(content.includes(`**Worktree:** ${process.cwd()}`), 'Should persist worktree metadata');
+        assert.ok(content.includes(`**Repo:** ${gitCommonDirRealpath(process.cwd())}`), 'Should persist repository identity metadata');
       } finally {
         fs.rmSync(isoHome, { recursive: true, force: true });
       }
