@@ -602,6 +602,53 @@ function runDdRegressionTests() {
   ];
   try {
     hook = loadDirectHook();
+    // Launcher operands stay data; only the resolved SQL client consumes SQL.
+    const wrappedSqlDestructive = [
+      'timeout 5 psql -c "drop table users"',
+      'time psql -c "truncate audit_log"',
+      '/usr/bin/time -f "%E" psql -c "drop table users"',
+      '/usr/bin/time -q --output-file timing.log mysql -e "delete from sessions"',
+      'nice -n 5 mariadb -e "delete from sessions"',
+      'nohup sqlite3 fixture.db "drop table users"',
+      'stdbuf -oL psql -c "truncate audit_log"',
+      'ionice -c 2 -n 4 psql -c "drop table users"',
+      'setsid -w sqlcmd -Q "drop table users"',
+      'xargs -r -n 1 psql -c "drop table users"',
+      "env -S 'timeout 5 psql' -c 'drop table users'",
+      'timeout 5 nice -n 1 nohup psql -c "drop table users"',
+      'time -p command -- psql -c "truncate audit_log"',
+      "timeout 5 sh -c 'psql -c \"drop table users\"'"
+    ];
+    const wrappedSqlPassive = [
+      'timeout 5 echo "psql -c drop table users"',
+      'time -p printf "%s" "truncate audit_log"',
+      '/usr/bin/time -f "psql drop table" echo ok',
+      '/usr/bin/time -o psql echo "drop table users"',
+      'nice -n psql echo "drop table users"',
+      'ionice -c psql echo "drop table users"',
+      'stdbuf -o psql echo "drop table users"',
+      'xargs -I psql echo "drop table users"',
+      'xargs -E psql echo "drop table users"',
+      'setsid --help psql -c "drop table users"',
+      'ionice -p 123 psql -c "drop table users"',
+      '/usr/bin/time --help psql -c "drop table users"',
+      '/usr/bin/time --version psql -c "drop table users"',
+      'command -v psql "drop table users"',
+      'timeout 5 psql -c "SELECT \'drop table\' AS label"',
+      "time '-p' psql -c 'drop table users'",
+      'env time command psql -c "drop table users"',
+      'echo "timeout 5 psql -c drop table users"'
+    ];
+    for (const [commands, expected] of [
+      [wrappedSqlDestructive, ['gateguard.bash-compatible-destructive']],
+      [wrappedSqlPassive, []]
+    ]) {
+      for (const command of commands) {
+        check(`SQL launcher classification: ${JSON.stringify(command)}`, () => {
+          assert.deepStrictEqual(hook.classifyDestructiveCommand('Bash', command), expected);
+        });
+      }
+    }
     for (const command of destructive) {
       check(`dd/preservation destructive: ${JSON.stringify(command)}`, () => {
         assert.deepStrictEqual(hook.classifyDestructiveCommand('Bash', command), [

@@ -545,7 +545,7 @@ function wrapperValueOption(arg, valueFlags) {
   return null;
 }
 
-// Explicit external-launcher argv grammars for dd and shell-wrapper discovery.
+// Explicit external-launcher argv grammars for dd, SQL clients and shell-wrapper discovery.
 // Unknown flags do not justify guessing which later argument executes.
 // This literal allowlist cannot prove arbitrary custom-wrapper semantics or
 // resolve dynamically selected executables; quoted operand text stays data.
@@ -777,7 +777,7 @@ function unwrapLeadWrappers(tokens, allowShellBuiltins = true, allowDdLaunchers 
  */
 function isDestructiveSqlClient(tokens) {
   if (!tokens || tokens.length === 0) return false;
-  const argv = unwrapLeadWrappers(tokens);
+  const argv = unwrapLeadWrappers(tokens, true, true);
   if (!SQL_CLIENT_COMMANDS.has(commandBasename(argv[0]))) return false;
   return DESTRUCTIVE_SQL.test(stripSqlLiterals(argv.join(' ')));
 }
