@@ -159,28 +159,68 @@ function isNoVerifyLongFlag(value) {
 }
 
 const PROTECTED_GIT_COMMANDS = new Set(['commit', 'push', 'merge', 'cherry-pick', 'rebase', 'am']);
-const GIT_GLOBAL_VALUES = new Set(['-c', '-C', '--work-tree', '--git-dir', '--namespace', '--super-prefix']);
+const GIT_GLOBAL_VALUES = new Set(['-c', '-C', '--config-env', '--work-tree', '--git-dir', '--namespace', '--super-prefix']);
 const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh']);
-const DATA_COMMANDS = new Set(['echo', 'printf', 'cat', 'grep', 'head', 'tail', 'wc', 'sort', 'uniq', ':', 'true', 'false']);
+const DATA_COMMANDS = new Set(['echo', 'printf', 'cat', 'tee', 'grep', 'head', 'tail', 'wc', 'sort', 'uniq', ':', 'true', 'false']);
 const CONTROL_WORDS = new Set(['!', 'if', 'then', 'elif', 'while', 'until', 'do', 'else']);
 
 function basename(value) {
   return value.replace(/\\/g, '/').split('/').pop();
 }
 
-function checkGitWords(words, budget, start = 0) {
+function isGitExecutable(value) {
+  const name = basename(value).toLowerCase();
+  return name === 'git' || name === 'git.exe';
+}
+
+// Only explicit command-scoped assignments are tracked. No host environment,
+// exported shell state, arbitrary expansion or external configuration is read.
+function gitEnvironmentOverride(environment, budget) {
+  const count = environment.get('GIT_CONFIG_COUNT') || '';
+  budget.spend(count.length + environment.size + 1);
+  // Git uses strtoul: leading ASCII whitespace/+ are accepted, trailing bytes
+  // and counts above INT_MAX are rejected. Bound work by assignments we own.
+  const configured = /^[ \t\r\n\v\f]*\+?[0-9]+(?![\s\S])/.test(count) ? Number(count) : 0;
+  if (configured > 0 && configured <= 0x7fffffff && configured <= environment.size / 2) {
+    let override = false;
+    let complete = true;
+    for (let i = 0; i < configured; i++) {
+      budget.spend();
+      const key = environment.get(`GIT_CONFIG_KEY_${i}`);
+      if (key === undefined || !environment.has(`GIT_CONFIG_VALUE_${i}`)) { complete = false; break; }
+      budget.spend(key.length + 1);
+      override ||= key.toLowerCase() === 'core.hookspath';
+    }
+    if (complete && override) return true;
+  }
+  const parameters = environment.get('GIT_CONFIG_PARAMETERS');
+  if (parameters) {
+    budget.spend(parameters.length + 1);
+    // Git's old 'key=value' and new 'key'='value' forms both use quote removal.
+    // This inspects literal keys only; nested regions are never executed.
+    for (const command of scanShell(parameters, budget).commands) {
+      for (const word of command.words) {
+        budget.spend(word.value.length + 1);
+        if (word.value.toLowerCase().startsWith(GIT_CONFIG_KEY_PREFIX)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function checkGitWords(words, budget, start = 0, environmentOverride = false) {
   let index = start + 1;
-  let override = false;
+  let override = environmentOverride;
   for (; index < words.length; index++) {
     const value = words[index].value;
     budget.spend(value.length + 1);
     if (!value.startsWith('-')) break;
     if (value === '--') { index++; break; }
-    if (value === '-c') {
+    if (value === '-c' || value === '--config-env') {
       const setting = words[index + 1]?.value || '';
       budget.spend(setting.length + 1);
       override ||= setting.toLowerCase().startsWith(GIT_CONFIG_KEY_PREFIX);
-    } else if (value.toLowerCase().startsWith(`-c${GIT_CONFIG_KEY_PREFIX}`)) override = true;
+    } else if (value.toLowerCase().startsWith(`-c${GIT_CONFIG_KEY_PREFIX}`) || value.toLowerCase().startsWith(`--config-env=${GIT_CONFIG_KEY_PREFIX}`)) override = true;
     if (GIT_GLOBAL_VALUES.has(value)) index++;
   }
   const command = words[index]?.value;
@@ -206,10 +246,17 @@ function checkGitWords(words, budget, start = 0) {
 
 // Only explicit option grammars remove wrapper operands. Unknown launchers are
 // opaque/conservative, never guessed from a name found among data arguments.
-function executableWords(words, budget) {
+function executableWords(words, budget, inherited = new Map()) {
+  budget.spend(inherited.size + 1);
+  const environment = new Map(inherited);
   function suffix(start) {
     budget.spend(words.length - start);
-    return words.slice(start);
+    return { words: words.slice(start), environment };
+  }
+  function assignment(value) {
+    const equals = value.indexOf('=');
+    const key = value.slice(0, equals);
+    if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)$/.test(key)) environment.set(key, value.slice(equals + 1));
   }
   let i = 0;
   let assignments = true;
@@ -217,7 +264,7 @@ function executableWords(words, budget) {
   while (i < words.length) {
     const token = words[i];
     budget.spend(token.value.length + token.raw.length + 1);
-    if (assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(environmentAssignments ? token.value : token.raw)) { i++; continue; }
+    if (assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(environmentAssignments ? token.value : token.raw)) { assignment(token.value); i++; continue; }
     if (!token.quoted && CONTROL_WORDS.has(token.value)) { i++; continue; }
     const name = basename(token.value);
     if (name === 'command') {
@@ -226,7 +273,7 @@ function executableWords(words, budget) {
         const flag = words[i++].value;
         budget.spend(flag.length + 1);
         if (flag === '--') break;
-        if (/^-[pvV]+$/.test(flag) && /[vV]/.test(flag)) return [];
+        if (/^-[pvV]+$/.test(flag) && /[vV]/.test(flag)) return { words: [], environment };
         if (!/^-p+$/.test(flag)) return suffix(i - 1);
       }
       assignments = false; continue;
@@ -237,8 +284,9 @@ function executableWords(words, budget) {
         const flag = words[i++].value;
         budget.spend(flag.length + 1);
         if (flag === '--') break;
-        if (flag === '-a') i++;
+        if (/^-[cl]*a$/.test(flag)) i++;
         else if (!/^-([cl]*a.+|[cl]+)$/.test(flag)) return suffix(i - 1);
+        if (flag.slice(1).split('a', 1)[0].includes('c')) environment.clear();
       }
       assignments = false; continue;
     }
@@ -253,6 +301,10 @@ function executableWords(words, budget) {
         const flag = words[i].value;
         budget.spend(flag.length + 1);
         if (flag === '--') { i++; break; }
+        if (env && (flag === '-i' || flag === '--ignore-environment')) environment.clear();
+        if (env && (flag === '-u' || flag === '--unset')) environment.delete(words[i + 1]?.value);
+        else if (env && flag.startsWith('--unset=')) environment.delete(flag.slice('--unset='.length));
+        else if (env && flag.startsWith('-u')) environment.delete(flag.slice(2));
         if (values.has(flag)) i += 2;
         else if (flags.has(flag) || [...values].some(value => value.startsWith('--') ? flag.startsWith(`${value}=`) : flag.startsWith(value) && flag.length > value.length)) i++;
         else return suffix(i - 1); // Includes opaque env -S / sudo shell modes.
@@ -261,7 +313,7 @@ function executableWords(words, budget) {
     }
     return suffix(i);
   }
-  return [];
+  return { words: [], environment };
 }
 
 function shellRole(words, budget, shell) {
@@ -312,7 +364,7 @@ function commandRole(words, budget) {
   if (!words.length) return { kind: 'data' };
   budget.spend(words[0].value.length + 1);
   const name = basename(words[0].value);
-  if (name === 'git' || name === 'git.exe') return { kind: 'git' };
+  if (isGitExecutable(words[0].value)) return { kind: 'git' };
   if (SHELLS.has(name)) return shellRole(words, budget, name);
   if (name === 'eval') {
     for (const word of words) budget.spend(word.value.length + 3);
@@ -328,17 +380,26 @@ function pipelineSources(command, budget) {
   const sources = [];
   for (let current = command; current; current = current.pipeFrom) {
     budget.spend(current.words.length + 1);
-    const words = executableWords(current.words, budget);
+    const { words } = executableWords(current.words, budget);
     for (const word of words) budget.spend(word.value.length + 3);
     const name = basename(words[0]?.value || '');
-    if (name === 'echo') sources.push(words.slice(1).filter(word => !/^-[neE]+$/.test(word.value)).map(word => word.value).join(' '));
+    if (name === 'echo') sources.push({ text: words.slice(1).filter(word => !/^-[neE]+$/.test(word.value)).map(word => word.value).join(' ') });
     if (name === 'printf') {
       const format = words[1]?.value || '';
-      if (format !== '-v') sources.push((format === '%s' || format === '%s\\n') ? words.slice(2).map(word => word.value).join('\n') : words.slice(1).map(word => word.value).join(' '));
+      if (format !== '-v') sources.push({ text: (format === '%s' || format === '%s\\n') ? words.slice(2).map(word => word.value).join('\n') : words.slice(1).map(word => word.value).join(' ') });
+    }
+    if (!DATA_COMMANDS.has(name)) {
+      // Foreign transformations can introduce literal bypasses into executable
+      // stdin. Treat their punctuation as delimiters, not as proved shell syntax.
+      // This deliberately may refuse a transformation that removes a bypass; it
+      // does not evaluate sed/interpreters or detect arbitrary generated source.
+      const text = words.map(word => word.value).join(' ');
+      budget.spend(2 * text.length + 1);
+      sources.push({ text: text.replace(/[^\w$=.+-]/g, ' '), opaque: true });
     }
     for (const redirect of current.redirects) {
-      if (redirect.operator === '<<<') sources.push(redirect.word.value);
-      else if (redirect.operator === '<<' || redirect.operator === '<<-') sources.push(redirect.body);
+      if (redirect.operator === '<<<') sources.push({ text: redirect.word.value });
+      else if (redirect.operator === '<<' || redirect.operator === '<<-') sources.push({ text: redirect.body });
     }
   }
   return sources;
@@ -346,21 +407,21 @@ function pipelineSources(command, budget) {
 
 function checkCommand(input) {
   const budget = createBudget(input.length);
-  const pending = [{ text: input, opaque: false }];
-  function enqueue(text, opaque = false) {
+  const pending = [{ text: input, opaque: false, environment: new Map() }];
+  function enqueue(text, opaque = false, environment = new Map()) {
     if (!text) return;
     budget.spend(text.length + 1);
-    pending.push({ text, opaque });
+    pending.push({ text, opaque, environment });
   }
-  function inspectOpaque(words, text) {
+  function inspectOpaque(words, text, environment) {
     for (let index = 0; index < words.length; index++) {
       const word = words[index];
       budget.spend(word.value.length + 1);
-      if (['git', 'git.exe'].includes(basename(word.value))) {
-        const reason = checkGitWords(words, budget, index);
+      if (isGitExecutable(word.value)) {
+        const reason = checkGitWords(words, budget, index, gitEnvironmentOverride(environment, budget));
         if (reason) return reason;
       }
-      if (word.value !== text && /git/.test(word.value) && /[\s'"()]/.test(word.value)) enqueue(word.value, true);
+      if (word.value !== text && /git/i.test(word.value) && /[\s'"()]/.test(word.value)) enqueue(word.value, true, environment);
     }
     return null;
   }
@@ -368,22 +429,22 @@ function checkCommand(input) {
     while (pending.length) {
       const task = pending.pop();
       const scan = scanShell(task.text, budget);
-      for (const text of scan.nested) enqueue(text);
+      for (const text of scan.nested) enqueue(text, false, task.environment);
       for (const command of scan.commands) {
-        const words = executableWords(command.words, budget);
+        const { words, environment } = executableWords(command.words, budget, task.environment);
         const role = commandRole(words, budget);
         const reason = task.opaque || role.kind === 'opaque'
-          ? inspectOpaque(command.words, task.text)
-          : role.kind === 'git' ? checkGitWords(words, budget) : null;
+          ? inspectOpaque(command.words, task.text, environment)
+          : role.kind === 'git' ? checkGitWords(words, budget, 0, gitEnvironmentOverride(environment, budget)) : null;
         if (reason) return { blocked: true, reason };
-        if (role.code) enqueue(role.code);
+        if (role.code) enqueue(role.code, false, environment);
         if (role.stdin) {
           for (const redirect of command.redirects) {
-            if (redirect.operator === '<<<') enqueue(redirect.word.value, role.kind === 'opaque');
-            else if (redirect.operator === '<<' || redirect.operator === '<<-') enqueue(redirect.body, role.kind === 'opaque');
+            if (redirect.operator === '<<<') enqueue(redirect.word.value, role.kind === 'opaque', environment);
+            else if (redirect.operator === '<<' || redirect.operator === '<<-') enqueue(redirect.body, role.kind === 'opaque', environment);
           }
           if (command.pipeFrom) {
-            for (const source of pipelineSources(command.pipeFrom, budget)) enqueue(source, role.kind === 'opaque');
+            for (const source of pipelineSources(command.pipeFrom, budget)) enqueue(source.text, source.opaque || role.kind === 'opaque', environment);
           }
         }
       }
