@@ -244,6 +244,19 @@ function checkGitWords(words, budget, start = 0, environmentOverride = false) {
   return null;
 }
 
+// Keep literal outcomes and the empty result of an unresolved expansion. The
+// latter is a base for later visible += operands, not arbitrary evaluation.
+function assignmentValues(prior, operand, append, dynamic, budget) {
+  const base = prior === undefined ? '' : prior;
+  budget.spend((append ? base.length : 0) + operand.length + 1);
+  const values = new Set([append ? base + operand : operand]);
+  if (dynamic) {
+    if (prior !== undefined) values.add(prior);
+    values.add(append ? base : '');
+  }
+  return [...values];
+}
+
 // Only explicit option grammars remove wrapper operands. Unknown launchers are
 // opaque/conservative, never guessed from a name found among data arguments.
 function executableWords(words, budget, inherited = new Map(), callerValues = inherited) {
@@ -262,25 +275,30 @@ function executableWords(words, budget, inherited = new Map(), callerValues = in
   function assignment(token) {
     const { value, dynamic } = token;
     const equals = value.indexOf('=');
-    const key = value.slice(0, equals);
+    const append = !environmentAssignments && value[equals - 1] === '+';
+    const key = value.slice(0, append ? equals - 1 : equals);
     if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)$/.test(key)) {
-      const assigned = value.slice(equals + 1);
+      const operand = value.slice(equals + 1);
       const count = environments.length;
       budget.spend(count + 1);
       for (let n = 0; n < count; n++) {
         const environment = environments[n];
-        // Expansion precedes env's reset. Caller values remain separate from
-        // the child environment; keep both that possible value and the new
-        // literal spelling without interpreting expansion syntax.
-        if (dynamic && callerValues.has(key)) {
+        // Shell prefix appends can see local values, even when not exported.
+        // Repeated operands use the prior outcome in this same prefix.
+        const prior = prefixAssignments.has(key) && environment.has(key)
+          ? environment.get(key) : callerValues.get(key);
+        const values = assignmentValues(prior, operand, append, dynamic, budget);
+        for (const alternative of values.slice(1)) {
           budget.spend(environment.size + 1);
-          const prior = new Map(environment);
-          prior.set(key, callerValues.get(key));
-          environments.push(prior);
+          const variant = new Map(environment);
+          variant.set(key, alternative);
+          environments.push(variant);
         }
-        environment.set(key, assigned);
+        environment.set(key, values[0]);
       }
-      prefixAssignments.set(key, assigned);
+      // Retain ordered operations so same-shell states apply each append once.
+      if (!prefixAssignments.has(key)) prefixAssignments.set(key, []);
+      prefixAssignments.get(key).push({ value: operand, append, dynamic });
       if (dynamic) dynamicAssignments.add(key);
     }
   }
@@ -297,7 +315,7 @@ function executableWords(words, budget, inherited = new Map(), callerValues = in
   while (i < words.length) {
     const token = words[i];
     budget.spend(token.value.length + token.raw.length + 1);
-    if (assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(environmentAssignments ? token.value : token.raw)) { assignment(token); i++; continue; }
+    if (assignments && /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(environmentAssignments ? token.value : token.raw)) { assignment(token); i++; continue; }
     if (!token.quoted && CONTROL_WORDS.has(token.value)) { i++; continue; }
     const name = basename(token.value);
     if (name === 'command') {
@@ -479,21 +497,30 @@ function updateShellState(state, normalized, budget) {
   const states = [state];
   const result = (handled, changed, uncertain = false) => ({ handled, changed, uncertain, states });
   if (!local) return result(false, false);
-  function assign(name, value, dynamic = false) {
+  function assign(name, value, dynamic = false, append = false) {
     const count = states.length;
     budget.spend(count + 1);
     for (let n = 0; n < count; n++) {
       const current = states[n];
       if (current.readonly.has(name)) continue;
-      // Preserve the known possible value AND the new literal spelling.
-      // Both alternatives subsequently receive the declaration attributes.
-      if (dynamic && current.variables.has(name)) states.push(copyShellState(current, budget));
-      current.variables.set(name, value);
+      const values = assignmentValues(current.variables.get(name), value, append, dynamic, budget);
+      for (const alternative of values.slice(1)) {
+        const variant = copyShellState(current, budget);
+        variant.variables.set(name, alternative);
+        states.push(variant);
+      }
+      current.variables.set(name, values[0]);
+    }
+  }
+  function assignPrefixes() {
+    budget.spend(prefixAssignments.size + 1);
+    for (const [key, operations] of prefixAssignments) {
+      budget.spend(operations.length + 1);
+      for (const operation of operations) assign(key, operation.value, operation.dynamic, operation.append);
     }
   }
   if (assignmentOnly) {
-    budget.spend(prefixAssignments.size + 1);
-    for (const [name, value] of prefixAssignments) assign(name, value, dynamicAssignments.has(name));
+    assignPrefixes();
     return result(true, prefixAssignments.size > 0, dynamicAssignments.size > 0);
   }
   // Exact builtin names only: /some/path/export is an external executable.
@@ -521,17 +548,17 @@ function updateShellState(state, normalized, budget) {
     else uncertain = true;
   }
   if (passive && !uncertain) return result(true, false);
-  let changed = false;
-  budget.spend(prefixAssignments.size + 1);
-  for (const [key, value] of prefixAssignments) { assign(key, value, dynamicAssignments.has(key)); changed = true; }
+  let changed = prefixAssignments.size > 0;
+  assignPrefixes();
   for (; i < words.length; i++) {
     const value = words[i].value;
     budget.spend(2 * value.length + 1);
     const equals = value.indexOf('=');
-    const key = equals < 0 ? value : value.slice(0, equals);
+    const append = equals > 0 && value[equals - 1] === '+';
+    const key = equals < 0 ? value : value.slice(0, append ? equals - 1 : equals);
     if (!GIT_ENV_NAME.test(key)) continue;
     changed = true;
-    if (name !== 'unset' && equals >= 0) assign(key, value.slice(equals + 1), words[i].dynamic);
+    if (name !== 'unset' && equals >= 0) assign(key, value.slice(equals + 1), words[i].dynamic, append);
     budget.spend(states.length + 1);
     for (const current of states) {
       if (name === 'unset') {
