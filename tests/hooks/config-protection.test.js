@@ -418,6 +418,64 @@ function runTests() {
     })
   );
 
+  results.push(
+    test('blocks shared/base flat configs, not just the canonical entry point', () => {
+      // Monorepos split flat config: a shared `eslint.config.base.mjs` holding
+      // the ignore list and rule severities, imported by per-workspace
+      // `eslint.config.mjs` files. Matching basenames alone protected the
+      // leaves and left the trunk -- the file that carries the rules -- editable.
+      return withOwnedDirectory(fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-config-protect-base-')), tmpDir => {
+        const names = [
+          'eslint.config.base.mjs', 'prettier.config.shared.cjs', '.eslintrc.base.json', 'ESLint.Config.Base.MJS',
+          'stylelint.config.local.ts', 'commitlint.config.shared.cts', 'oxlint.config.base.mts',
+          'biome.config.shared.js', '.prettierrc.shared.yml', '.stylelintrc.team.toml',
+          '.markdownlintrc.team.jsonc', 'biome.shared.jsonc', 'BIOME.Team.Base.JSON'
+        ];
+        for (const name of names) {
+          const absPath = path.join(tmpDir, name);
+          fs.writeFileSync(absPath, '{}');
+
+          const result = runHook({ tool_name: 'Edit', tool_input: { file_path: absPath } });
+
+          assert.strictEqual(result.code, 2, 'Expected ' + name + ' to be blocked');
+          assert.ok(
+            result.stderr.includes('BLOCKED: Modifying ' + name + ' is not allowed.'),
+            'Expected block message for ' + name + ', got: ' + result.stderr
+          );
+        }
+      });
+    })
+  );
+
+  results.push(
+    test('does not block build or test tooling configs', () => {
+      // Pins the boundary: this hook guards LINTER configs. A future widening
+      // of the patterns must not quietly start blocking ordinary work.
+      return withOwnedDirectory(fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-config-protect-allow-')), tmpDir => {
+        const names = [
+          'vite.config.ts', 'vitest.config.ts', 'jest.config.js', 'playwright.config.ts', 'tsconfig.json',
+          'pyproject.toml', 'package.json', '.eslintignore.bak', 'not-eslint.config.base.mjs',
+          'eslint.config..mjs', 'eslint.config.base.mjs.bak'
+        ];
+        for (const name of names) {
+          const absPath = path.join(tmpDir, name);
+          fs.writeFileSync(absPath, '{}');
+
+          const result = runHook({ tool_name: 'Edit', tool_input: { file_path: absPath } });
+
+          assert.strictEqual(result.code, 0, 'Expected ' + name + ' to be allowed, stderr: ' + result.stderr);
+        }
+
+        const fresh = runHook({
+          tool_name: 'Write',
+          tool_input: { file_path: path.join(tmpDir, 'eslint.config.new.mjs'), content: 'export default [];' }
+        });
+        assert.strictEqual(fresh.code, 0, 'Expected first-time qualified config creation to be allowed');
+        assert.strictEqual(fresh.stdout, '', 'Allowed qualified creation should not echo raw hook input');
+      });
+    })
+  );
+
   const passed = results.filter(result => result === 'passed').length;
   const failed = results.filter(result => result === 'failed').length;
   const skipped = results.filter(result => result === 'skipped').length;
