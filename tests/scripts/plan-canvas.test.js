@@ -13,6 +13,8 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const { compileFunction } = require('node:vm');
+const { createRequire } = require('node:module');
 
 const { createSessionStore } = require('../../scripts/lib/plan-canvas/sessions');
 const { createPlanCanvasServer } = require('../../scripts/lib/plan-canvas/server');
@@ -60,12 +62,56 @@ function printResults(results) {
   process.exitCode = results.failed > 0 ? 1 : 0;
 }
 
-// Capture the real dispatcher without binding a socket. Artifact bodies are
-// only compared as inert response bytes, never executed in a browser.
-async function withArtifactHandler(callback) {
+// Compile the exact trusted module privately; this is not a security sandbox.
+// Relative dependencies retain normal resolution, without rewriting source or
+// changing module loaders, shared exports, or require.cache.
+const artifactServerFilename = require.resolve('../../scripts/lib/plan-canvas/server');
+const artifactServerSource = fs.readFileSync(artifactServerFilename, 'utf8');
+const artifactRequire = createRequire(artifactServerFilename);
+
+function loadArtifactServer(filesystem, localHttp) {
+  const localRequire = name => {
+    if (name === 'fs' || name === 'node:fs') return filesystem;
+    if (name === 'http' || name === 'node:http') return localHttp;
+    return artifactRequire(name);
+  };
+  const localModule = { exports: {} };
+  const evaluate = compileFunction(artifactServerSource,
+    ['require', 'module', 'exports', '__filename', '__dirname'], { filename: artifactServerFilename });
+  evaluate.call(localModule.exports, localRequire, localModule, localModule.exports,
+    artifactServerFilename, path.dirname(artifactServerFilename));
+  return localModule.exports;
+}
+
+// Preserve arbitrary primary thrown values, including falsy values. Secondary
+// cleanup diagnostics are intentionally discarded when a primary exists.
+async function withFixtureCleanup(callback, cleanups) {
+  let didThrow = false;
+  let primary;
+  let result;
+  try { result = await callback(); } catch (error) { didThrow = true; primary = error; }
+  let cleanupThrew = false;
+  let firstCleanup;
+  for (const cleanup of cleanups()) {
+    try { await cleanup(); } catch (error) {
+      if (!cleanupThrew) { cleanupThrew = true; firstCleanup = error; }
+    }
+  }
+  if (didThrow) throw primary;
+  if (cleanupThrew) throw firstCleanup;
+  return result;
+}
+
+// Capture fresh real dispatchers without binding sockets. Each request captures
+// its own filesystem facade; the fixture owns those canvases until teardown.
+// Artifact bodies are inert response bytes, never executed in a browser.
+async function withArtifactHandler(callback, {
+  closeCanvas = canvas => canvas.close(),
+  removeRoot = root => fs.rmSync(root, { recursive: true, force: true })
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'plan-canvas-artifact-'));
-  let canvas;
-  try {
+  const canvases = [];
+  return withFixtureCleanup(async () => {
     const base = path.join(root, 'artifacts');
     const outside = path.join(root, 'outside');
     fs.mkdirSync(base);
@@ -73,21 +119,20 @@ async function withArtifactHandler(callback) {
     const session = { key: '0123456789ab', file: path.join(base, 'main.md') };
     fs.writeFileSync(session.file, '# Inert fixture\n');
     fs.writeFileSync(path.join(outside, 'secret.txt'), 'private-fixture-secret');
-    let handler;
-    const originalCreateServer = http.createServer;
-    http.createServer = requestHandler => {
-      handler = requestHandler;
-      return {
-        listen() { throw new Error('Artifact tests must not open a listener'); },
-        close(done) { done(); }
-      };
-    };
-    try {
-      canvas = createPlanCanvasServer({ store: { get: key => key === session.key ? session : null }, idleTimeoutMs: 0 });
-    } finally {
-      http.createServer = originalCreateServer;
-    }
-    const get = asset => new Promise(resolve => {
+    const get = (asset, filesystem = fs) => new Promise(resolve => {
+      let handler;
+      const localHttp = Object.freeze({ ...http, createServer(requestHandler) {
+        handler = requestHandler;
+        return {
+          listen() { throw new Error('Artifact tests must not open a listener'); },
+          close(done) { done(); }
+        };
+      } });
+      const localServer = loadArtifactServer(filesystem, localHttp);
+      const canvas = localServer.createPlanCanvasServer({
+        store: { get: key => key === session.key ? session : null }, idleTimeoutMs: 0
+      });
+      canvases.push(canvas);
       const response = { headersSent: false };
       response.writeHead = (statusCode, headers) => {
         response.statusCode = statusCode;
@@ -97,11 +142,8 @@ async function withArtifactHandler(callback) {
       response.end = data => resolve({ statusCode: response.statusCode, headers: response.headers, body: String(data || '') });
       handler({ method: 'GET', headers: { host: '127.0.0.1' }, url: `/artifact/${session.key}/${asset}` }, response);
     });
-    await callback({ base, outside, session, get });
-  } finally {
-    if (canvas) await canvas.close();
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+    return callback({ base, outside, session, get });
+  }, () => [...canvases.map(canvas => () => closeCanvas(canvas)), () => removeRoot(root)]);
 }
 
 async function artifactSecurityTests(test) {
@@ -204,13 +246,13 @@ async function artifactSecurityTests(test) {
 
 // Deterministic filesystem boundaries, using private regular files only. Native
 // descriptors are owned here even when a spy returns a different private file.
-async function withAssetIo(asset, overrides, callback) {
+async function withAssetIo(asset, overrides, callback, { cleanupClose = fs.closeSync } = {}) {
   const target = fs.realpathSync(asset);
   const methods = ['openSync', 'fstatSync', 'lstatSync', 'readSync', 'closeSync'];
   const original = Object.fromEntries(methods.map(name => [name, fs[name]]));
   const live = new Set();
   const calls = { opens: 0, reads: 0, closes: 0, fstats: 0, requested: [], returned: 0, flags: [] };
-  fs.openSync = function (candidate, flags, ...rest) {
+  const filesystem = Object.freeze({ ...fs, openSync(candidate, flags, ...rest) {
     if (typeof candidate !== 'string' || path.resolve(candidate) !== target) return original.openSync(candidate, flags, ...rest);
     calls.opens++;
     calls.flags.push(flags);
@@ -219,18 +261,18 @@ async function withAssetIo(asset, overrides, callback) {
       : original.openSync(candidate, flags, ...rest);
     live.add(fd);
     return fd;
-  };
-  fs.fstatSync = function (fd, ...rest) {
+  },
+  fstatSync(fd, ...rest) {
     const stats = original.fstatSync(fd, ...rest);
     if (!live.has(fd)) return stats;
     calls.fstats++;
     return overrides.fstat ? overrides.fstat(stats, calls) : stats;
-  };
-  fs.lstatSync = function (candidate, ...rest) {
+  },
+  lstatSync(candidate, ...rest) {
     const stats = original.lstatSync(candidate, ...rest);
     return overrides.lstat ? overrides.lstat(path.resolve(candidate), stats, calls) : stats;
-  };
-  fs.readSync = function (fd, buffer, offset, length, position) {
+  },
+  readSync(fd, buffer, offset, length, position) {
     if (!live.has(fd)) return original.readSync(fd, buffer, offset, length, position);
     calls.reads++;
     calls.requested.push({ length, position, capacity: buffer.length });
@@ -239,24 +281,33 @@ async function withAssetIo(asset, overrides, callback) {
       : original.readSync(fd, buffer, offset, length, position);
     calls.returned += count;
     return count;
-  };
-  fs.closeSync = function (fd) {
+  },
+  closeSync(fd) {
     if (!live.has(fd)) return original.closeSync(fd);
     calls.closes++;
     // Close the actual fixture descriptor before optionally simulating a close
     // error. The test never leaks an fd to imitate an ambiguous OS error.
-    original.closeSync(fd);
     live.delete(fd);
+    original.closeSync(fd);
     if (overrides.close) overrides.close(calls);
-  };
-  try {
-    await callback(calls);
+  } });
+  return withFixtureCleanup(async () => {
+    await callback(calls, filesystem);
+    // Assert BEFORE fallback cleanup: closing a leaked fd cannot make it pass.
     assert.strictEqual(live.size, 0, 'All returned descriptors must close');
-  } finally {
-    for (const name of methods) fs[name] = original[name];
-    // Cleanup after a failing assertion/implementation; leaks still fail above.
-    for (const fd of live) original.closeSync(fd);
+  }, () => [() => closeOwnedDescriptors(live, cleanupClose)]);
+}
+
+function closeOwnedDescriptors(owned, close) {
+  let didThrow = false;
+  let first;
+  for (const fd of owned) {
+    owned.delete(fd); // An ambiguous close result must never cause a retry.
+    try { close(fd); } catch (error) {
+      if (!didThrow) { didThrow = true; first = error; }
+    }
   }
+  if (didThrow) throw first;
 }
 
 function changedStats(stats, changes) {
@@ -279,11 +330,11 @@ async function artifactRaceTests(test) {
     const asset = path.join(parent, 'asset.txt');
     fs.writeFileSync(asset, 'inert');
     fs.writeFileSync(path.join(outside, 'asset.txt'), 'private-fixture-secret');
-    await callback({ ...value, base, outside, parent, asset, fetch: () => value.get('nested/asset.txt') });
+    await callback({ ...value, base, outside, parent, asset, fetch: filesystem => value.get('nested/asset.txt', filesystem) });
   });
   await test('sibling reads use one guarded descriptor and at most size plus one bytes', () => withFile(async ({ asset, fetch }) => {
-    await withAssetIo(asset, {}, async calls => {
-      const response = await fetch();
+    await withAssetIo(asset, {}, async (calls, filesystem) => {
+      const response = await fetch(filesystem);
       assert.strictEqual(response.statusCode, 200);
       assert.strictEqual(response.body, 'inert');
       assert.deepStrictEqual([calls.opens, calls.closes], [1, 1]);
@@ -305,8 +356,8 @@ async function artifactRaceTests(test) {
       fs.unlinkSync(asset);
       fs.symlinkSync(path.join(outside, 'asset.txt'), asset, 'file');
       return original.openSync(candidate, flags);
-    } }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    } }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.strictEqual(calls.reads, 0);
       assert.ok(calls.closes === 0 || calls.closes === 1);
     });
@@ -314,8 +365,8 @@ async function artifactRaceTests(test) {
   await test('a substituted descriptor is rejected even with an unchanged pathname', () => withFile(async ({ asset, base, outside, fetch }) => {
     await withAssetIo(asset, { open({ original }) {
       return original.openSync(path.join(outside, 'asset.txt'), fs.constants.O_RDONLY);
-    } }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    } }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
     });
   }));
@@ -327,8 +378,8 @@ async function artifactRaceTests(test) {
       fs.renameSync(parent, `${parent}.saved`);
       fs.symlinkSync(outside, parent, 'dir');
       return original.openSync(candidate, flags);
-    } }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    } }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
     });
   }));
@@ -346,8 +397,8 @@ async function artifactRaceTests(test) {
       },
       fstat: stable,
       lstat(candidate, stats) { return candidate === asset ? stable(stats) : stats; }
-    }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
     });
   }));
@@ -355,8 +406,8 @@ async function artifactRaceTests(test) {
     await withAssetIo(asset, { lstat(candidate, stats, calls) {
       return calls.opens > 0 && candidate === path.dirname(base)
         ? changedStats(stats, { ino: stats.ino + 1n }) : stats;
-    } }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    } }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
     });
   }));
@@ -367,8 +418,8 @@ async function artifactRaceTests(test) {
           ? changedStats(stats, { mtimeNs: stats.mtimeNs + 1n }) : stats; },
         lstat(candidate, stats, calls) { return change === 'ancestor identity' && calls.reads > 0 && candidate === parent
           ? changedStats(stats, { ino: stats.ino + 1n }) : stats; }
-      }, async calls => {
-        assertAssetRefusal(await fetch(), 403, base, outside);
+      }, async (calls, filesystem) => {
+        assertAssetRefusal(await fetch(filesystem), 403, base, outside);
         assert.ok(calls.reads > 0);
         assert.strictEqual(calls.closes, 1);
       });
@@ -383,16 +434,16 @@ async function artifactRaceTests(test) {
       const count = original.readSync(fd, buffer, offset, length, position);
       if (calls.reads === 1) { fs.unlinkSync(alias); fs.symlinkSync(other, alias, 'file'); }
       return count;
-    } }, async calls => {
-      assertAssetRefusal(await get('alias.txt'), 403, base, outside);
+    } }, async (calls, filesystem) => {
+      assertAssetRefusal(await get('alias.txt', filesystem), 403, base, outside);
       assert.strictEqual(calls.closes, 1);
     });
   }));
   for (const size of [67108865n, -1n, 1.5, Infinity]) {
     await test(`invalid or over-limit sampled size ${size} is refused before open`, () => withFile(async ({ asset, base, outside, fetch }) => {
-      await withAssetIo(asset, { lstat(candidate, stats) { return candidate === asset ? changedStats(stats, { size }) : stats; } }, async calls => {
+      await withAssetIo(asset, { lstat(candidate, stats) { return candidate === asset ? changedStats(stats, { size }) : stats; } }, async (calls, filesystem) => {
         const status = size === 67108865n ? 413 : 403;
-        const response = await fetch();
+        const response = await fetch(filesystem);
         assertAssetRefusal(response, status, base, outside);
         if (status === 413) assert.deepStrictEqual(JSON.parse(response.body), { error: 'asset too large' });
         assert.deepStrictEqual([calls.opens, calls.reads, calls.closes], [0, 0, 0]);
@@ -400,8 +451,8 @@ async function artifactRaceTests(test) {
     }));
   }
   await test('non-regular opened descriptors are refused without reading', () => withFile(async ({ asset, base, outside, fetch }) => {
-    await withAssetIo(asset, { fstat(stats) { return changedStats(stats, { isFile: () => false }); } }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    await withAssetIo(asset, { fstat(stats) { return changedStats(stats, { isFile: () => false }); } }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
     });
   }));
@@ -411,8 +462,8 @@ async function artifactRaceTests(test) {
         if (kind === 'early EOF') return 0;
         buffer.fill(97, offset, offset + length);
         return length;
-      } }, async calls => {
-        assertAssetRefusal(await fetch(), 403, base, outside);
+      } }, async (calls, filesystem) => {
+        assertAssetRefusal(await fetch(filesystem), 403, base, outside);
         assert.ok(calls.returned <= 6);
         assert.ok(calls.requested.every(call => call.length <= 6 && call.capacity === 6));
         assert.strictEqual(calls.closes, 1);
@@ -427,8 +478,8 @@ async function artifactRaceTests(test) {
       if (boundary === 'fstat') overrides.fstat = () => { throw failure('EIO'); };
       if (boundary.includes('read')) overrides.read = () => { throw failure('EIO'); };
       if (boundary.includes('close')) overrides.close = () => { throw failure(boundary === 'read and close' ? 'ELOOP' : 'EIO'); };
-      await withAssetIo(asset, overrides, async calls => {
-        assertAssetRefusal(await fetch(), 404, base, outside);
+      await withAssetIo(asset, overrides, async (calls, filesystem) => {
+        assertAssetRefusal(await fetch(filesystem), 404, base, outside);
         assert.strictEqual(calls.closes, boundary === 'open' ? 0 : 1);
       });
     }));
@@ -437,22 +488,176 @@ async function artifactRaceTests(test) {
     await withAssetIo(asset, {
       open({ original }) { return original.openSync(path.join(outside, 'asset.txt'), fs.constants.O_RDONLY); },
       close() { throw Object.assign(new Error('secondary close error'), { code: 'EIO' }); }
-    }, async calls => {
-      assertAssetRefusal(await fetch(), 403, base, outside);
+    }, async (calls, filesystem) => {
+      assertAssetRefusal(await fetch(filesystem), 403, base, outside);
       assert.deepStrictEqual([calls.reads, calls.closes], [0, 1]);
     });
   }));
   await test('empty sibling files and static in-root directory aliases remain supported', () => withFile(async ({ asset, parent, base, get }) => {
     fs.writeFileSync(asset, '');
     createTestSymlink(parent, path.join(base, 'inside'), 'dir');
-    await withAssetIo(asset, {}, async calls => {
-      const response = await get('inside/asset.txt');
+    await withAssetIo(asset, {}, async (calls, filesystem) => {
+      const response = await get('inside/asset.txt', filesystem);
       assert.strictEqual(response.statusCode, 200);
       assert.strictEqual(response.body, '');
       assert.deepStrictEqual([calls.opens, calls.closes, calls.returned], [1, 1, 0]);
       assert.ok(calls.requested.every(call => call.capacity === 1));
     });
   }));
+}
+
+// Fixture-only regressions: real private files, direct dispatch, no listener.
+async function fixtureIsolationTests(test) {
+  const methods = ['openSync', 'fstatSync', 'lstatSync', 'readSync', 'closeSync'];
+  const native = Object.fromEntries(methods.map(name => [name, fs[name]]));
+  const createServer = http.createServer;
+  const normalModule = require('../../scripts/lib/plan-canvas/server');
+  function assertSharedIdentity() {
+    for (const name of methods) assert.strictEqual(fs[name], native[name], `shared fs.${name} changed`);
+    assert.strictEqual(http.createServer, createServer, 'shared HTTP factory changed');
+    assert.strictEqual(require('../../scripts/lib/plan-canvas/server'), normalModule);
+  }
+  async function capture(callback) {
+    try { await callback(); return { didThrow: false }; }
+    catch (error) { return { didThrow: true, error }; }
+  }
+  const withAsset = callback => withArtifactHandler(async value => {
+    const asset = path.join(fs.realpathSync(value.base), 'isolation.txt');
+    fs.writeFileSync(asset, 'isolated');
+    await callback({ ...value, asset });
+  });
+
+  await test('fixture overrides never replace shared modules, even during an awaited callback', () => withAsset(async ({ asset, get }) => {
+    await withAssetIo(asset, {}, async (calls, filesystem = fs) => {
+      assertSharedIdentity();
+      assert.ok(Object.isFrozen(filesystem), 'case filesystem facade must be frozen');
+      assert.strictEqual((await get('isolation.txt', filesystem)).body, 'isolated');
+      assert.strictEqual(calls.opens, 1);
+      await Promise.resolve();
+      assertSharedIdentity();
+    });
+    assertSharedIdentity();
+    const primary = Object.freeze(new Error('frozen callback failure'));
+    const caught = await capture(() => withAssetIo(asset, {}, async (_calls, filesystem = fs) => {
+      await get('isolation.txt', filesystem);
+      assertSharedIdentity();
+      throw primary;
+    }));
+    assert.strictEqual(caught.didThrow, true);
+    assert.strictEqual(caught.error, primary);
+    assertSharedIdentity();
+  }));
+
+  await test('interleaved private handlers consume only their own filesystem facades', () => withAsset(async ({ asset, get }) => {
+    await withAssetIo(asset, {}, async (left, leftFs = fs) => {
+      await withAssetIo(asset, {}, async (right, rightFs = fs) => {
+        assert.notStrictEqual(leftFs, rightFs, 'simultaneously active fixtures need distinct facades');
+        assert.strictEqual((await get('isolation.txt', leftFs)).body, 'isolated');
+        assert.deepStrictEqual([left.opens, right.opens], [1, 0]);
+        assert.strictEqual((await get('isolation.txt', rightFs)).body, 'isolated');
+        assert.deepStrictEqual([left.opens, right.opens], [1, 1]);
+        assert.strictEqual((await get('isolation.txt', leftFs)).body, 'isolated');
+        assert.deepStrictEqual([left.opens, right.opens, left.closes, right.closes], [2, 1, 2, 1]);
+        assertSharedIdentity();
+      });
+    });
+  }));
+
+  await test('private CommonJS loader uses exact source and leaves the normal module identity intact', () => {
+    const filename = require.resolve('../../scripts/lib/plan-canvas/server');
+    const before = fs.readFileSync(filename, 'utf8');
+    const localHttp = Object.freeze({ ...http, createServer() { assertSharedIdentity(); throw new Error('local factory'); } });
+    const isolated = loadArtifactServer(fs, localHttp);
+    assert.notStrictEqual(isolated, normalModule);
+    assert.notStrictEqual(isolated.createPlanCanvasServer, normalModule.createPlanCanvasServer);
+    assert.strictEqual(artifactServerSource, before, 'compile the unchanged on-disk source');
+    assert.throws(() => isolated.createPlanCanvasServer({ store: { get() {} }, idleTimeoutMs: 0 }), /local factory/);
+    assert.strictEqual(fs.readFileSync(filename, 'utf8'), before);
+    assertSharedIdentity();
+  });
+
+  for (const primary of [Object.freeze(new Error('primary fixture failure')), 0, false, null, undefined]) {
+    await test(`descriptor fallback preserves exact ${String(primary)} and attempts all owned fds`, () => withAsset(async ({ asset }) => {
+      const fds = [];
+      const attempts = [];
+      const secondary = new Error('secondary cleanup');
+      const caught = await capture(() => withAssetIo(asset, {}, (_calls, filesystem = fs) => {
+        fds.push(filesystem.openSync(asset, 'r'), filesystem.openSync(asset, 'r'));
+        throw primary;
+      }, { cleanupClose(fd) {
+        attempts.push(fd);
+        native.closeSync(fd);
+        if (attempts.length === 1) throw secondary;
+      } }));
+      assert.strictEqual(caught.didThrow, true);
+      assert.ok(Object.is(caught.error, primary), 'cleanup must preserve the exact arbitrary thrown value');
+      assert.deepStrictEqual(attempts, fds, 'each remaining descriptor gets one cleanup attempt');
+      for (const fd of fds) assert.throws(() => native.fstatSync(fd), error => error.code === 'EBADF');
+      assertSharedIdentity();
+    }));
+  }
+
+  await test('fallback cleanup cannot turn a leaked-descriptor assertion into a pass', () => withAsset(async ({ asset }) => {
+    const fds = [];
+    const attempts = [];
+    const secondary = new Error('cleanup after leak assertion');
+    const caught = await capture(() => withAssetIo(asset, {}, (_calls, filesystem = fs) => {
+      fds.push(filesystem.openSync(asset, 'r'), filesystem.openSync(asset, 'r'));
+    }, { cleanupClose(fd) { attempts.push(fd); native.closeSync(fd); throw secondary; } }));
+    assert.strictEqual(caught.didThrow, true);
+    assert.match(caught.error.message, /All returned descriptors must close/);
+    assert.notStrictEqual(caught.error, secondary);
+    assert.deepStrictEqual(attempts, fds);
+    for (const fd of fds) assert.throws(() => native.fstatSync(fd), error => error.code === 'EBADF');
+  }));
+
+  await test('descriptor cleanup alone removes ownership before each single attempt and reports its first failure', () => withAsset(async ({ asset }) => {
+    const fds = [native.openSync(asset, 'r'), native.openSync(asset, 'r')];
+    const owned = new Set(fds);
+    const attempts = [];
+    const first = new Error('first cleanup failure');
+    try {
+      const caught = await capture(() => closeOwnedDescriptors(owned, fd => {
+        assert.ok(!owned.has(fd), 'ownership must be removed before ambiguous close');
+        attempts.push(fd);
+        native.closeSync(fd);
+        throw attempts.length === 1 ? first : new Error('later cleanup failure');
+      }));
+      assert.strictEqual(caught.didThrow, true);
+      assert.strictEqual(caught.error, first);
+      assert.deepStrictEqual(attempts, fds);
+      assert.strictEqual(owned.size, 0);
+    } finally {
+      // Safety cleanup only for an unimplemented/broken helper in RED. Entries
+      // already attempted must have been removed and are never retried.
+      for (const fd of owned) { owned.delete(fd); native.closeSync(fd); }
+    }
+    for (const fd of fds) assert.throws(() => native.fstatSync(fd), error => error.code === 'EBADF');
+  }));
+
+  for (const state of ['frozen primary', 'falsy primary', 'cleanup only']) {
+    await test(`canvas and root cleanup preserve ${state} and attempt every stage`, async () => {
+      const primary = state === 'frozen primary' ? Object.freeze(new Error('primary canvas callback')) : 0;
+      const closeFailure = new Error('canvas cleanup failure');
+      const rootFailure = new Error('root cleanup failure');
+      const stages = [];
+      let fixtureRoot;
+      const caught = await capture(() => withArtifactHandler(async ({ base, get }) => {
+        fixtureRoot = path.dirname(base);
+        await get('');
+        await get('');
+        if (state !== 'cleanup only') throw primary;
+      }, {
+        async closeCanvas(canvas) { stages.push('close'); await canvas.close(); throw closeFailure; },
+        removeRoot(root) { stages.push('root'); fs.rmSync(root, { recursive: true, force: true }); throw rootFailure; }
+      }));
+      assert.strictEqual(caught.didThrow, true);
+      assert.ok(Object.is(caught.error, state === 'cleanup only' ? closeFailure : primary));
+      assert.deepStrictEqual(stages, ['close', 'close', 'root']);
+      assert.strictEqual(fs.existsSync(fixtureRoot), false);
+      assertSharedIdentity();
+    });
+  }
 }
 
 function request(port, method, requestPath, { body = null, headers = {} } = {}) {
@@ -540,6 +745,7 @@ async function main() {
   const { test } = suite;
   await artifactSecurityTests(test);
   await artifactRaceTests(test);
+  await fixtureIsolationTests(test);
   if (process.argv.includes('--artifact-security-only')) {
     printResults(suite.results);
     return;
