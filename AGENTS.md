@@ -1,8 +1,8 @@
 # Everything Claude Code (ECC) — Agent Instructions
 
-This is a **production-ready AI coding plugin** providing 67 specialized agents, 281 skills, 94 commands, and automated hook workflows for software development.
+This is a **production-ready AI coding plugin** providing 68 specialized agents, 292 skills, 94 commands, and automated hook workflows for software development.
 
-**Version:** 2.1.0
+**Version:** 2.2.2
 
 ## Core Principles
 
@@ -46,6 +46,7 @@ This is a **production-ready AI coding plugin** providing 67 specialized agents,
 | rust-build-resolver | Rust build errors | Rust build failures |
 | pytorch-build-resolver | PyTorch runtime/CUDA/training errors | PyTorch build/training failures |
 | mle-reviewer | Production ML pipeline review | ML pipelines, evals, serving, monitoring, rollback |
+| rag-pipeline-reviewer | RAG pipeline review | Retrieval quality, chunking, reranking, RAGAS evaluation coverage |
 | typescript-reviewer | TypeScript/JavaScript code review | TypeScript/JavaScript projects |
 | react-reviewer | React/JSX code review | React component and hook changes |
 | react-build-resolver | React/Vite/Next.js/webpack build errors | React build failures |
@@ -57,7 +58,7 @@ This is a **production-ready AI coding plugin** providing 67 specialized agents,
 | csharp-reviewer | C#/.NET async patterns, nullability, security | All C# code changes |
 | fastapi-reviewer | FastAPI async correctness, Pydantic, OpenAPI | FastAPI endpoint and schema changes |
 | php-reviewer | PHP/PSR-12, Eloquent, security review | PHP code changes |
-| harmonyos-app-resolver | HarmonyOS/ArkTS build and API errors | HarmonyOS project failures |
+| harmonyos-app-resolver | HarmonyOS ArkTS/ArkUI code and API review | HarmonyOS/OpenHarmony application changes |
 | healthcare-reviewer | Clinical safety, PHI compliance, CDSS accuracy | Healthcare, EMR/EHR application code |
 | a11y-architect | WCAG 2.2 accessibility architecture | Designing UI components, accessibility audits |
 | code-architect | Feature architecture blueprints from codebase patterns | New features needing implementation design |
@@ -67,7 +68,7 @@ This is a **production-ready AI coding plugin** providing 67 specialized agents,
 | network-troubleshooter | OSI-layer connectivity and routing diagnosis | Network connectivity and routing issues |
 | performance-optimizer | Bottleneck detection, bundle size, memory leaks | Slow code or high resource usage |
 | silent-failure-hunter | Swallowed errors and missing propagation | Code reliability audits |
-| type-design-analyzer | Type encapsulation and invariant design | TypeScript type system reviews |
+| type-design-analyzer | Type encapsulation and invariant design | Type design and invariant reviews |
 | pr-test-analyzer | PR test coverage quality and completeness | Before merging pull requests |
 | code-explorer | Execution path tracing and architecture mapping | Understanding unfamiliar code paths |
 | code-simplifier | Clarity-focused code refinement without behavior change | Post-implementation cleanup |
@@ -87,25 +88,26 @@ This is a **production-ready AI coding plugin** providing 67 specialized agents,
 ## Agent Orchestration
 
 Use agents proactively without user prompt:
-- Complex feature requests → **planner**
-- Code just written/modified → **code-reviewer**
-- Bug fix or new feature → **tdd-guide**
-- Architectural decision → **architect**
-- Security-sensitive code → **security-reviewer**
-- Brownfield project onboarding → **spec-miner**
-- Autonomous loops / loop monitoring → **loop-operator**
-- Harness config reliability and cost → **harness-optimizer**
-- Performance bottleneck or slow code → **performance-optimizer**
-- React/JSX changes → **react-reviewer**
-- Vue changes → **vue-reviewer**
-- Swift changes → **swift-reviewer**
-- C# changes → **csharp-reviewer**
-- PHP changes → **php-reviewer**
-- Flutter/Dart changes → **flutter-reviewer**
-- Healthcare/clinical code → **healthcare-reviewer**
-- UI component design → **a11y-architect**
-- Open-source release prep → **opensource-forker** → **opensource-sanitizer** → **opensource-packager**
-- Agent output quality check → **agent-evaluator**
+- Complex feature requests → **ecc:planner**
+- Code just written/modified → **ecc:code-reviewer**
+- Bug fix or new feature → **ecc:tdd-guide**
+- Architectural decision → **ecc:architect**
+- Security-sensitive code → **ecc:security-reviewer**
+- Brownfield project onboarding → **ecc:spec-miner**
+- Autonomous loops / loop monitoring → **ecc:loop-operator**
+- Harness config reliability and cost → **ecc:harness-optimizer**
+- RAG/retrieval pipeline changes → **ecc:rag-pipeline-reviewer**
+- Performance bottleneck or slow code → **ecc:performance-optimizer**
+- React/JSX changes → **ecc:react-reviewer**
+- Vue changes → **ecc:vue-reviewer**
+- Swift changes → **ecc:swift-reviewer**
+- C# changes → **ecc:csharp-reviewer**
+- PHP changes → **ecc:php-reviewer**
+- Flutter/Dart changes → **ecc:flutter-reviewer**
+- Healthcare/clinical code → **ecc:healthcare-reviewer**
+- UI component design → **ecc:a11y-architect**
+- Open-source release prep → **ecc:opensource-forker** → **ecc:opensource-sanitizer** → **ecc:opensource-packager**
+- Agent output quality check → **ecc:agent-evaluator**
 
 Use parallel execution for independent operations — launch multiple agents simultaneously.
 
@@ -159,9 +161,9 @@ Troubleshoot failures: check test isolation → verify mocks → fix implementat
 
 ## Development Workflow
 
-1. **Plan** — Use planner agent, identify dependencies and risks, break into phases
-2. **TDD** — Use tdd-guide agent, write tests first, implement, refactor
-3. **Review** — Use code-reviewer agent immediately, address CRITICAL/HIGH issues
+1. **Plan** — Use ecc:planner agent, identify dependencies and risks, break into phases
+2. **TDD** — Use ecc:tdd-guide agent, write tests first, implement, refactor
+3. **Review** — Use ecc:code-reviewer agent immediately, address CRITICAL/HIGH issues
 4. **Capture knowledge in the right place**
    - Personal debugging notes, preferences, and temporary context → auto memory
    - Team/project knowledge (architecture decisions, API changes, runbooks) → the project's existing docs structure
@@ -198,8 +200,8 @@ Troubleshoot failures: check test isolation → verify mocks → fix implementat
 ## Project Structure
 
 ```
-agents/          — 67 specialized subagents
-skills/          — 281 workflow skills and domain knowledge
+agents/          — 68 specialized subagents
+skills/          — 292 workflow skills and domain knowledge
 commands/        — 94 slash commands
 hooks/           — Trigger-based automations
 rules/           — Always-follow guidelines (common + per-language)
