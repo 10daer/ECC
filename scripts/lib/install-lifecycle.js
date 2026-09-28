@@ -1735,7 +1735,7 @@ function analyzeRecord(record, context) {
 }
 
 function buildDoctorReport(options = {}) {
-  const repoRoot = options.repoRoot || DEFAULT_REPO_ROOT;
+  const repoRoot = options.repoRoot ? path.resolve(options.repoRoot) : DEFAULT_REPO_ROOT;
   const manifests = loadInstallManifests({ repoRoot });
   const records = discoverInstalledStates({
     homeDir: options.homeDir,
@@ -1973,7 +1973,7 @@ function preflightOpenCodeHookDeactivation(record, context, options = {}) {
 }
 
 function repairInstalledStates(options = {}) {
-  const repoRoot = options.repoRoot || DEFAULT_REPO_ROOT;
+  const repoRoot = options.repoRoot ? path.resolve(options.repoRoot) : DEFAULT_REPO_ROOT;
   const manifests = loadInstallManifests({ repoRoot });
   const context = {
     repoRoot,
