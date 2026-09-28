@@ -7,6 +7,10 @@ const { execFileSync } = require('child_process');
 const { resolveInstallPlan } = require('../install-manifests');
 const { getInstallTargetAdapter } = require('../install-targets/registry');
 const { resolveInvocationEnvironment } = require('../invocation-environment');
+const { readHooksConfig } = require('../hooks-config');
+const {
+  materializeManagedHooks,
+} = require('./claude-settings');
 
 const EXCLUDED_GENERATED_SOURCE_SUFFIXES = ['/ecc-install-state.json', '/ecc/install-state.json'];
 const IGNORED_DIRECTORY_NAMES = new Set([
@@ -127,7 +131,33 @@ function readJsonObject(filePath, label) {
   return parsed;
 }
 
+function materializeClaudeSettingsOperation(sourceRoot, operation) {
+  const sourcePath = path.join(sourceRoot, operation.sourceRelativePath);
+  if (!fs.existsSync(sourcePath)) {
+    return [];
+  }
+
+  // Stable ids and descriptions live in hooks/hooks.metadata.json; readHooksConfig
+  // merges them back so managed settings entries keep their ids.
+  const hooksConfig = readHooksConfig(sourcePath, operation.sourceRelativePath);
+  const managedHooks = materializeManagedHooks(
+    hooksConfig,
+    path.dirname(operation.destinationPath)
+  );
+
+  return [{
+    ...operation,
+    sourcePath,
+    scaffoldOnly: false,
+    managedHooks,
+  }];
+}
+
 function materializeScaffoldOperation(sourceRoot, operation) {
+  if (operation.kind === 'update-claude-settings') {
+    return materializeClaudeSettingsOperation(sourceRoot, operation);
+  }
+
   if (operation.kind === 'merge-json') {
     return [
       {
