@@ -78,3 +78,19 @@ handoffs.
 
 The `ecc.hud-status.v1` payload is the common outer contract these surfaces can
 project into before ECC grows a dedicated full-screen HUD.
+
+## State Store Concurrency And Recovery
+
+ECC's file-backed state store serializes each synchronous query or transaction
+with a sibling `<database>.ecc-state.lock` file. It reloads the latest database
+under that lock and publishes successful writes before releasing it. Queries
+use one snapshot; closing a handle never writes an older snapshot back.
+All concurrent writers must use this adapter; older ECC versions and external
+SQLite writers do not participate in this locking protocol.
+
+An operation waits up to five seconds before reporting `STATE_STORE_BUSY`.
+Retry when the other operation finishes. Locks are never stolen based on age:
+a paused process may still be writing. After an abnormal exit, stop all ECC
+processes using that database, inspect the PID and hostname in the lock file,
+and remove only the leftover `.ecc-state.lock` file before retrying. Do not
+remove the database itself. In-memory stores do not create lock files.
