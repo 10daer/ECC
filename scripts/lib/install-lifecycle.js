@@ -1598,11 +1598,21 @@ function analyzeRecord(record, context) {
     };
   }
 
+  let planningFailureReported = false;
   if (record.adapter.target === 'opencode') {
+    let checks;
     try {
-      preflightOpenCodeHookDeactivation(record, context, { requireInactive: true });
+      checks = prepareOpenCodeHookDeactivationChecks(record, context, { requireInactive: true });
     } catch (error) {
-      issues.push(buildIssue('error', 'opencode-hook-consent-violation', error.message));
+      planningFailureReported = true;
+      issues.push(buildIssue('error', 'resolution-unavailable', error.message));
+    }
+    if (checks) {
+      try {
+        for (const check of checks) assertOpenCodeRepairHookDeactivation(check.plan, check.options);
+      } catch (error) {
+        issues.push(buildIssue('error', 'opencode-hook-consent-violation', error.message));
+      }
     }
   }
 
@@ -1708,7 +1718,7 @@ function analyzeRecord(record, context) {
     issues.push(buildIssue('warning', 'repo-version-mismatch', `Recorded repo version ${state.source.repoVersion} differs from current repo version ${context.packageVersion}`));
   }
 
-  if (!state.request.legacyMode) {
+  if (!state.request.legacyMode && !planningFailureReported) {
     try {
       const desiredPlan = resolveRecordedManifestPlan(record, context);
 
@@ -1939,9 +1949,9 @@ function assertOpenCodeRepairHookDeactivation(plan, options = {}) {
   return assertOpenCodeHookDeactivationReady(plan, options);
 }
 
-function preflightOpenCodeHookDeactivation(record, context, options = {}) {
+function prepareOpenCodeHookDeactivationChecks(record, context, options = {}) {
   if (record.adapter.target !== 'opencode') {
-    return;
+    return [];
   }
   const rawPlan = createRepairPlanFromRecord(record, context, {
     // Planning must reject unsafe existing activations before a repair build
@@ -1964,12 +1974,19 @@ function preflightOpenCodeHookDeactivation(record, context, options = {}) {
     // Migration does not replay operations into the old root. Inspect existing
     // activations there, without treating historical merge-json records as new
     // writes; the canonical destination is validated separately below.
-    assertOpenCodeRepairHookDeactivation({ ...legacyPlan, operations: [] }, { allowVerifiedLegacyRemoval: true });
-    assertOpenCodeRepairHookDeactivation(rawPlan, options);
-    return;
+    return [
+      { plan: { ...legacyPlan, operations: [] }, options: { allowVerifiedLegacyRemoval: true } },
+      { plan: rawPlan, options },
+    ];
   }
   const { plan } = prepareRepairMigration(rawPlan, record);
-  assertOpenCodeRepairHookDeactivation(plan, options);
+  return [{ plan, options }];
+}
+
+function preflightOpenCodeHookDeactivation(record, context, options = {}) {
+  for (const check of prepareOpenCodeHookDeactivationChecks(record, context, options)) {
+    assertOpenCodeRepairHookDeactivation(check.plan, check.options);
+  }
 }
 
 function repairInstalledStates(options = {}) {

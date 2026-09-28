@@ -294,6 +294,66 @@ function runTests() {
     assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
   }));
   for (const consent of [null, 'declined']) {
+    for (const plugin of [undefined, ['user-plugin']]) {
+      test(`fresh ${consent || 'default'} apply preserves inactive user config ${JSON.stringify(plugin)}`, () => fixture(value => {
+        fs.unlinkSync(value.installStatePath);
+        fs.unlinkSync(path.join(value.targetRoot, 'plugins/ecc-hooks.ts'));
+        const destination = path.join(value.targetRoot, 'opencode.json');
+        const content = `${JSON.stringify({ userSetting: 'keep formatting', plugin }, null, 4)}\n`;
+        fs.writeFileSync(destination, content);
+        const result = applyInstallPlan(withHookConsent(value.basePlan, consent));
+        assert.strictEqual(result.applied, true);
+        assert.strictEqual(fs.readFileSync(destination, 'utf8'), content);
+        assert.ok(result.warnings.includes(`Skipped user-owned file ${destination}: the existing file is not recorded in ECC install-state.`));
+        assert.ok(result.skippedOperations.some(operation => operation.destinationPath === destination));
+        for (const operations of [result.operations, readInstallState(value.installStatePath).operations]) {
+          assert.ok(!operations.some(operation => operation.destinationPath === destination), 'Do not adopt a user config');
+        }
+        assert.strictEqual(fs.readFileSync(path.join(value.targetRoot, 'plugins/ecc-hooks.ts'), 'utf8'),
+          'export default async () => ({});\n');
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      }));
+    }
+    test(`fresh ${consent || 'default'} apply still refuses active unrecorded config`, () => fixture(value => {
+      fs.unlinkSync(value.installStatePath);
+      fs.unlinkSync(path.join(value.targetRoot, 'plugins/ecc-hooks.ts'));
+      const destination = path.join(value.targetRoot, 'opencode.json');
+      const content = fs.readFileSync(destination);
+      assert.throws(() => applyInstallPlan(withHookConsent(value.basePlan, consent)), /Refusing OpenCode hook deactivation/);
+      assert.deepStrictEqual(fs.readFileSync(destination), content);
+      assert.strictEqual(fs.existsSync(path.join(value.targetRoot, 'plugins/ecc-hooks.ts')), false);
+      assert.strictEqual(fs.existsSync(value.installStatePath), false);
+      assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+    }));
+    test(`fresh ${consent || 'default'} apply rechecks skipped user config after writes`, () => fixture(value => {
+      fs.unlinkSync(value.installStatePath);
+      const plugin = path.join(value.targetRoot, 'plugins/ecc-hooks.ts');
+      fs.unlinkSync(plugin);
+      const destination = path.join(value.targetRoot, 'opencode.json');
+      fs.writeFileSync(destination, '{"userSetting":"initially inactive"}\n');
+      const activated = '{"plugin":["./plugins"],"userSetting":"late edit"}\n';
+      let injected = false;
+      const stateWritePhases = [];
+      assert.throws(() => applyInstallPlan(withHookConsent(value.basePlan, consent), {
+        beforeInstallStateWrite() { stateWritePhases.push(injected); },
+        beforeOperationWrite({ operation }) {
+          if (operation.destinationPath === plugin) {
+            injected = true;
+            fs.writeFileSync(destination, activated);
+          }
+        },
+      }), /OpenCode hook activation remains active/);
+      assert.ok(injected, 'Exercise the write boundary after preserving the inactive config');
+      assert.strictEqual(fs.readFileSync(destination, 'utf8'), activated);
+      assert.ok(!stateWritePhases.includes(true), 'Do not reach final state persistence');
+      // A retryable bridge may record the inert plugin already written, but
+      // must never adopt the preserved user config after this refusal.
+      const checkpoint = readInstallState(value.installStatePath);
+      assert.deepStrictEqual(checkpoint.operations.map(operation => operation.destinationPath), [plugin]);
+      assert.strictEqual(fs.readFileSync(plugin, 'utf8'), 'export default async () => ({});\n');
+      assert.strictEqual(checkpoint.operations[0].contentSha256, sha256(fs.readFileSync(plugin)));
+      assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+    }));
     test(`fresh ${consent || 'default'} apply preserves unrelated unrecorded plugin aliases`, () => fixture(value => {
       fs.unlinkSync(value.installStatePath);
       for (const operation of value.basePlan.operations) fs.unlinkSync(operation.destinationPath);
@@ -310,6 +370,66 @@ function runTests() {
       }
     }));
   }
+  for (const missingDigest of [false, true]) {
+    test(`apply refuses inactive managed config with ${missingDigest ? 'missing digest' : 'changed bytes'}`, () => fixture(value => {
+      const destination = path.join(value.targetRoot, 'opencode.json');
+      const content = '{"userSetting":"inactive managed edit"}\n';
+      fs.writeFileSync(destination, content);
+      if (missingDigest) {
+        delete value.state.operations.find(operation => operation.destinationPath === destination).contentSha256;
+        writeInstallState(value.installStatePath, value.state);
+      }
+      const stateBefore = fs.readFileSync(value.installStatePath);
+      const plugin = path.join(value.targetRoot, 'plugins/ecc-hooks.ts');
+      const pluginBefore = fs.readFileSync(plugin);
+      assert.throws(() => applyInstallPlan(value.declinePlan), /Refusing OpenCode hook deactivation/);
+      assert.strictEqual(fs.readFileSync(destination, 'utf8'), content);
+      assert.deepStrictEqual(fs.readFileSync(value.installStatePath), stateBefore);
+      assert.deepStrictEqual(fs.readFileSync(plugin), pluginBefore);
+      assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+    }));
+  }
+  for (const missing of ['profile', 'module']) {
+    for (const mode of ['doctor', 'repair']) {
+      test(`${mode} reports missing ${missing} as a planning failure before any writes`, () => fixture(value => {
+        value.state.request.legacyMode = false;
+        value.state.request.profile = missing === 'profile' ? 'missing-fixture-profile' : null;
+        value.state.request.modules = missing === 'module' ? ['missing-fixture-module'] : [];
+        writeInstallState(value.installStatePath, value.state);
+        const paths = [value.installStatePath, ...value.basePlan.operations.map(operation => operation.destinationPath)];
+        const before = paths.map(file => fs.readFileSync(file));
+        let buildCalls = 0;
+        if (mode === 'doctor') {
+          const result = buildDoctorReport({ repoRoot: value.sourceRoot, homeDir: value.homeDir,
+            projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+          assert.strictEqual(result.status, 'error');
+          const planning = result.issues.filter(issue => issue.code === 'resolution-unavailable');
+          assert.strictEqual(planning.length, 1, JSON.stringify(result.issues));
+          assert.match(planning[0].message, new RegExp(`missing-fixture-${missing}`));
+          assert.strictEqual(result.issues.filter(issue => issue.code === 'opencode-hook-consent-violation').length, 0);
+        } else {
+          const result = repair(value, { buildOpencodePayload() { buildCalls++; throw new Error('Unexpected build'); } }).results[0];
+          assert.strictEqual(result.status, 'error');
+          assert.match(result.error, new RegExp(`missing-fixture-${missing}`));
+          assert.notStrictEqual(result.stateRefreshed, true);
+        }
+        assert.strictEqual(buildCalls, 0);
+        paths.forEach((file, index) => assert.deepStrictEqual(fs.readFileSync(file), before[index]));
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      }));
+    }
+  }
+  test('doctor still identifies active declined activation as a consent violation', () => fixture(value => {
+    value.state.request.hookConsent = 'declined';
+    writeInstallState(value.installStatePath, value.state);
+    const before = fs.readFileSync(value.installStatePath);
+    const result = buildDoctorReport({ repoRoot: value.sourceRoot, homeDir: value.homeDir,
+      projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+    assert.strictEqual(result.status, 'error');
+    assert.strictEqual(result.issues.filter(issue => issue.code === 'opencode-hook-consent-violation').length, 1);
+    assert.strictEqual(result.issues.filter(issue => issue.code === 'resolution-unavailable').length, 0);
+    assert.deepStrictEqual(fs.readFileSync(value.installStatePath), before);
+  }));
   for (const mode of ['doctor', 'repair']) {
     test(`${mode} preserves an unrelated plugin without reporting ECC activation`, () => fixture(value => {
       applyInstallPlan(value.declinePlan);
