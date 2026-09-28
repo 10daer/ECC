@@ -52,7 +52,7 @@ BLOCKED — /<command> cannot carry plan scope; run manually if wanted: <exact d
 
 Blocked steps appear in the overview and per-step output and are excluded from the Batch execution block. This is deliberate: a bare `/update-docs` pasted inside a five-step batch has no machine-readable link to the step it was planned for. The user can still run the manual command themselves; the router just refuses to present an unscoped command as if the step were orchestrated.
 
-This table is a validated snapshot of the command files, not an independent source of truth. `tests/skills/plan-orchestrate-registry.test.js` validates every command named here against `commands/<name>.md` and `docs/COMMAND-REGISTRY.json` and fails when they disagree. If a command file and this skill ever disagree at runtime, the command file wins.
+This table is a validated snapshot of the command files, not an independent source of truth. `tests/skills/plan-orchestrate-registry.test.js` validates every command named here against `commands/<name>.md` and `docs/COMMAND-REGISTRY.json` and fails when they disagree. If a command file and this skill ever disagree at runtime, the command file wins. A command that has since been retired from `commands/` fails closed like a no-argument command — the step is reported `BLOCKED` and the router never emits a name the command surface no longer has.
 
 ## Task description (scope-carrying commands only)
 

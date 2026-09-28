@@ -17,7 +17,11 @@
  *     argument (re-classify the skill if a command grows one);
  *  5. the fail-closed rule and the BLOCKED marker are actually stated;
  *  6. the agent-chain machinery stays gone — commands own their execution;
- *  7. emitted examples carry the [Plan: ...#step-N] scope marker.
+ *  7. emitted examples carry the [Plan: ...#step-N] scope marker;
+ *  8. the committed docs/COMMAND-REGISTRY.json is fresh — it equals a
+ *     regeneration from commands/, so a contributor who adds a command and
+ *     forgets to regenerate fails here with a regenerate hint instead of the
+ *     router silently validating against a stale surface.
  */
 
 'use strict';
@@ -218,6 +222,22 @@ function run() {
   }
   assert.ok(checked >= 3, `expected at least 3 command examples, checked ${checked}`);
   console.log(`  \u2713 emitted examples carry the scope marker (${checked} checked)`);
+
+  // --- 8. The committed registry itself is fresh -------------------------
+
+  // The checks above validate the skill against the committed JSON, which
+  // makes a stale registry silently pass. Rebuild it in memory from the
+  // command files and require equality, so drift fails as "regenerate".
+  // npm test also runs `command-registry:check` before the suites; this keeps
+  // the file honest when it is run standalone.
+  const { generateRegistry } = require(path.join(REPO_ROOT, 'scripts', 'ci', 'generate-command-registry.js'));
+  const committedRegistry = JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf8'));
+  assert.deepStrictEqual(
+    committedRegistry,
+    generateRegistry(),
+    'docs/COMMAND-REGISTRY.json is stale — regenerate it with `npm run command-registry:write`'
+  );
+  console.log('  \u2713 docs/COMMAND-REGISTRY.json matches a fresh generation from commands/');
 
   console.log('  plan-orchestrate registry fixtures passed');
 }
