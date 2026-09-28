@@ -107,7 +107,8 @@ function inspectLegacyOpencodeState(location) {
 }
 
 function hashFileNoFollow(filePath, fileSystem = fs) {
-  const flags = fileSystem.constants.O_RDONLY | (fileSystem.constants.O_NOFOLLOW || 0);
+  // The filesystem seam supplies operations, never the read-only access policy.
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
   const descriptor = fileSystem.openSync(filePath, flags);
   try {
     const before = fileSystem.fstatSync(descriptor, { bigint: true });
