@@ -272,12 +272,14 @@ function assertAssetRefusal(response, status, base, outside) {
 
 async function artifactRaceTests(test) {
   const withFile = callback => withArtifactHandler(async value => {
-    const parent = path.join(value.base, 'nested');
+    const base = fs.realpathSync(value.base);
+    const outside = fs.realpathSync(value.outside);
+    const parent = path.join(base, 'nested');
     fs.mkdirSync(parent);
     const asset = path.join(parent, 'asset.txt');
     fs.writeFileSync(asset, 'inert');
-    fs.writeFileSync(path.join(value.outside, 'asset.txt'), 'private-fixture-secret');
-    await callback({ ...value, parent, asset, fetch: () => value.get('nested/asset.txt') });
+    fs.writeFileSync(path.join(outside, 'asset.txt'), 'private-fixture-secret');
+    await callback({ ...value, base, outside, parent, asset, fetch: () => value.get('nested/asset.txt') });
   });
   await test('sibling reads use one guarded descriptor and at most size plus one bytes', () => withFile(async ({ asset, fetch }) => {
     await withAssetIo(asset, {}, async calls => {
