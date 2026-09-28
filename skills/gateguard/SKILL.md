@@ -1,6 +1,6 @@
 ---
 name: gateguard
-description: Fact-forcing gate that blocks Edit/Write/Bash (including MultiEdit) and demands concrete investigation (importers, data schemas, user instruction) before allowing the action. Measurably improves output quality by +2.25 points vs ungated agents.
+description: "PreToolUse fact-forcing gate that denies the first Edit/Write/Bash (including MultiEdit) attempt until the agent presents concrete facts (importers, data schemas, verbatim user instruction), then allows retry; A/B-tested at +2.25 quality points. Use when enabling or configuring the GateGuard hook, exempting paths via env vars, or handling first-touch denials."
 metadata:
   origin: community
 ---
@@ -89,6 +89,26 @@ Triggers on: `rm -rf`, `git reset --hard`, `git push --force`, `drop table`, etc
 2. What this specific command verifies or produces
 ```
 
+## Parallel Batches and Partial Application
+
+The first-touch gate evaluates each tool call independently. When several
+edits to a file that has not been touched yet are sent in one parallel
+batch, the first call is denied and the denial marks the file as checked,
+so the sibling edits in that batch are applied. Nothing is rolled back:
+the file can end up holding the sibling edits without the denied one.
+
+The denial message names the file and warns that batch siblings may
+already have been applied. Treat it literally:
+
+- Send dependent edits to a not-yet-touched file sequentially, not in a
+  parallel batch. A definition and its first use, or an import and its
+  call site, must not ride in the same batch.
+- After a first-touch denial, present the facts, retry the denied edit,
+  and re-read the file before building on anything else from the batch.
+
+A batch-wide lock is not possible: hooks see tool calls one at a time, so
+the gate cannot know which calls arrived together.
+
 ## Quick Start
 
 ### Option A: Use the ECC hook (zero install)
@@ -135,16 +155,20 @@ For hook-level control, keep using `ECC_DISABLED_HOOKS` with the GateGuard hook 
 
 #### Glob semantics for `GATEGUARD_EXEMPT_GLOBS`
 
-Patterns are matched, unanchored, against the target path with backslashes
-normalized to `/` and the whole string lowercased — the path exactly as the
-hook receives it, which for Claude Code tool payloads is absolute. `*` matches
-within a path segment, `**` across segments, `?` a single character. Matching
-is fail-open: a malformed pattern is dropped rather than raising.
+Patterns match the entire project-relative target path. The project root is
+`CLAUDE_PROJECT_DIR`, falling back to the hook payload's `cwd`, then the hook
+process working directory. Relative globs never exempt targets outside that
+root. Explicit absolute globs match the entire absolute target path and may
+deliberately exempt paths outside the project.
 
-Note that a leading `**/` compiles to `.*/`, so it requires at least one
-preceding separator: `**/tests/**` exempts `/repo/tests/foo.js` but would not
-match a bare relative `tests/foo.js`. Add the separator-free form too if you
-pass relative paths:
+Both patterns and paths use `/` separators and lowercase matching. `*` matches
+within a segment, `**` across segments, and `?` one non-separator character.
+`**/` includes zero directories, so `**/tests/**` also matches `tests/foo.js`.
+Malformed patterns are dropped without granting an exemption.
+
+Since 2.2.1, `services/**` only covers the project's root services tree, and
+`*.md` only covers its root Markdown files. Use `**/*.md` for all Markdown
+files within the project. Existing unanchored exemptions may need adjustment:
 
 ```json
 {
