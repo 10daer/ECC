@@ -608,6 +608,9 @@ async function runTests() {
       assert.match(source, /require\('\.\/lib\/platform-launch'\)/);
       assert.match(source, /if \(!result\.opened\)/);
       assert.match(source, /result\.reason/);
+      const helper = fs.readFileSync(path.join(path.dirname(SCRIPT), 'lib/platform-launch.js'), 'utf8');
+      assert.match(helper, /child\.on\('error'/);
+      assert.match(helper, /child\.unref\(\)/);
     })
   )
     passed++;

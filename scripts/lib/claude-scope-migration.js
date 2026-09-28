@@ -153,7 +153,10 @@ function plannedActions(migration, destinationScope, marketplaceAction) {
   const actions = [];
   if (migration.mode === 'migrate') {
     actions.push(marketplaceAction);
-    actions.push(['plugin', 'install', CURRENT_PLUGIN_ID, '--scope', destinationScope]);
+    actions.push([
+      'plugin', 'install', CURRENT_PLUGIN_ID,
+      '--scope', destinationScope,
+    ]);
   }
   actions.push(['plugin', 'list', '--json']);
   actions.push(['plugin', 'list', '--json']);

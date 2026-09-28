@@ -619,8 +619,9 @@ test('migration preserves hook preferences unless --hooks is explicit', () => {
       }
     );
     assert.ok(readCalls(fixture).some(argv => (
-      JSON.stringify(argv) === JSON.stringify(installArgv('project', 'off', 'strict'))
+      JSON.stringify(argv) === JSON.stringify(installArgv('project'))
     )));
+    assert.ok(readCalls(fixture).every(argv => !argv.includes('--config')));
   });
 
   withFixture({
