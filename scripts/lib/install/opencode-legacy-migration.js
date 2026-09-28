@@ -393,6 +393,7 @@ function cleanupLegacyOpencodeInstall(plan) {
 module.exports = {
   cleanupLegacyOpencodeInstall,
   getLegacyOpencodeLocation,
+  getLegacyLocationForPlan,
   inspectLegacyOpencodeState,
   removeVerifiedLegacyFile,
 };
