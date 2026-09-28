@@ -291,6 +291,9 @@ function tokenizeAllowlistedShellWords(input) {
 }
 
 const SHELL_SEGMENT_SEPARATORS = new Set([';', '|', '&', '\n', '\r']);
+// Keep only the lexical information needed for Bash's reserved word `time`.
+// Quoted/escaped `time` is an external command, not a shell pipeline prefix.
+const SHELL_TIME_TOKENS = new WeakMap();
 
 /**
  * Quote-aware split of a command line into segments, with quotes removed from
@@ -307,20 +310,30 @@ const SHELL_SEGMENT_SEPARATORS = new Set([';', '|', '&', '\n', '\r']);
 function quoteAwareSegments(input) {
   const segments = [];
   let words = [];
+  let timeTokens = new Set();
   let current = '';
   let hasWord = false;
+  let literalWord = true;
   let quote = null;
   let escaped = false;
 
   const flushWord = () => {
-    if (hasWord) words.push(current);
+    if (hasWord) {
+      if (literalWord && ['time', '-p', '--'].includes(current)) timeTokens.add(words.length);
+      words.push(current);
+    }
     current = '';
     hasWord = false;
+    literalWord = true;
   };
   const flushSegment = () => {
     flushWord();
-    if (words.length) segments.push(words);
+    if (words.length) {
+      if (timeTokens.size) SHELL_TIME_TOKENS.set(words, timeTokens);
+      segments.push(words);
+    }
     words = [];
+    timeTokens = new Set();
   };
 
   const source = String(input || '');
@@ -345,6 +358,7 @@ function quoteAwareSegments(input) {
         i += 1;
         continue;
       }
+      literalWord = false;
       escaped = true;
       hasWord = true;
       continue;
@@ -357,6 +371,7 @@ function quoteAwareSegments(input) {
     }
     if (ch === '"' || ch === "'") {
       quote = ch;
+      literalWord = false;
       hasWord = true; // entering a quote starts a word, even if its content is empty
       continue;
     }
@@ -532,6 +547,8 @@ function wrapperValueOption(arg, valueFlags) {
 
 // Explicit external-launcher argv grammars for dd and shell-wrapper discovery.
 // Unknown flags do not justify guessing which later argument executes.
+// This literal allowlist cannot prove arbitrary custom-wrapper semantics or
+// resolve dynamically selected executables; quoted operand text stays data.
 const DD_LAUNCHER_OPTIONS = {
   xargs: {
     values: new Set(['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-J', '-L', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars', '--process-slot-var']),
@@ -544,12 +561,38 @@ const DD_LAUNCHER_OPTIONS = {
     flags: new Set(['-v', '--verbose', '--foreground', '--preserve-status'])
   },
   nice: { values: new Set(['-n', '--adjustment']), optional: new Set(), flags: new Set() },
-  nohup: { values: new Set(), optional: new Set(), flags: new Set() }
+  nohup: { values: new Set(), optional: new Set(), flags: new Set() },
+  time: {
+    values: new Set(['-f', '--format', '-o', '--output-file']),
+    optional: new Set(),
+    flags: new Set(['-p', '--portability', '-a', '--append', '-q', '--quiet', '-v', '--verbose']),
+    nonCommand: new Set(['--help', '-V', '--version'])
+  },
+  stdbuf: {
+    values: new Set(['-i', '--input', '-o', '--output', '-e', '--error']),
+    optional: new Set(), flags: new Set()
+  },
+  ionice: {
+    values: new Set(['-c', '--class', '-n', '--classdata']),
+    optional: new Set(), flags: new Set(['-t', '--ignore']),
+    // These modes query/change existing processes rather than launch argv.
+    nonCommand: new Set(['-p', '--pid', '-P', '--pgid', '-u', '--uid'])
+  },
+  setsid: {
+    values: new Set(), optional: new Set(),
+    flags: new Set(['-c', '--ctty', '-f', '--fork', '-w', '--wait'])
+  }
 };
 
 /** Return the command position after one explicitly supported launcher's options. */
 function ddLauncherCommandIndex(argv, index, name) {
-  const { values, optional, flags } = DD_LAUNCHER_OPTIONS[name];
+  const { values, optional, flags, nonCommand } = DD_LAUNCHER_OPTIONS[name];
+  // GNU time uses getopt_long: unique prefixes resolve against its complete
+  // eight-option table, including terminating help/version. Other launchers
+  // retain their explicit spellings; this does not affect shell-keyword time.
+  const timeLongOptions = name === 'time'
+    ? [...values, ...flags, ...nonCommand].filter(flag => flag.startsWith('--'))
+    : null;
   index += 1;
   while (index < argv.length) {
     const arg = argv[index];
@@ -565,7 +608,13 @@ function ddLauncherCommandIndex(argv, index, name) {
     }
     if (arg.startsWith('--')) {
       const separator = arg.indexOf('=');
-      const flag = separator === -1 ? arg : arg.slice(0, separator);
+      let flag = separator === -1 ? arg : arg.slice(0, separator);
+      if (timeLongOptions && !timeLongOptions.includes(flag)) {
+        const matches = timeLongOptions.filter(option => option.startsWith(flag));
+        if (matches.length !== 1) return argv.length;
+        [flag] = matches;
+      }
+      if (nonCommand && nonCommand.has(flag)) return argv.length;
       if (values.has(flag)) index += separator === -1 ? 2 : 1;
       else if (optional.has(flag) || (separator === -1 && flags.has(flag))) index += 1;
       else return argv.length;
@@ -574,6 +623,7 @@ function ddLauncherCommandIndex(argv, index, name) {
     let consumesNext = false;
     for (let offset = 1; offset < arg.length; offset += 1) {
       const flag = `-${arg[offset]}`;
+      if (nonCommand && nonCommand.has(flag)) return argv.length;
       if (values.has(flag)) {
         consumesNext = offset + 1 === arg.length;
         break;
@@ -602,12 +652,27 @@ function unwrapLeadWrappers(tokens, allowShellBuiltins = true, allowDdLaunchers 
   let argv = tokens.slice();
   let index = 0;
   let allowAssignments = true;
+  let allowShellTime = allowShellBuiltins;
+  const timeTokens = SHELL_TIME_TOKENS.get(tokens);
   let budget = tokens.reduce((size, token) => size + token.length + 1, 1);
   while (index < argv.length && budget-- > 0) {
-    while (allowAssignments && index < argv.length && SHELL_ASSIGNMENT.test(argv[index])) index += 1;
+    while (allowAssignments && index < argv.length && SHELL_ASSIGNMENT.test(argv[index])) {
+      index += 1;
+      allowShellTime = false;
+    }
     if (index >= argv.length) return [];
     const base = commandBasename(argv[index]);
+    if (allowDdLaunchers && allowShellTime && argv[index] === 'time' && timeTokens && timeTokens.has(index)) {
+      // Current Bash accepts only raw -p and -- as reserved-time options.
+      // Quotes/escapes make them executable words, unlike external time argv.
+      // The next command/exec builtin or assignment keeps shell semantics.
+      index += 1;
+      if (argv[index] === '-p' && timeTokens.has(index)) index += 1;
+      if (argv[index] === '--' && timeTokens.has(index)) index += 1;
+      continue;
+    }
     if (allowShellBuiltins && base === 'command') {
+      allowShellTime = false;
       index += 1;
       while (index < argv.length && argv[index].startsWith('-') && argv[index] !== '-') {
         const flag = argv[index++];
@@ -619,6 +684,7 @@ function unwrapLeadWrappers(tokens, allowShellBuiltins = true, allowDdLaunchers 
       continue;
     }
     if (allowShellBuiltins && base === 'exec') {
+      allowShellTime = false;
       index += 1;
       while (index < argv.length && argv[index].startsWith('-') && argv[index] !== '-') {
         const flag = argv[index];
@@ -639,11 +705,13 @@ function unwrapLeadWrappers(tokens, allowShellBuiltins = true, allowDdLaunchers 
     }
     if (allowDdLaunchers && Object.prototype.hasOwnProperty.call(DD_LAUNCHER_OPTIONS, base)) {
       index = ddLauncherCommandIndex(argv, index, base);
+      allowShellTime = false;
       allowShellBuiltins = false;
       allowAssignments = false;
       continue;
     }
     if (base === 'sudo' || base === 'doas') {
+      allowShellTime = false;
       allowShellBuiltins = false;
       allowAssignments = true;
       const valueFlags = base === 'sudo' ? SUDO_VALUE_FLAGS : DOAS_VALUE_FLAGS;
@@ -661,6 +729,7 @@ function unwrapLeadWrappers(tokens, allowShellBuiltins = true, allowDdLaunchers 
       continue;
     }
     if (base === 'env') {
+      allowShellTime = false;
       allowShellBuiltins = false;
       allowAssignments = true;
       index += 1;
