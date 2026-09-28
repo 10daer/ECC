@@ -3,6 +3,8 @@
  */
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vm = require('vm');
 
@@ -62,13 +64,18 @@ function openPage(snapshot, { hold = false } = {}) {
     }
     return elements.get(selector);
   };
-  const page = { online: true, hold, pending: [], requests: [], refresh: null, element };
+  const page = { online: true, hold, pending: [], requests: [], refresh: null, element, now: NOW };
+  class Clock extends PageDate {
+    constructor(...args) {
+      super(...(args.length > 0 ? args : [page.now.getTime()]));
+    }
+  }
   page.script = {
     document: { hidden: false, querySelector: element, querySelectorAll: () => [] },
     window: { location: { href: 'http://127.0.0.1:8765/' } },
     URL,
     Intl,
-    Date: PageDate,
+    Date: Clock,
     console,
     fetch: (url, options = {}) =>
       new Promise((resolve, reject) => {
@@ -91,21 +98,50 @@ function openPage(snapshot, { hold = false } = {}) {
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+async function isolatedSnapshot() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-control-pane-ui-'));
+  try {
+    // Explicit config and both database paths keep this UI test away from
+    // user config, parent-directory config, and the default state store.
+    return JSON.parse(JSON.stringify(await buildControlPaneSnapshot({
+      config: {},
+      dbPath: path.join(root, 'missing-ecc2.db'),
+      stateDbPath: path.join(root, 'missing-state.db'),
+      repoRoot: root,
+      cwd: root,
+      env: { HOME: root, USERPROFILE: root },
+      query: ''
+    })));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function displayedBoard(page) {
+  const fields = {
+    '#query': 'value',
+    '#db-path': 'textContent',
+    '#action-status': 'textContent',
+    '#metrics': 'innerHTML',
+    '#sessions': 'innerHTML',
+    '#work-item-count': 'textContent',
+    '#work-items': 'innerHTML',
+    '#knowledge-count': 'textContent',
+    '#knowledge': 'innerHTML',
+    '#connector-count': 'textContent',
+    '#connectors': 'innerHTML',
+    '#actions': 'innerHTML'
+  };
+  return Object.fromEntries(Object.entries(fields).map(([selector, field]) => [selector, page.element(selector)[field]]));
+}
+
 async function runTests() {
   console.log('\n=== Testing control-pane UI ===\n');
 
   let passed = 0;
   let failed = 0;
 
-  const snapshot = JSON.parse(
-    JSON.stringify(
-      await buildControlPaneSnapshot({
-        dbPath: path.join(__dirname, 'no-such-ecc2.db'),
-        repoRoot: path.join(__dirname, '..', '..'),
-        query: ''
-      })
-    )
-  );
+  const snapshot = await isolatedSnapshot();
 
   if (
     await test('a failed live refresh is reported, and cleared by the next one that succeeds', async () => {
@@ -337,6 +373,85 @@ async function runTests() {
     })
   )
     passed++;
+  else failed++;
+
+  for (const [brokenSection, allowActions] of [
+    ['connectors', true], ['connectors', false], ['actions', true], ['actions', false]
+  ]) {
+    if (
+      await test(`a late ${brokenSection} failure preserves the board with actions ${allowActions ? 'enabled' : 'disabled'}`, async () => {
+        const original = {
+          ...snapshot,
+          knowledge: { ...snapshot.knowledge, query: 'prior', entityCount: 1,
+            results: [{ entity: { name: 'prior result', entityType: 'note' }, score: 1 }] },
+          execution: { allowActions },
+          workItems: { ...snapshot.workItems, items: [{ id: 'prior-item', title: 'prior work' }] }
+        };
+        const page = openPage(original, { hold: true });
+        // Finish the initial request, then establish the matching request query.
+        page.pending[0].succeed(original);
+        await settle();
+        page.element('#query').value = 'prior';
+        page.element('#query-form').listeners.submit({ preventDefault() {} });
+        page.pending[1].succeed(original);
+        await settle();
+        const before = displayedBoard(page);
+        page.now = new Date(NOW.getTime() + 60_000);
+        page.refresh();
+        const invalid = {
+          ...original,
+          dbPath: 'new-database', database: { exists: true },
+          execution: { allowActions: !allowActions },
+          summary: { ...snapshot.summary, totalSessions: 99 },
+          sessions: [{ id: 'new-session', state: 'running' }],
+          workItems: { ...snapshot.workItems, items: [{ id: 'new-item', title: 'new work' }] },
+          knowledge: { ...original.knowledge, query: 'new', entityCount: 2,
+            results: [{ entity: { name: 'new result', entityType: 'note' }, score: 2 }] },
+          connectors: [{ name: 'new connector', kind: 'test' }],
+          actions: [{ id: 'new-action', label: 'new action', executable: true }],
+          [brokenSection]: brokenSection === 'actions' ? {} : [null]
+        };
+        page.pending[2].succeed(invalid);
+        await settle();
+        assert.deepStrictEqual(displayedBoard(page), before, 'a failed snapshot changes no displayed section');
+        const error = page.element('#app');
+        assert.strictEqual(error.hidden, false);
+        assert.ok(error.textContent.includes(NOW.toLocaleString()), 'the failure retains the prior successful snapshot time');
+        assert.ok(!error.textContent.includes(page.now.toLocaleString()), 'the failed snapshot has no successful timestamp');
+
+        // Failed refreshes neither enable nor disable the prior work-item controls.
+        page.script.window.eccMoveItem('prior-item', 'ready');
+        const move = page.requests.find(request => request.url === '/api/work-items/prior-item/move');
+        assert.strictEqual(Boolean(move), allowActions, 'work-item permission still matches the prior board');
+        const run = page.script.runAction('recall-knowledge');
+        const request = page.requests.find(request => request.url === '/api/actions/recall-knowledge');
+        assert.deepStrictEqual(JSON.parse(request.options.body), { query: 'prior' });
+        // Fail both fake action responses; no subsequent snapshot is requested.
+        page.pending.slice(3).forEach(reply => reply.fail());
+        await run;
+        await settle();
+      })
+    ) passed++;
+    else failed++;
+  }
+
+  if (
+    await test('an older empty-query response stays empty while a newer query is pending', async () => {
+      const page = openPage(snapshot, { hold: true });
+      page.element('#query').value = 'new request';
+      page.element('#query-form').listeners.submit({ preventDefault() {} });
+      page.pending[0].succeed(snapshot);
+      await settle();
+      assert.strictEqual(page.element('#query').value, '', 'the completed empty query is not replaced by the pending query');
+      const run = page.script.runAction('recall-knowledge');
+      const request = page.requests.find(item => item.options.method === 'POST');
+      assert.deepStrictEqual(JSON.parse(request.options.body), { query: '' });
+      page.pending[1].fail();
+      page.pending[2].fail();
+      await run;
+      await settle();
+    })
+  ) passed++;
   else failed++;
 
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);

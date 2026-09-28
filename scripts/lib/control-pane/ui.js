@@ -493,18 +493,17 @@ function renderControlPaneHtml() {
         ['Unread', summary.unreadMessages],
         ['Tokens', fmt.format(summary.totalTokens || 0)],
       ];
-      $('#metrics').innerHTML = items.map(([label, value]) =>
+      return items.map(([label, value]) =>
         '<div class="metric"><span>' + escapeHtml(label) + '</span><strong>' + escapeHtml(value) + '</strong></div>'
       ).join('');
     }
 
     function renderSessions(sessions) {
       if (!sessions.length) {
-        $('#sessions').innerHTML = '<div class="empty">No ECC2 sessions found.</div>';
-        return;
+        return '<div class="empty">No ECC2 sessions found.</div>';
       }
 
-      $('#sessions').innerHTML = '<table><thead><tr><th>State</th><th>Session</th><th>Harness</th><th>Worktree</th><th>Updated</th></tr></thead><tbody>' +
+      return '<table><thead><tr><th>State</th><th>Session</th><th>Harness</th><th>Worktree</th><th>Updated</th></tr></thead><tbody>' +
         sessions.map(session => '<tr>' +
           '<td>' + statePill(session.state) + '</td>' +
           '<td><strong>' + escapeHtml(session.id) + '</strong><br><span class="subtle">' + escapeHtml(session.task) + '</span></td>' +
@@ -515,13 +514,13 @@ function renderControlPaneHtml() {
       '</tbody></table>';
     }
 
-    function renderWorkItems(workItems) {
+    function renderWorkItems(workItems, allowActions) {
       const summary = workItems || { totalCount: 0, openCount: 0, blockedCount: 0, doneCount: 0, kanban: {}, items: [] };
       const items = Array.isArray(summary.items) ? summary.items : [];
       const kanban = summary.kanban || {};
       const needsAssignment = Array.isArray(summary.needsAssignment) ? summary.needsAssignment : [];
       const assignment = summary.assignment || { agent: 0, human: 0, unassigned: 0 };
-      $('#work-item-count').textContent = summary.openCount + ' open / ' + summary.blockedCount + ' blocked'
+      const count = summary.openCount + ' open / ' + summary.blockedCount + ' blocked'
         + ' / ' + (assignment.agent || 0) + ' agent / ' + (assignment.human || 0) + ' human'
         + (needsAssignment.length ? ' / ' + needsAssignment.length + ' need owner' : '');
 
@@ -531,11 +530,10 @@ function renderControlPaneHtml() {
       ).join('') + '</div>';
 
       if (!items.length) {
-        $('#work-items').innerHTML = laneHtml + '<div class="empty">No agent work items found.</div>';
-        return;
+        return { count, html: laneHtml + '<div class="empty">No agent work items found.</div>' };
       }
 
-      $('#work-items').innerHTML = laneHtml + items.slice(0, 8).map(item => {
+      const html = laneHtml + items.slice(0, 8).map(item => {
         const branch = item.branch || (item.metadata && item.metadata.branch) || '';
         const mergeGate = item.mergeGate || (item.metadata && item.metadata.mergeGate) || '';
         const blocker = item.blocker || (item.metadata && item.metadata.blocker) || '';
@@ -548,7 +546,7 @@ function renderControlPaneHtml() {
         const moveButtons = ['ready', 'running', 'blocked', 'done'].map(lane =>
           '<button type="button" data-wi-action="move" data-wi-id="' + idAttr + '" data-wi-lane="' + lane + '">' + escapeHtml(lane) + '</button>'
         ).join('');
-        const controls = state.allowActions
+        const controls = allowActions
           ? '<div class="row">'
             + (assigneeKind === 'unassigned' ? '<button type="button" data-wi-action="claim" data-wi-id="' + idAttr + '">Claim</button>' : '')
             + moveButtons
@@ -564,6 +562,10 @@ function renderControlPaneHtml() {
         '</div>';
       }).join('');
 
+      return { count, html };
+    }
+
+    function bindWorkItemActions() {
       document.querySelectorAll('#work-items [data-wi-action]').forEach(button => {
         button.addEventListener('click', () => {
           const id = button.getAttribute('data-wi-id');
@@ -577,13 +579,12 @@ function renderControlPaneHtml() {
     }
 
     function renderKnowledge(knowledge) {
-      $('#knowledge-count').textContent = knowledge.entityCount + ' entities';
+      const count = knowledge.entityCount + ' entities';
       if (!knowledge.results.length) {
-        $('#knowledge').innerHTML = '<div class="empty">No recall results for this query.</div>';
-        return;
+        return { count, html: '<div class="empty">No recall results for this query.</div>' };
       }
 
-      $('#knowledge').innerHTML = knowledge.results.map(result => {
+      const html = knowledge.results.map(result => {
         const entity = result.entity;
         const obs = result.latestObservation;
         return '<div class="result">' +
@@ -594,16 +595,16 @@ function renderControlPaneHtml() {
           '<div class="subtle">terms: ' + escapeHtml((result.matchedTerms || []).join(', ') || '-') + '</div>' +
         '</div>';
       }).join('');
+      return { count, html };
     }
 
     function renderConnectors(connectors) {
-      $('#connector-count').textContent = connectors.length + ' configured';
+      const count = connectors.length + ' configured';
       if (!connectors.length) {
-        $('#connectors').innerHTML = '<div class="empty">No memory connectors configured.</div>';
-        return;
+        return { count, html: '<div class="empty">No memory connectors configured.</div>' };
       }
 
-      $('#connectors').innerHTML = connectors.map(connector => {
+      const html = connectors.map(connector => {
         const status = connector.syncedSources > 0 ? '<span class="pill good">synced</span>' : '<span class="pill warn">not synced</span>';
         return '<div class="connector">' +
           '<div class="row"><strong>' + escapeHtml(connector.name) + '</strong>' + status + '</div>' +
@@ -611,16 +612,20 @@ function renderControlPaneHtml() {
           '<div class="subtle">sources ' + escapeHtml(connector.syncedSources) + ' - last ' + escapeHtml(connector.lastSyncedAt || '-') + '</div>' +
         '</div>';
       }).join('');
+      return { count, html };
     }
 
     function renderActions(actions) {
-      $('#actions').innerHTML = actions.map(action => '<div class="action">' +
+      return actions.map(action => '<div class="action">' +
         '<div class="row"><strong>' + escapeHtml(action.label) + '</strong>' +
         (action.executable ? '<button data-action="' + escapeHtml(action.id) + '">Run</button>' : '<span class="pill">copy</span>') + '</div>' +
         '<div class="subtle">' + escapeHtml(action.description) + '</div>' +
         '<code>' + escapeHtml(action.commandLine) + '</code>' +
       '</div>').join('');
 
+    }
+
+    function bindActions() {
       document.querySelectorAll('[data-action]').forEach(button => {
         button.addEventListener('click', () => {
           runAction(button.dataset.action);
@@ -681,21 +686,40 @@ function renderControlPaneHtml() {
     }
 
     function render(snapshot, query) {
-      $('#query').value = snapshot.knowledge.query || state.query;
-      $('#db-path').textContent = snapshot.database.exists ? snapshot.dbPath : 'database missing';
-      state.allowActions = Boolean(snapshot.execution.allowActions);
-      $('#action-status').textContent = state.allowActions ? 'local allowlist' : 'read-only';
-      renderMetrics(snapshot.summary);
-      renderSessions(snapshot.sessions);
-      renderWorkItems(snapshot.workItems);
-      renderKnowledge(snapshot.knowledge);
-      renderConnectors(snapshot.connectors);
-      renderActions(snapshot.actions.map(action => ({
-        ...action,
-        executable: snapshot.execution.allowActions && action.executable
-      })));
+      // Prepare every fragment before changing the board. Malformed late
+      // sections must not leave new results with the prior action context.
+      const allowActions = Boolean(snapshot.execution.allowActions);
+      const workItems = renderWorkItems(snapshot.workItems, allowActions);
+      const knowledge = renderKnowledge(snapshot.knowledge);
+      const connectors = renderConnectors(snapshot.connectors);
+      const updates = [
+        ['#query', 'value', snapshot.knowledge.query ?? query],
+        ['#db-path', 'textContent', snapshot.database.exists ? snapshot.dbPath : 'database missing'],
+        ['#action-status', 'textContent', allowActions ? 'local allowlist' : 'read-only'],
+        ['#metrics', 'innerHTML', renderMetrics(snapshot.summary)],
+        ['#sessions', 'innerHTML', renderSessions(snapshot.sessions)],
+        ['#work-item-count', 'textContent', workItems.count],
+        ['#work-items', 'innerHTML', workItems.html],
+        ['#knowledge-count', 'textContent', knowledge.count],
+        ['#knowledge', 'innerHTML', knowledge.html],
+        ['#connector-count', 'textContent', connectors.count],
+        ['#connectors', 'innerHTML', connectors.html],
+        ['#actions', 'innerHTML', renderActions(snapshot.actions.map(action => ({
+          ...action,
+          executable: allowActions && action.executable
+        })))]
+      ].map(([selector, property, value]) => {
+        const target = $(selector);
+        if (!target) throw new Error('Missing control pane element: ' + selector);
+        return { target, property, value };
+      });
+      const completedAt = new Date();
+      updates.forEach(({ target, property, value }) => { target[property] = value; });
+      state.allowActions = allowActions;
       state.shownQuery = query;
-      loadedAt = new Date();
+      loadedAt = completedAt;
+      bindWorkItemActions();
+      bindActions();
     }
 
     $('#query-form').addEventListener('submit', event => {
