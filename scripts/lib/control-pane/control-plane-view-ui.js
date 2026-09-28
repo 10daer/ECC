@@ -281,8 +281,23 @@ function renderControlPlaneViewHtml() {
         !Number.isFinite(data.thresholds.ta) || !Number.isFinite(data.thresholds.ra)) {
       throw new Error('Invalid control-plane view');
     }
+    var previous = view;
+    var drawStarted = false;
     view = Object.assign({}, data);
-    renderEvents(); renderLanes(); draw();
+    try {
+      renderEvents(); renderLanes();
+      drawStarted = true;
+      draw();
+    } catch (error) {
+      view = previous;
+      try {
+        renderEvents(); renderLanes();
+        if (drawStarted) draw();
+      } catch (_) {
+        // Keep the accepted model even if the DOM cannot be restored.
+      }
+      throw error;
+    }
     var c = view.counts || {};
     var summary = (c.tasks || 0) + ' tasks in ' + (c.lanes || 0) + ' lanes, ' +
       (c.advisories || 0) + ' advisories, ' + (c.resolutions || 0) + ' steering. ' +
