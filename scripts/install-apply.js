@@ -19,6 +19,7 @@ const {
 } = require('./lib/install/request');
 const { getComputeSponsorCopy } = require('./lib/compute-sponsor');
 const { stripAnsi } = require('./lib/utils');
+const { describeMissingDependencyError } = require('./lib/missing-dependency');
 
 function getHelpText() {
   const languages = listLegacyCompatibilityLanguages();
@@ -131,6 +132,13 @@ function printHumanPlan(plan, dryRun) {
     }
   }
 
+  if (Array.isArray(plan.reconciledExcludedPaths) && plan.reconciledExcludedPaths.length > 0) {
+    console.log('\nReconciled excluded paths:');
+    for (const removedPath of plan.reconciledExcludedPaths) {
+      console.log(`- removed ${removedPath}`);
+    }
+  }
+
   if (!dryRun) {
     console.log(`\nDone. Install-state written to ${plan.installStatePath}`);
   }
@@ -200,7 +208,12 @@ async function main() {
       printHumanPlan(result, false);
     }
   } catch (error) {
-    process.stderr.write(`Error: ${error.message}${getHelpText()}`);
+    const missingDependencyMessage = describeMissingDependencyError(error);
+    process.stderr.write(
+      missingDependencyMessage
+        ? `Error: ${missingDependencyMessage}\n`
+        : `Error: ${error.message}${getHelpText()}`
+    );
     process.exit(1);
   }
 }

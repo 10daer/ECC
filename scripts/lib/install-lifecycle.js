@@ -3,11 +3,14 @@ const fs = require('fs');
 const { execFileSync } = require('child_process');
 const os = require('os');
 const path = require('path');
+const { isDeepStrictEqual } = require('util');
 
 const { loadInstallManifests } = require('./install-manifests');
 const { readInstallState, validateInstallState } = require('./install-state');
 const { assertWithinTrustedRoot } = require('./path-safety');
 const { createInstallPlanFromRequest } = require('./install/runtime');
+const { assertNoNewUserOwnedFile, prepareUserOwnedFileGuard } = require('./install/ownership-guard');
+const { isCodexUserConfig } = require('./install/codex-user-config');
 const { getRecordedHookConsent } = require('./install/hook-consent');
 const {
   prepareClaudeSkillMigration,
@@ -20,10 +23,22 @@ const {
   getLegacyOpencodeLocation,
   inspectLegacyOpencodeState,
 } = require('./install/opencode-legacy-migration');
+const {
+  acquireSettingsLock,
+  assertClaudeSettingsPath,
+  getClaudeSettingsPath,
+  inspectManagedHooks,
+  materializeManagedHooks,
+  repairManagedHooks,
+  uninstallManagedHooks,
+  updateSettingsAtomic,
+  validateManagedHooks,
+} = require('./install/claude-settings');
 const { adaptAntigravityAgent } = require('./install/antigravity-agent');
 const { buildInstallIndex, rewriteRelativeLinks } = require('./install/link-rewrite');
 const { getInstallTargetAdapter, listInstallTargetAdapters } = require('./install-targets/registry');
 const { resolveInvocationEnvironment } = require('./invocation-environment');
+const { mergeHooksMetadata, metadataPathFor } = require('./hooks-config');
 const OPENCODE_BUILD_ARTIFACT = path.join('.opencode', 'dist');
 const OPENCODE_BUILD_SCRIPT = path.join('scripts', 'build-opencode.js');
 const OPENCODE_PLUGIN_NOT_BUILT_CODE = 'opencode-plugin-not-built';
@@ -523,6 +538,32 @@ function readJsonNoFollow(filePath) {
   return JSON.parse(readFileNoFollow(filePath, 'utf8'));
 }
 
+/**
+ * Read hooks.json and merge in hooks/hooks.metadata.json without following
+ * symlinks. The sidecar holds the stable matcher ids that hooks.json cannot
+ * carry, because Claude Code reports unknown keys when the plugin loads. A
+ * sidecar that does not line up with hooks.json is rejected before repair can
+ * reconcile matchers under the wrong ids.
+ *
+ * @param {string} hooksPath - Path to the source hooks.json.
+ * @returns {object} the hooks configuration with ids and descriptions restored.
+ */
+function readHooksConfigNoFollow(hooksPath) {
+  const hooksConfig = readJsonNoFollow(hooksPath);
+  const metadataPath = metadataPathFor(hooksPath);
+  if (!fs.existsSync(metadataPath)) {
+    return hooksConfig;
+  }
+  return mergeHooksMetadata(hooksConfig, readJsonNoFollow(metadataPath), hooksPath);
+}
+
+function assertClaudeSettingsDestination(operation, trustedRoot, target = null) {
+  if (target && target !== 'claude' && target !== 'claude-project') {
+    throw new Error('Refusing to manage Claude hooks for a non-Claude target.');
+  }
+  assertClaudeSettingsPath(operation.destinationPath, trustedRoot);
+}
+
 function writeContainedFile(destinationPath, content, trustedRoot, action, mode) {
   const preparedDestination = prepareContainedWriteDestination(destinationPath, trustedRoot, action);
   const finalDestination = getManagedDestination(
@@ -687,8 +728,26 @@ function deepRemoveJsonSubset(currentValue, managedValue) {
   return currentValue === managedValue ? JSON_REMOVE_SENTINEL : currentValue;
 }
 
-function hydrateRecordedOperations(repoRoot, operations) {
+function hydrateRecordedOperations(repoRoot, operations, trustedRoot) {
   return operations.map(operation => {
+    if (operation.kind === 'update-claude-settings') {
+      const sourcePath = resolveOperationSourcePath(repoRoot, operation);
+      if (!sourcePath || !fs.existsSync(sourcePath)) {
+        throw new Error(
+          `Missing source file for repair: ${sourcePath || operation.sourceRelativePath}`
+        );
+      }
+      return {
+        ...operation,
+        sourcePath,
+        previousManagedHooks: operation.managedHooks,
+        managedHooks: materializeManagedHooks(
+          readHooksConfigNoFollow(sourcePath),
+          trustedRoot
+        ),
+      };
+    }
+
     if (operation.kind !== 'copy-file') {
       return { ...operation };
     }
@@ -717,7 +776,14 @@ function shouldRepairFromRecordedOperations(state) {
   return getManagedOperations(state).some(operation => operation.kind !== 'copy-file');
 }
 
-function executeRepairOperation(repoRoot, operation, trustedRoot, linkIndex = null) {
+function executeRepairOperation(
+  repoRoot,
+  operation,
+  trustedRoot,
+  linkIndex = null,
+  target = null,
+  settingsLockHeld = false
+) {
   // Install-state is attacker-controllable; never write/delete outside the
   // adapter-derived trusted root, regardless of what the state file claims
   // (GHSA-hfpv-w6mp-5g95).
@@ -767,6 +833,35 @@ function executeRepairOperation(repoRoot, operation, trustedRoot, linkIndex = nu
     const mergedValue = deepMergeJson(currentValue, payload);
 
     writeContainedFile(operation.destinationPath, formatJson(mergedValue), trustedRoot, 'repair');
+    return operation.destinationPath;
+  }
+
+  if (operation.kind === 'update-claude-settings') {
+    assertClaudeSettingsDestination(operation, trustedRoot, target);
+    const managedHooks = validateManagedHooks(operation.managedHooks);
+    const previousManagedHooks = operation.previousManagedHooks
+      ? validateManagedHooks(operation.previousManagedHooks, 'previous managed hooks')
+      : null;
+    const existingDestination = getContainedExistingPath(
+      operation.destinationPath,
+      trustedRoot,
+      'repair'
+    );
+    const settingsPath = existingDestination
+      ? getManagedDestination(existingDestination, trustedRoot, 'repair').managedPath
+      : prepareContainedWriteDestination(operation.destinationPath, trustedRoot, 'repair');
+    updateSettingsAtomic(
+      settingsPath,
+      currentSettings => repairManagedHooks(currentSettings, managedHooks, {
+        previousManagedHooks,
+      }),
+      {
+        lockHeld: settingsLockHeld,
+        beforeCommit() {
+          getManagedDestination(settingsPath, trustedRoot, 'repair');
+        },
+      }
+    );
     return operation.destinationPath;
   }
 
@@ -938,6 +1033,45 @@ function executeUninstallOperation(operation, trustedRoot, options = {}) {
     };
   }
 
+  if (operation.kind === 'update-claude-settings') {
+    assertClaudeSettingsDestination(operation, trustedRoot, options.target);
+    const existingDestination = getContainedExistingPath(
+      operation.destinationPath,
+      trustedRoot,
+      'uninstall'
+    );
+    if (!existingDestination) {
+      return {
+        removedPaths: [],
+        cleanupTargets: []
+      };
+    }
+
+    const settingsPath = getManagedDestination(
+      existingDestination,
+      trustedRoot,
+      'uninstall'
+    ).managedPath;
+    const uninstalled = updateSettingsAtomic(
+      settingsPath,
+      currentSettings => uninstallManagedHooks(currentSettings, operation.managedHooks),
+      {
+        lockHeld: Boolean(options.settingsLockHeld),
+        beforeCommit() {
+          getManagedDestination(settingsPath, trustedRoot, 'uninstall');
+        },
+      }
+    );
+
+    return {
+      removedPaths: [],
+      cleanupTargets: [],
+      retainedPaths: uninstalled.retained.length > 0
+        ? [operation.destinationPath]
+        : []
+    };
+  }
+
   if (operation.kind === 'remove') {
     const previousContent = getOperationPreviousContent(operation);
     if (previousContent !== null) {
@@ -966,7 +1100,7 @@ function executeUninstallOperation(operation, trustedRoot, options = {}) {
   throw new Error(`Unsupported uninstall operation kind: ${operation.kind}`);
 }
 
-function inspectManagedOperation(repoRoot, trustedRoot, operation, linkIndex = null) {
+function inspectManagedOperation(repoRoot, trustedRoot, operation, linkIndex = null, target = null) {
   const destinationPath = operation.destinationPath;
   if (!destinationPath) {
     return {
@@ -1147,6 +1281,49 @@ function inspectManagedOperation(repoRoot, trustedRoot, operation, linkIndex = n
     };
   }
 
+  if (operation.kind === 'update-claude-settings') {
+    try {
+      assertClaudeSettingsDestination(operation, trustedRoot, target);
+    } catch (_error) {
+      return {
+        status: 'unsafe-destination',
+        operation,
+        destinationPath,
+        reason: 'non-canonical-claude-settings'
+      };
+    }
+    let managedHooks;
+    try {
+      managedHooks = validateManagedHooks(operation.managedHooks);
+    } catch (_error) {
+      return {
+        status: 'unverified',
+        operation,
+        destinationPath
+      };
+    }
+
+    try {
+      const inspection = inspectManagedHooks(
+        readJsonNoFollow(inspectedPath),
+        managedHooks
+      );
+      return {
+        status: inspection.status,
+        operation,
+        destinationPath,
+        managedHookInspection: inspection
+      };
+    } catch (error) {
+      return {
+        status: 'invalid-settings',
+        operation,
+        destinationPath,
+        error: `Failed to inspect Claude settings at ${destinationPath}: ${error.message}`
+      };
+    }
+  }
+
   return {
     status: 'unverified',
     operation,
@@ -1154,11 +1331,17 @@ function inspectManagedOperation(repoRoot, trustedRoot, operation, linkIndex = n
   };
 }
 
-function summarizeManagedOperationHealth(repoRoot, trustedRoot, operations) {
+function summarizeManagedOperationHealth(repoRoot, trustedRoot, operations, target = null) {
   const linkIndex = buildLinkIndexForOperations(operations, trustedRoot);
   return operations.reduce(
     (summary, operation) => {
-      const inspection = inspectManagedOperation(repoRoot, trustedRoot, operation, linkIndex);
+      const inspection = inspectManagedOperation(
+        repoRoot,
+        trustedRoot,
+        operation,
+        linkIndex,
+        target
+      );
       if (inspection.status === 'missing') {
         summary.missing.push(inspection);
       } else if (inspection.status === 'drifted') {
@@ -1169,6 +1352,8 @@ function summarizeManagedOperationHealth(repoRoot, trustedRoot, operations) {
         summary.unsafeSource.push(inspection);
       } else if (inspection.status === 'unsafe-destination') {
         summary.unsafeDestination.push(inspection);
+      } else if (inspection.status === 'invalid-settings') {
+        summary.invalidSettings.push(inspection);
       } else if (inspection.status === 'unverified' || inspection.status === 'invalid-destination') {
         summary.unverified.push(inspection);
       }
@@ -1180,6 +1365,7 @@ function summarizeManagedOperationHealth(repoRoot, trustedRoot, operations) {
       missingSource: [],
       unsafeSource: [],
       unsafeDestination: [],
+      invalidSettings: [],
       unverified: []
     }
   );
@@ -1200,7 +1386,9 @@ function getUnsafeOperationResult(record, operationHealth) {
     ? getUnsafeManagedDestinationError(operationHealth)
     : operationHealth.unsafeSource.length > 0
       ? createUnsafeRepairSourceError().message
-      : null;
+      : operationHealth.invalidSettings.length > 0
+        ? operationHealth.invalidSettings[0].error
+        : null;
   if (!error) {
     return null;
   }
@@ -1467,7 +1655,8 @@ function analyzeRecord(record, context) {
   const operationHealth = summarizeManagedOperationHealth(
     context.repoRoot,
     record.targetRoot,
-    managedOperations
+    managedOperations,
+    record.adapter.target
   );
   const missingManagedOperations = operationHealth.missing;
 
@@ -1487,6 +1676,17 @@ function analyzeRecord(record, context) {
         'error',
         'unsafe-repair-source',
         `${operationHealth.unsafeSource.length} managed operation(s) reference unsafe repair source metadata`
+      )
+    );
+  }
+
+  if (operationHealth.invalidSettings.length > 0) {
+    issues.push(
+      buildIssue(
+        'error',
+        'invalid-claude-settings',
+        operationHealth.invalidSettings[0].error,
+        { paths: operationHealth.invalidSettings.map(entry => entry.destinationPath) }
       )
     );
   }
@@ -1614,7 +1814,11 @@ function createRepairPlanFromRecord(record, context, options = {}) {
     record.legacyLayout !== 'opencode'
     && (state.request.legacyMode || shouldRepairFromRecordedOperations(state))
   ) {
-    const operations = hydrateRecordedOperations(context.repoRoot, getManagedOperations(state));
+    const operations = hydrateRecordedOperations(
+      context.repoRoot,
+      getManagedOperations(state),
+      record.targetRoot
+    );
     const statePreview = buildRecordedStatePreview(state, context, operations);
 
     return {
@@ -1669,13 +1873,26 @@ function assertValidInstallStateForWrite(state, label) {
   throw new Error(`Invalid install-state (${label}): ${details}`);
 }
 
-function writeRefreshedInstallState(record, statePreview) {
+function writeRefreshedInstallState(record, statePreview, writtenPaths = []) {
   const trustedStatePreview = buildAdapterDerivedStatePreview(statePreview, record);
   const stateWithCurrentDigests = {
     ...trustedStatePreview,
     operations: (trustedStatePreview.operations || []).map(operation => {
       if (!operation.destinationPath) {
         return { ...operation };
+      }
+      // Refreshing a ledger is not a file write. Keep the last installed digest
+      // for untouched shared configs so a concurrent user edit is never claimed.
+      if (isCodexUserConfig(record, operation)
+        && !writtenPaths.some(writtenPath => path.relative(writtenPath, operation.destinationPath) === '')) {
+        const previousOperation = (record.state.operations || []).find(previous => (
+          previous.destinationPath
+          && path.relative(previous.destinationPath, operation.destinationPath) === ''
+        ));
+        const { contentSha256: _plannedDigest, ...operationWithoutDigest } = operation;
+        return previousOperation && previousOperation.contentSha256
+          ? { ...operationWithoutDigest, contentSha256: previousOperation.contentSha256 }
+          : operationWithoutDigest;
       }
       try {
         const contentSha256 = crypto.createHash('sha256')
@@ -1706,7 +1923,10 @@ function prepareRepairMigration(plan, record) {
     installStatePath: record.installStatePath,
     statePreview: buildAdapterDerivedStatePreview(plan.statePreview, record),
   };
-  const migration = prepareClaudeSkillMigration(trustedPlan);
+  const skillMigration = prepareClaudeSkillMigration(trustedPlan);
+  const migration = record.adapter.id === 'codex-home'
+    ? prepareUserOwnedFileGuard(trustedPlan, skillMigration)
+    : skillMigration;
   return {
     migration,
     plan: {
@@ -1757,7 +1977,17 @@ function repairInstalledStates(options = {}) {
       };
     }
 
+    let releaseSettingsLock = null;
     try {
+      const settingsPathToLock = !options.dryRun
+        && getManagedOperations(record.state || {}).some(
+          operation => operation.kind === 'update-claude-settings'
+        )
+        ? getClaudeSettingsPath(record.targetRoot)
+        : null;
+      if (settingsPathToLock) {
+        releaseSettingsLock = acquireSettingsLock(settingsPathToLock);
+      }
       const needsOpencodeBuild = record.adapter.target === 'opencode'
         && hasOpencodeBuildError(getOpencodeBuildValidationIssues(context));
       const opencodeBuildRepairPath = path.join(context.repoRoot, OPENCODE_BUILD_ARTIFACT);
@@ -1829,7 +2059,8 @@ function repairInstalledStates(options = {}) {
         const operationHealth = summarizeManagedOperationHealth(
           context.repoRoot,
           record.targetRoot,
-          desiredPlan.operations
+          desiredPlan.operations,
+          record.adapter.target
         );
         const unsafeOperationResult = getUnsafeOperationResult(
           record,
@@ -1876,7 +2107,8 @@ function repairInstalledStates(options = {}) {
       const operationHealth = summarizeManagedOperationHealth(
         context.repoRoot,
         record.targetRoot,
-        desiredPlan.operations
+        desiredPlan.operations,
+        record.adapter.target
       );
 
       const unsafeOperationResult = getUnsafeOperationResult(
@@ -1899,7 +2131,20 @@ function repairInstalledStates(options = {}) {
         };
       }
 
-      const repairOperations = [...operationHealth.missing.map(entry => ({ ...entry.operation })), ...operationHealth.drifted.map(entry => ({ ...entry.operation }))];
+      const repairOperations = [
+        ...operationHealth.missing.map(entry => ({ ...entry.operation })),
+        ...operationHealth.drifted.map(entry => ({ ...entry.operation })),
+        ...desiredPlan.operations
+          .filter(operation => (
+            operation.kind === 'update-claude-settings'
+            && operation.previousManagedHooks
+            && !isDeepStrictEqual(operation.previousManagedHooks, operation.managedHooks)
+          ))
+          .map(operation => ({ ...operation })),
+      ].filter((operation, index, items) => items.findIndex(candidate => (
+        candidate.kind === operation.kind
+        && candidate.destinationPath === operation.destinationPath
+      )) === index);
       const repairLinkIndex = buildLinkIndexForOperations(desiredPlan.operations, record.targetRoot);
       const legacyMigrationPaths = migration.legacyOperationsToRemove.map(
         operation => operation.destinationPath
@@ -1930,11 +2175,16 @@ function repairInstalledStates(options = {}) {
       }
 
       for (const operation of repairOperations) {
+        if (record.adapter.id === 'codex-home') {
+          assertNoNewUserOwnedFile(migration, operation, desiredPlan);
+        }
         const repairedPath = executeRepairOperation(
           context.repoRoot,
           operation,
           record.targetRoot,
-          repairLinkIndex
+          repairLinkIndex,
+          record.adapter.target,
+          Boolean(releaseSettingsLock)
         );
         if (repairedPath) {
           repairedPaths.push(repairedPath);
@@ -1963,7 +2213,7 @@ function repairInstalledStates(options = {}) {
             installedAt: record.state.installedAt,
             source: { ...record.state.source },
           };
-      writeRefreshedInstallState(record, statePreviewToWrite);
+      writeRefreshedInstallState(record, statePreviewToWrite, repairedPaths);
 
       return {
         adapter: record.adapter,
@@ -1986,6 +2236,8 @@ function repairInstalledStates(options = {}) {
         plannedRepairs: [],
         error: error.message
       };
+    } finally {
+      if (releaseSettingsLock) releaseSettingsLock();
     }
   });
 
@@ -2100,15 +2352,23 @@ function uninstallInstalledStates(options = {}) {
       };
     }
 
+    let releaseSettingsLock = null;
     try {
       const removedPaths = [];
       const cleanupTargets = [];
       const retainedPaths = [];
       const operations = getManagedOperations(state);
+      if (operations.some(operation => operation.kind === 'update-claude-settings')) {
+        releaseSettingsLock = acquireSettingsLock(
+          getClaudeSettingsPath(record.targetRoot)
+        );
+      }
 
       for (const operation of operations) {
         const outcome = executeUninstallOperation(operation, record.targetRoot, {
           preserveDriftedCopies: true,
+          target: record.adapter.target,
+          settingsLockHeld: Boolean(releaseSettingsLock),
         });
         removedPaths.push(...outcome.removedPaths);
         cleanupTargets.push(...outcome.cleanupTargets);
@@ -2153,6 +2413,8 @@ function uninstallInstalledStates(options = {}) {
         plannedRemovals,
         error: error.message
       };
+    } finally {
+      if (releaseSettingsLock) releaseSettingsLock();
     }
   });
 
