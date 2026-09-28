@@ -120,7 +120,7 @@ playwright_mcp_is_connected() {
 
 evaluator_tools_for_mode() {
   local base_tools="Read,Write,Bash,Grep,Glob"
-  local playwright_tools="mcp__playwright__browser_navigate,mcp__playwright__browser_click,mcp__playwright__browser_take_screenshot,mcp__playwright__browser_snapshot,mcp__playwright__browser_type,mcp__playwright__browser_fill_form"
+  local playwright_tools="mcp__playwright__browser_navigate,mcp__playwright__browser_click,mcp__playwright__browser_take_screenshot,mcp__playwright__browser_snapshot,mcp__playwright__browser_type,mcp__playwright__browser_fill_form,mcp__playwright__browser_resize,mcp__playwright__browser_press_key"
 
   if [ "$1" = "playwright" ]; then
     printf '%s,%s\n' "$base_tools" "$playwright_tools"

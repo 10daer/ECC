@@ -36,14 +36,131 @@ function test(name, fn) {
   }
 }
 
+function withShellFixture(fn) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-gan-shell-'));
+  try {
+    const bin = path.join(root, 'bin');
+    const home = path.join(root, 'home');
+    const project = path.join(root, 'project');
+    for (const directory of [bin, home, project]) fs.mkdirSync(directory);
+    // Only inert system utilities and the explicit fake CLI are reachable.
+    for (const command of ['awk', 'date', 'mkdir', 'cat', 'tee', 'wc']) {
+      const executable = ['/usr/bin', '/bin'].map(dir => path.join(dir, command)).find(fs.existsSync);
+      assert.ok(executable, `missing system utility: ${command}`);
+      fs.symlinkSync(executable, path.join(bin, command));
+    }
+    return fn({ root, bin, project, env: { PATH: bin, HOME: home, TMPDIR: root, LC_ALL: 'C' } });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function runHarnessScript(script, args = [], env = {}) {
-  const bashExecutable = process.platform === 'win32' ? 'bash' : '/bin/bash';
-  const result = spawnSync(bashExecutable, ['-c', script, 'gan-harness-test', ...args], {
-    encoding: 'utf8',
-    env: { ...process.env, ...env },
+  return withShellFixture(fixture => {
+    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', script, 'gan-harness-test', ...args], {
+      encoding: 'utf8',
+      cwd: fixture.project,
+      env: { ...fixture.env, ...env },
+      timeout: 5000,
+    });
+    assert.ifError(result.error);
+    assert.strictEqual(result.status, 0, result.stderr || 'GAN harness script failed');
+    return result.stdout.trim();
   });
-  assert.strictEqual(result.status, 0, result.stderr || 'GAN harness script failed');
-  return result.stdout.trim();
+}
+
+const fakeClaude = `#!/bin/bash
+set -euo pipefail
+printf '%s\\0' "$@" >> "$GAN_TEST_CALLS"
+printf '\\0' >> "$GAN_TEST_CALLS"
+if [ "$#" -eq 3 ] && [ "$1" = mcp ] && [ "$2" = get ] && [ "$3" = playwright ]; then
+  [ "$NO_COLOR" = 1 ] || exit 65
+  count=0
+  if [ -f "$GAN_TEST_PROBES" ]; then read -r count < "$GAN_TEST_PROBES"; fi
+  printf '%s\\n' "$((count + 1))" > "$GAN_TEST_PROBES"
+  if [ "$count" -eq 0 ]; then
+    printf '%s\\n' "$GAN_TEST_FIRST_STATUS"
+    exit "$GAN_TEST_FIRST_EXIT"
+  fi
+  printf '%s\\n' "$GAN_TEST_SECOND_STATUS"
+  exit "$GAN_TEST_SECOND_EXIT"
+fi
+[ "$1" = -p ] && [ "$2" = --model ] && [ "$3" = fixture-model ] || exit 66
+for prompt in "$@"; do :; done
+case "$prompt" in
+  'You are the Planner'*)
+    printf 'Inert spec\\n' > gan-harness/spec.md
+    printf 'Inert rubric\\n' > gan-harness/eval-rubric.md
+    ;;
+  'You are the Generator'*) ;;
+  'You are the Evaluator'*)
+    printf '| **TOTAL** | | | **9.0** |\\n' > gan-harness/feedback/feedback-001.md
+    ;;
+  *) exit 67 ;;
+esac
+`;
+
+function withHarnessRun(options, check) {
+  return withShellFixture(fixture => {
+    const callsPath = path.join(fixture.root, 'calls');
+    const gitCallsPath = path.join(fixture.root, 'git-calls');
+    fs.writeFileSync(path.join(fixture.bin, 'claude'), fakeClaude, { mode: 0o700 });
+    fs.writeFileSync(path.join(fixture.bin, 'git'), '#!/bin/bash\nprintf unexpected > "$GAN_TEST_GIT_CALLS"\nexit 68\n', { mode: 0o700 });
+    // A directory is sufficient to bypass initialization; no real Git command runs.
+    fs.mkdirSync(path.join(fixture.project, '.git'));
+    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', harnessPath, 'Inert fixture brief'], {
+      encoding: 'utf8',
+      cwd: fixture.project,
+      timeout: 5000,
+      env: {
+        ...fixture.env,
+        GAN_PROJECT_DIR: fixture.project,
+        GAN_MAX_ITERATIONS: '1',
+        GAN_PLANNER_MODEL: 'fixture-model',
+        GAN_GENERATOR_MODEL: 'fixture-model',
+        GAN_EVALUATOR_MODEL: 'fixture-model',
+        GAN_EVAL_MODE: options.mode || 'playwright',
+        GAN_TEST_CALLS: callsPath,
+        GAN_TEST_GIT_CALLS: gitCallsPath,
+        GAN_TEST_PROBES: path.join(fixture.root, 'probes'),
+        GAN_TEST_FIRST_STATUS: options.firstStatus ?? 'Status: \u2713 Connected',
+        GAN_TEST_FIRST_EXIT: String(options.firstExit || 0),
+        GAN_TEST_SECOND_STATUS: options.secondStatus ?? 'Status: \u2713 Connected',
+        GAN_TEST_SECOND_EXIT: String(options.secondExit || 0),
+      },
+    });
+    assert.ifError(result.error);
+    assert.strictEqual(result.signal, null);
+    assert.strictEqual(fs.existsSync(gitCallsPath), false, 'must never invoke real or fake Git');
+    const calls = fs.existsSync(callsPath)
+      ? fs.readFileSync(callsPath, 'utf8').split('\0\0').filter(Boolean).map(call => call.split('\0'))
+      : [];
+    check({ result, calls, project: fixture.project });
+  });
+}
+
+function evaluatorCalls(calls) {
+  return calls.filter(args => args[args.length - 1].startsWith('You are the Evaluator'));
+}
+
+const baseTools = ['Read', 'Write', 'Bash', 'Grep', 'Glob'];
+const browserTools = [
+  'mcp__playwright__browser_navigate',
+  'mcp__playwright__browser_click',
+  'mcp__playwright__browser_take_screenshot',
+  'mcp__playwright__browser_snapshot',
+  'mcp__playwright__browser_type',
+  'mcp__playwright__browser_fill_form',
+  'mcp__playwright__browser_resize',
+  'mcp__playwright__browser_press_key',
+];
+
+function assertEvaluatorTools(calls, expected) {
+  const launches = evaluatorCalls(calls);
+  assert.strictEqual(launches.length, 1);
+  const args = launches[0];
+  assert.strictEqual(args.filter(arg => arg === '--allowedTools').length, 1);
+  assert.deepStrictEqual(args[args.indexOf('--allowedTools') + 1].split(','), expected);
 }
 
 function extractShellFunction(name) {
@@ -211,6 +328,61 @@ const results = Object.freeze([
 
     assert.match(output, /Score:\s+8\.7\s+\/\s+10\.0/);
   }),
+
+  test('declared evaluator tools cover responsive and keyboard tasks', () => {
+    assert.deepStrictEqual(declaredEvaluatorTools(), [...baseTools, ...browserTools]);
+  }),
+
+  test('actual Playwright evaluator launch includes responsive and keyboard tools', () => {
+    withHarnessRun({}, ({ result, calls }) => {
+      assert.strictEqual(result.status, 0, result.stderr);
+      assertEvaluatorTools(calls, [...baseTools, ...browserTools]);
+      assert.strictEqual(calls.filter(args => args[0] === 'mcp').length, 2);
+    });
+  }),
+
+  test('actual preflight errors and disconnected states refuse before setup writes', () => {
+    for (const options of [
+      { firstStatus: 'Status: \u2718 Failed to connect' },
+      { firstStatus: 'Status: ! Connected \u00b7 tools fetch failed' },
+      { firstStatus: '' },
+      { firstExit: 1 },
+    ]) {
+      withHarnessRun(options, ({ result, calls, project }) => {
+        assert.strictEqual(result.status, 1);
+        assert.deepStrictEqual(calls, [['mcp', 'get', 'playwright']]);
+        assert.deepStrictEqual(fs.readdirSync(project), ['.git']);
+      });
+    }
+  }),
+
+  test('unknown mode refuses before CLI calls and setup writes', () => {
+    withHarnessRun({ mode: 'unknown' }, ({ result, calls, project }) => {
+      assert.strictEqual(result.status, 1);
+      assert.deepStrictEqual(calls, []);
+      assert.deepStrictEqual(fs.readdirSync(project), ['.git']);
+    });
+  }),
+
+  test('lost connection and command errors refuse the actual evaluator launch', () => {
+    for (const options of [{ secondStatus: 'Status: \u2718 Failed to connect' }, { secondExit: 1 }]) {
+      withHarnessRun(options, ({ result, calls, project }) => {
+        assert.strictEqual(result.status, 1);
+        assert.strictEqual(calls.filter(args => args[0] === 'mcp').length, 2);
+        assert.strictEqual(calls.filter(args => args[args.length - 1].startsWith('You are the Generator')).length, 1);
+        assert.deepStrictEqual(evaluatorCalls(calls), []);
+        assert.strictEqual(fs.existsSync(path.join(project, 'gan-harness', 'evaluator-1.log')), false);
+      });
+    }
+  }),
+
+  ...['screenshot', 'code-only'].map(mode => test(`actual ${mode} launch keeps base tools without MCP probing`, () => {
+    withHarnessRun({ mode, firstExit: 1, secondExit: 1 }, ({ result, calls }) => {
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.strictEqual(calls.some(args => args[0] === 'mcp'), false);
+      assertEvaluatorTools(calls, baseTools);
+    });
+  })),
 ]);
 
 const passed = results.filter(Boolean).length;
