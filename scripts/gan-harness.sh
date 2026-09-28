@@ -154,6 +154,12 @@ case "$EVAL_MODE" in
 esac
 
 EVALUATOR_TOOLS=$(evaluator_tools_for_mode "$EVAL_MODE")
+EVALUATOR_OPTIONS=(--allowedTools "$EVALUATOR_TOOLS")
+if [ "$EVAL_MODE" != "playwright" ]; then
+  # Allow rules only pre-approve calls. Deny this server's tools explicitly
+  # in modes that inspect existing screenshots or source instead.
+  EVALUATOR_OPTIONS+=(--disallowedTools 'mcp__playwright__*')
+fi
 
 phase "GAN-STYLE HARNESS — Setup"
 
@@ -263,7 +269,7 @@ Update gan-harness/generator-state.md." \
   fi
 
   claude -p --model "$EVALUATOR_MODEL" \
-    --allowedTools "$EVALUATOR_TOOLS" \
+    "${EVALUATOR_OPTIONS[@]}" \
     "You are the Evaluator in a GAN-style harness. Read agents/gan-evaluator.md for full instructions.
 
 Iteration: $i
