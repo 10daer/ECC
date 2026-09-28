@@ -50,6 +50,10 @@ Both agents produce code that runs and passes tests. The difference is design de
 
 MultiEdit is handled identically — each file in the batch is gated individually.
 
+The questions depend on the target's class (see
+[Questions by target class](#questions-by-target-class)). For **code**
+targets the Edit gate asks:
+
 ```
 Before editing {file_path}, present these facts:
 
@@ -62,6 +66,8 @@ Before editing {file_path}, present these facts:
 
 ### Write Gate (first new file creation)
 
+For **code** targets the Write gate asks:
+
 ```
 Before creating {file_path}, present these facts:
 
@@ -71,6 +77,55 @@ Before creating {file_path}, present these facts:
    and date format (use redacted or synthetic values, not raw production data)
 4. Quote the user's current instruction verbatim
 ```
+
+### Questions by target class
+
+The code questions carry no signal for a `SKILL.md`, a README, a test, or a
+YAML file, so the first-touch gate classifies the target first.
+
+Classification uses the target's path relative to the project root
+(`CLAUDE_PROJECT_DIR`, then the payload `cwd`, then the process directory),
+so a project that lives under, say, `~/work/tests/` does not turn every file
+into a test. A leading `.claude/worktrees/<name>/` is stripped, since a
+worktree mirrors the project, but only when
+`<root>/.claude/worktrees/<name>/.git` exists; otherwise the path stays under
+`.claude`. On Windows-style paths (and any segment containing `::$`), trailing
+dots/spaces and a `:stream` suffix are dropped first, so `CLAUDE.md.` and
+`CLAUDE.md::$DATA` classify as `CLAUDE.md`. Targets outside the root are
+classified by their absolute path. The path is lowercased and `/`-separated,
+and the first match wins:
+
+1. **instruction** — basename `CLAUDE.md`, `AGENTS.md`, `AGENT.md`,
+   `GEMINI.md`, `SKILL.md`, `copilot-instructions.md`, `.cursorrules`, or
+   `.windsurfrules`; any `.mdc` file; a `.md`/`.mdx`/`.txt` file under a
+   `.claude`, `agents`, `commands`, `skills`, `rules`, `hooks`, `.cursor`,
+   `.codex`, or `.opencode` directory; or a `*instructions*.md` file under
+   `.github/`
+2. **test** — `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`, `*_test.go`,
+   or anything under a `tests`, `test`, or `__tests__` directory
+3. **prose** — `.md`, `.mdx`, `.txt`, `.rst`, `.adoc`
+4. **config** — `.json`, `.jsonc`, `.yaml`, `.yml`, `.toml`, `.ini`, or a
+   `.env` / `.env.*` file that does not end in a code extension (`.env.local`
+   is config; `.env.example.ts` and `.envrc` are code)
+5. **code** — everything else (a `.js` under `hooks/` or `skills/` is code)
+
+Every class ends with "Quote the user's current instruction verbatim", keeps
+the batch-sibling warning, and uses the same questions for Edit, MultiEdit,
+and Write unless noted. Items marked *(search)* carry the suffix
+"(search the tree — Glob/Grep, or find/grep via Bash)".
+
+| Class | Questions |
+|---|---|
+| instruction | Name the harness/loader that reads this file (Claude Code, Codex, Cursor, OpenCode, …) and when it loads it · Describe what agent behaviour changes as a result · Confirm no existing instruction, skill, or agent file already covers this *(search)* |
+| test | Name what behaviour is under test and which module/function it exercises · Name the existing test file(s) covering this module, or confirm none exist *(search)* |
+| prose (Write) | Name any existing doc this supersedes or duplicates *(search)* · State where it will be linked or referenced from · Explain why a new file rather than editing an existing one |
+| prose (Edit) | List other docs or code that reference the section being changed *(search)* · State what the change corrects or adds |
+| config | Name which process/tool reads this file and when · Describe the effect of the change · Confirm no secrets or credentials are being written in plain text |
+
+Condensed denials (after `GATEGUARD_FACT_FORCE_FULL_DENIALS`) carry a
+one-line hint for the same class. Besides the message text, the class only
+decides [sibling collapse](#same-turn-sibling-creation-collapse): which files
+may collapse, and that a sibling must share the first file's class.
 
 ### Destructive Bash Gate (every destructive command)
 
@@ -109,6 +164,234 @@ already have been applied. Treat it literally:
 A batch-wide lock is not possible: hooks see tool calls one at a time, so
 the gate cannot know which calls arrived together.
 
+## What Counts as Already Done
+
+A first-touch denial is meant to force investigation. When the transcript
+shows the investigation already happened, or the answers would repeat the
+previous denial word for word, the gate lets the call through with a note
+instead of a denial. Each rule below falls back to the normal denial when
+anything is ambiguous.
+
+### Order of checks
+
+For each Edit/Write target (and each MultiEdit entry) the gate decides in
+this order; the first rule that applies wins:
+
+1. **Exempt** (`GATEGUARD_EXEMPT_GLOBS`, Claude settings files) — allowed.
+2. **Subagent** call — allowed (the parent session was already gated).
+3. **Already checked** this session — allowed.
+4. **Sensitive target?** — if so, skip straight to the denial (step 8).
+5. **Prior-search credit** — allowed with a note.
+6. **Sibling collapse** — allowed with a note.
+7. **Denial cap** (`GATEGUARD_FACT_FORCE_MAX_DENIALS`, opt-in) — passes
+   through once the session's denials have reached the cap.
+8. **Deny** — counted in `fact_force_denials`.
+
+Credit and sibling allows never consume the denial cap.
+
+### Sensitive targets
+
+Some files are too costly to change without the full check, so prior-search
+credit, sibling collapse, and the denial cap never apply to them: they are
+denied on first touch exactly as without these rules, and the denial counts
+as usual. The denial carries one extra line: "Sensitive target: prior-search
+credit, sibling collapse, and the denial cap do not apply." A target is
+sensitive, judged on the same lowercased project-relative path as its class
+**and** on its real (symlink-resolved) location, when either matches:
+
+- its file name is `.env` or starts with `.env.`, ends in `.pem`, `.key`,
+  `.p12`, or `.pfx`, or starts with `id_rsa`, `id_ed25519`, `credentials`, or
+  `secrets.`;
+- any path segment is exactly `auth`, `authn`, `authz`, `security`,
+  `secrets`, `payment`, `payments`, `billing`, or `migrations` (whole
+  segments only: `src/author.py`, `docs/authoring.md`, and
+  `lib/paymentutils.py` are ordinary);
+- or it lies under `.github/workflows/`.
+
+The real location is the file's own realpath when it exists, else the
+realpath of its nearest existing directory plus the rest of the path, judged
+relative to the realpath of the project root, so `src/tools -> ../auth` makes
+`src/tools/login.py` sensitive. A real location outside the project is judged
+on its absolute path. Any error while deciding (a dangling symlink, a file
+where a directory should be, a permission error) counts as sensitive.
+Destructive and routine shell gates are unaffected.
+
+### Prior-search credit
+
+An Edit, Write, or MultiEdit entry is allowed, with an
+`additionalContext` note naming the search, when a qualifying search in the
+**current human turn** already covered the file:
+
+- **Qualifying tools:** `Glob`, `Grep`, `LS`, and Bash/PowerShell command
+  segments led by `rg`, `grep`, `egrep`, `fgrep`, `git grep`,
+  `git ls-files`, `find`, `fd`, `ls`, `tree`, `Get-ChildItem`, `gci`,
+  `Select-String`, or `sls`. **`Read` never counts** — Claude Code already
+  requires a Read before an Edit, so it proves nothing extra.
+- **Current human turn:** the turn starts at the latest real user message or
+  at a compaction (a compact-summary record or a `compact_boundary` marker),
+  so searches from before a compaction never count. Tool results, meta, and
+  sidechain records do not start a turn. Only the transcript tail is read
+  (last 256 KiB / 2000 lines); when the turn started before that window, the
+  whole window is the current turn, provided every `promptId` in it agrees.
+  Two or more `promptId`s there mean a turn started through a record the scan
+  does not recognise, so that window gives no credit. A transcript with no
+  turn start at all gives no credit.
+- **Completed, unambiguous result:** the search needs a `tool_result` in the
+  turn that is not an error (`is_error` of `true` or `"true"`, or content
+  starting with `<tool_use_error>`). A tool-use id that appears more than once
+  never counts.
+- **Not the same batch:** searches sent in the gated call's own assistant
+  message never count, since their results were not seen when the edit was
+  decided. If the payload's `tool_use_id` is missing or not in the
+  transcript, the newest assistant message in the turn is excluded instead. A
+  search without a message id never counts.
+- **Stem match:** the target's stem (basename minus its last extension,
+  lowercased, at least 4 characters) must appear as a whole word — bounded by
+  non-alphanumeric characters or the ends of the text — in the Glob pattern,
+  the Grep pattern or glob, or the shell segment. `payment.py` is credited by
+  a search for `payment` or `payment_service`, but not by one for
+  `payments`. Exclusions are never a stem source. Generic stems (`index`, `main`, `init`, `__init__`,
+  `utils`, `util`, `types`, `readme`, `test`, `tests`, `config`, `mod`,
+  `lib`, `setup`, `app`, `spec`, `helpers`, `common`) never match.
+- **Exclusions never credit:** a Grep `glob` is split on top-level commas;
+  entries starting with `!` are exclusions. In shell segments, `rg -g`/
+  `--glob`/`--iglob` values starting with `!`, `grep --exclude`/
+  `--exclude-dir`, `fd -E`/`--exclude`, `ls -I`/`--ignore`/`--hide`,
+  `tree -I`, `git ls-files -x`, git `:!x`/`:^x`/`:(exclude)x` pathspecs,
+  `find -name`/`-path`/… under `-not` or `!` or followed by `-prune`, and
+  PowerShell `-Exclude` are exclusions. If an exclusion covers the target
+  (its glob matches the file name or any directory on its path, or it names
+  the stem), that search cannot credit the target at all: `rg -g '!widget.py'
+  TODO .` never credits `widget.py`, while `rg -g '!*.md' widget .` still
+  does. `--exclude-from`, `--ignore-file`, and `git ls-files -X` hide names
+  the hook cannot see, so such a segment never credits. File-name globs that
+  restrict a search (Grep `glob: '*.py'`, `rg -g '*.py'`, `grep --include`,
+  `find -name`, `tree -P`, `-Include`/`-Filter`) must match the target's file
+  name for its stem to count.
+- **Scope:** `Glob`, `Grep`, and `LS` only credit a target strictly inside the
+  directory they searched (their `path`, else the tool `cwd`, plus a Glob
+  pattern's literal leading directories). A Glob without glob characters is a
+  one-file lookup: it names no directory and credits only files directly in
+  its directory, never the looked-up file itself. A search whose path is the target is not a search.
+- **Shell segments:** a segment without a path operand counts only when it is
+  recursive (`rg`, `git grep`, `git ls-files`, `find`, `fd`, and `tree` by
+  default; `grep -r`/`-R`/`--recursive`, `ls -R`, `Get-ChildItem -Recurse`)
+  and not fed by a pipe; otherwise it reads stdin, not the tree. A segment
+  whose path operands all resolve to the target only reads the target and
+  does not count (`ls src/a.py` never credits `src/a.py`). Commands containing
+  `$( )`, backticks, `<( )`, `>( )`, or heredocs, or longer than 8192
+  characters, never credit.
+- **Shell scope:** a shell segment only credits a target equal to or inside
+  one of its path operands (resolved against the tool `cwd`; a glob operand
+  counts as its literal directory), or inside the `cwd` when it has none:
+  `rg payment docs` or `grep -rn payment /usr/share/doc` never credit
+  `src/payment.py`. An input redirection before any operand
+  (`rg payment < file`) or a `<` inside a word reads stdin and never counts.
+  After `cd <dir>` in the same command, relative operands resolve against that
+  directory; after any other directory change, or one in another call of the
+  turn, only absolute operands count.
+- **Directory match (new files only):** a **Write that creates a file that
+  does not exist yet** may also match when the search named exactly the
+  target's directory: a Glob `path` plus the pattern's literal prefix (a
+  pattern that starts with a glob character and has no `path` names no
+  directory), a Grep or LS `path`, or a shell path operand. For shell
+  operands, the pattern argument of grep-style tools is skipped (unless
+  `-e`/`-f`/`--regexp`/`--file`/`-Pattern` supplied the pattern), values of
+  value-taking flags (`-g`, `--include`, `-name`, `-Filter`, …) are skipped,
+  trailing `/`, `/*`, and `/**` are dropped, `.`, `~`/`$` paths, and globs
+  name no directory, and the operand must be an existing directory at the
+  time of the check. If any Bash/PowerShell call in the turn changes directory
+  (`cd`, `pushd`, `popd`, `chdir`, `Set-Location`, `sl`, `Push-Location`,
+  `Pop-Location`), shell directory matching is off for the whole turn; stem
+  matching still applies. **Edit, MultiEdit, and a Write that overwrites an
+  existing file match by stem only.**
+- **Paths:** relative targets and search paths resolve against the tool's
+  `cwd`, then `CLAUDE_PROJECT_DIR`, then the process directory. Comparison is
+  case-insensitive for Windows paths only. Shell commands are read with bash
+  quoting rules, so on Windows an operand credits when spelled `C:/x/src`;
+  backslash spellings (`C:\x\src`, quoted or not) and MSYS spellings
+  (`/c/x/src`) do not credit and the write is denied as usual.
+- **Note, not denial:** the credited file is marked checked and
+  `fact_force_credited` is incremented; the denial count and ordinal are not
+  touched. MultiEdit credits per entry and denies the first uncredited entry
+  as before.
+- **Falls back to deny:** a missing, unreadable, or non-file transcript,
+  garbage records, or any internal error mean no credit.
+
+### Same-turn sibling creation collapse
+
+When several new files are created in one directory, the answers for each
+would be identical, so only the first is denied:
+
+- Applies to a **Write of a file that does not exist yet** whose class is
+  `code`, `test`, or `prose`. Never collapsed: `config` and `instruction`
+  files, and any path with a segment starting with `.` (dotfiles and every
+  dot-directory: `.claude`, `.github`, `.git`, `.husky`, `.devcontainer`,
+  `.githooks`, `.idea`, `.vscode`, …) or an 8.3 short name (`CLAUDE~1`),
+  checked on the same project-relative path as the class.
+- The directory is also resolved to its **real location** (symlinks
+  followed; missing directories are resolved from the nearest existing
+  parent). If that differs from the path as written, the real path must be
+  inside the project, keep the same class, and pass the same screen, so a
+  symlink such as `src/tools -> .claude/hooks` never collapses. Gates are
+  keyed by the real directory. Any filesystem error means no collapse.
+- After such a Write is denied, later first-touch Writes of new files **of the
+  same class in the same directory** are allowed with the note "Sibling of
+  `<first>` (gated earlier at denial #`<n>` this session)". A code denial never
+  lets a test, README, or config file through.
+- The window is the **same human turn**. The turn id is the turn-start
+  record's own `promptId`, else its `uuid`, else a hash of that record. When
+  the turn started before the transcript tail, the id is the `promptId` that
+  every user record in the window agrees on (Claude Code stamps it on the
+  prompt and on every tool result of the turn); if they disagree there is no
+  turn id. Only when **no transcript path is available at all** does a gate
+  recorded without a turn id match for **120 seconds**; a transcript that is
+  missing, unreadable, or yields no turn id means no collapse. A turn-scoped
+  gate never matches a call without a turn id, and vice versa; a gate stamped
+  in the future is ignored.
+- Prior-search credit is checked first. **Edits and MultiEdits are never
+  collapsed**, and an existing file is never treated as a sibling.
+
+### Canonical path keys
+
+Checked state is keyed on the canonical path: a relative `file_path` resolves
+against the tool's `cwd` (where the tool runs), then `CLAUDE_PROJECT_DIR`,
+then the process directory, with `/` separators, lowercased on Windows only.
+`a.py`, `./a.py`, and the absolute path share one first-touch. State files
+written by earlier versions (raw keys) are still honoured.
+`GATEGUARD_EXEMPT_GLOBS` keeps its project-relative matching (below).
+
+### In-session counters
+
+The per-session state file (under `GATEGUARD_STATE_DIR`) records these fields.
+They record class names only, never paths (except `dir_gates`, which stores
+the sanitized first file per directory):
+
+| Field | Meaning |
+|---|---|
+| `fact_force_credited` | Number of first touches allowed by prior-search credit |
+| `denials_by_class` | Denials per target class (`code`, `prose`, `test`, …) |
+| `credited_by_class` | Credits per target class |
+| `sibling_allows` | Number of Writes allowed by sibling collapse |
+| `dir_gates` | Per class and directory, the denial that opened a sibling window (turn, time, first file, ordinal); capped at 50 entries |
+| `cap_allows` | Number of first touches passed through by the denial cap (`GATEGUARD_FACT_FORCE_MAX_DENIALS`); these never count as denials |
+
+Missing or malformed fields load as empty or zero, so older state files keep
+working.
+
+### Compatibility and limits
+
+- **One new, opt-in environment variable:**
+  `GATEGUARD_FACT_FORCE_MAX_DENIALS` (unset means no cap). The existing
+  controls are unchanged.
+- **Nothing previously allowed is now denied.** These rules only remove
+  denials, and never return `permissionDecision: "allow"`, so other hooks
+  and permission rules still apply.
+- **Trust limit:** prior-search credit reads the local transcript file,
+  which the agent could in principle write to. The credit verifies observed
+  behaviour (a search ran and returned), not intent or how carefully the
+  result was read.
+
 ## Quick Start
 
 ### Option A: Use the ECC hook (zero install)
@@ -120,11 +403,13 @@ If GateGuard blocks setup or repair work, start the session with
 `ECC_DISABLED_HOOKS` with the GateGuard hook ID.
 
 In long sessions, only the first `GATEGUARD_FACT_FORCE_FULL_DENIALS`
-fact-force denials (default 3) emit the full four-fact block; later
+fact-force denials (default 3) emit the full fact block; later
 denials are condensed to a single line carrying the denial ordinal, so
 near-identical blocks cannot accumulate in the context window and
 amplify model repetition loops (#2142). Retrying the same file or
-command after presenting facts never re-triggers the gate.
+command after presenting facts never re-triggers the gate. That is a
+message budget; to stop denying new files after a number of denials, set
+the opt-in denial budget `GATEGUARD_FACT_FORCE_MAX_DENIALS` (below).
 
 #### Graduated controls
 
@@ -136,7 +421,8 @@ load-bearing destructive-Bash checks keep running:
 |---|---|---|
 | `GATEGUARD_BASH_ROUTINE_DISABLED` | unset (gate on) | Disables the **routine-Bash** gate only. The destructive-Bash gate (`rm -rf`, `git reset --hard`, `drop table`, `dd if=`, …) is unaffected. |
 | `GATEGUARD_EXEMPT_GLOBS` | unset (no exemptions) | Comma-separated globs; a matching Edit/Write/MultiEdit target skips first-touch fact-forcing. Intended for low-import-value trees (tests, generated artifacts, scratch dirs) where "who imports this / what schema" carries no signal. |
-| `GATEGUARD_FACT_FORCE_FULL_DENIALS` | `3` | How many denials emit the full four-fact block before later ones condense to a single line. `0` condenses from the very first denial. |
+| `GATEGUARD_FACT_FORCE_FULL_DENIALS` | `3` | How many denials emit the full fact block before later ones condense to a single line. `0` condenses from the very first denial. |
+| `GATEGUARD_FACT_FORCE_MAX_DENIALS` | unset (no cap) | A **denial budget**: caps how many first-touch Edit/Write/MultiEdit denials a session draws. Once that many denials have been issued, further new paths pass through instead of being denied (counted in `cap_allows`, not as denials); `0` passes from the first. Prior-search credit and sibling collapse run first and never use it up, and [sensitive targets](#sensitive-targets) are always denied. Destructive and routine Bash stay gated. The cap is best effort when hooks run concurrently: a lost count update can add a denial, but never lets a new path through early. Opt-in: unset, or any value that is not a whole non-negative integer (surrounding spaces allowed), keeps the deny-every-new-path behaviour; a malformed value is reported once on stderr (`ignoring malformed GATEGUARD_FACT_FORCE_MAX_DENIALS=…; the denial cap is not active.`). Unlike `GATEGUARD_FACT_FORCE_FULL_DENIALS`, a **message budget** that only changes how much text a denial carries, this changes whether the operation is blocked. Condensed denials name this variable. |
 | `GATEGUARD_BASH_EXTRA_DESTRUCTIVE` | unset | Extra destructive-command patterns, as regex source, added to the built-in set. A malformed regex is treated as unset (built-ins still apply) and logged once to stderr. |
 | `GATEGUARD_STATE_DIR` | `~/.gateguard` | Where per-session gate state is kept. If state cannot be persisted the gate allows the operation rather than looping, and names this variable in the warning. |
 
@@ -196,7 +482,7 @@ This adds `.gateguard.yml` for per-project configuration (custom messages, ignor
 
 ## Best Practices
 
-- Let the gate fire naturally. Don't try to pre-answer the gate questions — the investigation itself is what improves quality.
+- Let the gate fire naturally. Don't try to pre-answer the gate questions — the investigation itself is what improves quality. A real search for the target before editing is investigation, and is credited (see [What Counts as Already Done](#what-counts-as-already-done)).
 - Customize gate messages for your domain. If your project has specific conventions, add them to the gate prompts.
 - Use `.gateguard.yml` to ignore paths like `.venv/`, `node_modules/`, `.git/`.
 

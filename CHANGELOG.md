@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- GateGuard first-touch Edit/Write/MultiEdit denials now ask questions that fit the target's class (instruction, test, prose, config, or code), classified on its project-relative path. Code targets keep the existing questions word for word.
+- GateGuard credits investigation that already happened: a completed, non-error `Glob`, `Grep`, `LS`, or search-style Bash/PowerShell command in the current human turn that names the target and whose scope contains it satisfies the first-touch check with a note instead of a denial. `Read` never counts; searches in the gated call's own batch, before a compaction, with error results, or behind exclusion globs never count; and any transcript problem falls back to the denial.
+- GateGuard asks once for a batch of new files: after a Write of a new file is denied, later new files of the same class in the same real directory within the same human turn pass with a note. Edits, config and instruction files, and any dotfile or dot-directory are always gated one by one.
+- Add opt-in `GATEGUARD_FACT_FORCE_MAX_DENIALS`, a per-session denial cap: once that many first-touch denials have been issued, further new paths pass through (counted in `cap_allows`). Unset keeps the current behaviour, credit and sibling allows never consume it, destructive and routine shell gates are unaffected, and a malformed value is reported once on stderr and leaves the gate uncapped (#2755, thanks @SulimanAbdulrazzaq; closes #2608).
+- Sensitive targets (`.env*`, keys and certificates, `credentials*`, `secrets.*`, `auth`/`security`/`payment(s)`/`billing`/`migrations` path segments, `.github/workflows/`) are always gated on first touch, judged on both the path as written and its real (symlink-resolved) location; the denial says so.
+- Session state records `fact_force_credited`, `denials_by_class`, `credited_by_class`, `sibling_allows`, `dir_gates`, and `cap_allows`; older state files load unchanged. These rules only remove redundant denials: nothing previously allowed is now denied. See `skills/gateguard/SKILL.md`.
+
+### Fixed
+
+- GateGuard keys checked files by canonical path, resolving relative targets against the tool `cwd`, so `a.py`, `./a.py`, and the absolute path (or differently cased and separated Windows spellings) share one first touch. Keys from earlier state files are still honoured.
+
 ## 2.2.2 - 2026-09-15
 
 ### Added
