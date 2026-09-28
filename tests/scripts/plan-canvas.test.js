@@ -246,14 +246,14 @@ async function artifactSecurityTests(test) {
 
 // Deterministic filesystem boundaries, using private regular files only. Native
 // descriptors are owned here even when a spy returns a different private file.
-async function withAssetIo(asset, overrides, callback, { cleanupClose = fs.closeSync } = {}) {
-  const target = fs.realpathSync(asset);
+async function withAssetIo(asset, overrides, callback, { cleanupClose = fs.closeSync, additionalAssets = [] } = {}) {
+  const targets = new Set([asset, ...additionalAssets].map(candidate => fs.realpathSync(candidate)));
   const methods = ['openSync', 'fstatSync', 'lstatSync', 'readSync', 'closeSync'];
   const original = Object.fromEntries(methods.map(name => [name, fs[name]]));
   const live = new Set();
   const calls = { opens: 0, reads: 0, closes: 0, fstats: 0, requested: [], returned: 0, flags: [] };
   const filesystem = Object.freeze({ ...fs, openSync(candidate, flags, ...rest) {
-    if (typeof candidate !== 'string' || path.resolve(candidate) !== target) return original.openSync(candidate, flags, ...rest);
+    if (typeof candidate !== 'string' || !targets.has(path.resolve(candidate))) return original.openSync(candidate, flags, ...rest);
     calls.opens++;
     calls.flags.push(flags);
     const fd = overrides.open
@@ -526,6 +526,11 @@ async function fixtureIsolationTests(test) {
     fs.writeFileSync(asset, 'isolated');
     await callback({ ...value, asset });
   });
+  function secondOwnedAsset(asset) {
+    const other = path.join(path.dirname(asset), 'second-owned.txt');
+    fs.writeFileSync(other, 'second private descriptor', { flag: 'wx' });
+    return other;
+  }
 
   await test('fixture overrides never replace shared modules, even during an awaited callback', () => withAsset(async ({ asset, get }) => {
     await withAssetIo(asset, {}, async (calls, filesystem = fs) => {
@@ -578,13 +583,14 @@ async function fixtureIsolationTests(test) {
 
   for (const primary of [Object.freeze(new Error('primary fixture failure')), 0, false, null, undefined]) {
     await test(`descriptor fallback preserves exact ${String(primary)} and attempts all owned fds`, () => withAsset(async ({ asset }) => {
+      const otherAsset = secondOwnedAsset(asset);
       const fds = [];
       const attempts = [];
       const secondary = new Error('secondary cleanup');
       const caught = await capture(() => withAssetIo(asset, {}, (_calls, filesystem = fs) => {
-        fds.push(filesystem.openSync(asset, 'r'), filesystem.openSync(asset, 'r'));
+        fds.push(filesystem.openSync(asset, 'r'), filesystem.openSync(otherAsset, 'r'));
         throw primary;
-      }, { cleanupClose(fd) {
+      }, { additionalAssets: [otherAsset], cleanupClose(fd) {
         attempts.push(fd);
         native.closeSync(fd);
         if (attempts.length === 1) throw secondary;
@@ -598,12 +604,13 @@ async function fixtureIsolationTests(test) {
   }
 
   await test('fallback cleanup cannot turn a leaked-descriptor assertion into a pass', () => withAsset(async ({ asset }) => {
+    const otherAsset = secondOwnedAsset(asset);
     const fds = [];
     const attempts = [];
     const secondary = new Error('cleanup after leak assertion');
     const caught = await capture(() => withAssetIo(asset, {}, (_calls, filesystem = fs) => {
-      fds.push(filesystem.openSync(asset, 'r'), filesystem.openSync(asset, 'r'));
-    }, { cleanupClose(fd) { attempts.push(fd); native.closeSync(fd); throw secondary; } }));
+      fds.push(filesystem.openSync(asset, 'r'), filesystem.openSync(otherAsset, 'r'));
+    }, { additionalAssets: [otherAsset], cleanupClose(fd) { attempts.push(fd); native.closeSync(fd); throw secondary; } }));
     assert.strictEqual(caught.didThrow, true);
     assert.match(caught.error.message, /All returned descriptors must close/);
     assert.notStrictEqual(caught.error, secondary);
@@ -612,11 +619,17 @@ async function fixtureIsolationTests(test) {
   }));
 
   await test('descriptor cleanup alone removes ownership before each single attempt and reports its first failure', () => withAsset(async ({ asset }) => {
-    const fds = [native.openSync(asset, 'r'), native.openSync(asset, 'r')];
-    const owned = new Set(fds);
+    const otherAsset = secondOwnedAsset(asset);
+    const fds = [];
+    const owned = new Set();
     const attempts = [];
     const first = new Error('first cleanup failure');
     try {
+      for (const file of [asset, otherAsset]) {
+        const fd = native.openSync(file, 'r');
+        owned.add(fd);
+        fds.push(fd);
+      }
       const caught = await capture(() => closeOwnedDescriptors(owned, fd => {
         assert.ok(!owned.has(fd), 'ownership must be removed before ambiguous close');
         attempts.push(fd);
