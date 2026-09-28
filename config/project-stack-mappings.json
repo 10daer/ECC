@@ -359,6 +359,7 @@
       ],
       "rules": ["common"],
       "skills": [
+        "rails-patterns",
         "tdd-workflow",
         "verification-loop"
       ],
@@ -505,12 +506,11 @@
         "build": ["pip install -e ."],
         "test": ["pytest", "python -m pytest"],
         "lint": ["ruff check .", "mypy ."],
-        "format": ["ruff format .", "black ."],
-        "dev": ["uvicorn main:app --reload", "fastapi dev"]
+        "format": ["ruff format .", "black ."]
       },
       "permissions": {
-        "allow": ["python *", "pip install *", "pytest *", "ruff *", "black *", "mypy *", "uvicorn *"],
-        "deny": []
+        "allow": ["python *", "pip install *", "pytest *", "ruff *", "black *", "mypy *"],
+        "deny": ["pip install --user *"]
       }
     },
     {
