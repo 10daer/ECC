@@ -183,12 +183,14 @@ function classifyProbe(result) {
   throw new Error(`Unexpected shell capability probe failure: ${result.diagnostic}; ${result.stderr}`);
 }
 
-async function findPosixOnlyShell() {
+async function findPosixOnlyShell(runner = runChild) {
   return withTempDirs(['install-sh-probe-'], async root => {
     const env = privateEnvironment(root);
+    const probeScript = path.join(root, 'probe.sh');
+    fs.writeFileSync(probeScript, "eval '[[ 1 == 1 ]]'\n", { flag: 'wx', mode: 0o600 });
     for (const candidate of ['dash', 'sh']) {
       console.log(`  START shell capability probe: ${candidate}`);
-      const result = await runChild(candidate, ['-c', "eval '[[ 1 == 1 ]]'"], { env });
+      const result = await runner(candidate, [probeScript], { env });
       const capability = classifyProbe(result);
       console.log(`  END shell capability probe: ${candidate}: ${capability}`);
       if (capability === 'unsupported') return candidate;
@@ -246,7 +248,7 @@ async function assertGone(pid) {
   assert.fail(`owned fixture process ${pid} survived cleanup`);
 }
 
-function lifecycleCases(runner = runChild, probe = classifyProbe, finish = finishCleanup) {
+function lifecycleCases(runner = runChild, probe = classifyProbe, finish = finishCleanup, findProbe = findPosixOnlyShell) {
   return [
     ['inert child preserves stdout, stderr, arguments and stdin EOF', async () => {
       const result = await inertChild(runner,
@@ -354,6 +356,36 @@ function lifecycleCases(runner = runChild, probe = classifyProbe, finish = finis
         throw new Error('synthetic cleanup failure');
       }), error => error instanceof AggregateError && error.errors.length === 2);
       assert.deepStrictEqual(attempts, ['first', 'second']);
+    }],
+    ['shell capability probe passes a private source file as one literal argument', async () => {
+      const observed = [];
+      const result = await findProbe(async (binary, args, options) => {
+        assert.strictEqual(args.length, 1, 'probe source must be a file argument');
+        assert.ok(path.isAbsolute(args[0]));
+        assert.strictEqual(fs.readFileSync(args[0], 'utf8'), "eval '[[ 1 == 1 ]]'\n");
+        assert.strictEqual(fs.statSync(args[0]).mode & 0o777, 0o600);
+        assert.ok(options.env.HOME.startsWith(path.dirname(args[0]) + path.sep));
+        observed.push({ binary, source: args[0] });
+        return binary === 'dash'
+          ? { code: 1, errorCode: 'ENOENT', closed: true, stderr: '' }
+          : { code: 127, closed: true, stderr: 'sh: [[: not found\n', diagnostic: 'fixed probe' };
+      });
+      assert.strictEqual(result, 'sh');
+      assert.deepStrictEqual(observed.map(item => item.binary), ['dash', 'sh']);
+      assert.strictEqual(observed[0].source, observed[1].source);
+      assert.strictEqual(fs.existsSync(path.dirname(observed[0].source)), false);
+    }],
+    ['shell capability infrastructure failure stops probing and removes its source', async () => {
+      const observed = [];
+      await assert.rejects(findProbe(async (binary, args) => {
+        assert.strictEqual(args.length, 1, 'probe source must be a file argument');
+        assert.strictEqual(fs.readFileSync(args[0], 'utf8'), "eval '[[ 1 == 1 ]]'\n");
+        observed.push({ binary, source: args[0] });
+        return { code: 1, timedOut: true, closed: true, diagnostic: 'fixed timed-out probe' };
+      }), /infrastructure failure/);
+      assert.strictEqual(observed.length, 1, 'do not select another shell after infrastructure failure');
+      assert.strictEqual(observed[0].binary, 'dash');
+      assert.strictEqual(fs.existsSync(path.dirname(observed[0].source)), false);
     }],
     ['child environment contains only private roots and explicit runtime settings', async () => {
       await withTempDirs(['install-sh-env-control-'], async root => {
