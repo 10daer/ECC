@@ -1,6 +1,6 @@
 # Atlas Cloud — LLM Provider Guide
 
-> Historical sponsor note (2026-09-10): Atlas Cloud is a past sponsor. The provider integration remains valid.
+> Sponsor status: Atlas Cloud is a past sponsor. This status change leaves the documented integration unchanged.
 
 [Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=everything-claude-code) is a full-modal AI inference platform providing an OpenAI-compatible API for 59+ LLM models, image generation, and video generation.
 

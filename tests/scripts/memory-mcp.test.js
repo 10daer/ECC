@@ -260,6 +260,7 @@ async function withClient(fn, options = {}) {
         { name, arguments: toolArguments }
       ),
       callToolRaw: params => request('tools/call', params),
+      ping: params => request('ping', params),
     };
     phase = 'callback';
     await Promise.race([Promise.resolve().then(() => fn(client, fixture)), transportFailure]);
@@ -390,6 +391,25 @@ async function main() {
         client.listToolsRaw({ unexpected: true }),
         /-32602/
       );
+    });
+  });
+
+  await test('accepts the reserved _meta param on ping and rejects malformed values (#2810)', async () => {
+    await withClient(async client => {
+      assert.deepStrictEqual(await client.ping({ _meta: { progressToken: 'progress-1' } }), {});
+      assert.deepStrictEqual(await client.ping(), {});
+      assert.deepStrictEqual(await client.ping({}), {});
+
+      for (const badMeta of [null, ['not', 'an', 'object'], 'string', 42, true]) {
+        await assert.rejects(
+          client.ping({ _meta: badMeta }),
+          /-32602/,
+          `expected ping _meta=${JSON.stringify(badMeta)} to be rejected`
+        );
+      }
+
+      await assert.rejects(client.ping({ unexpected: true }), /-32602/);
+      await assert.rejects(client.ping({ _meta: {}, unexpected: true }), /-32602/);
     });
   });
 
@@ -757,6 +777,8 @@ async function main() {
       },
     });
     assert.strictEqual(initialized.id, 0);
+    assert.match(initialized.result.instructions, /host-bound harness identity/);
+    assert.match(initialized.result.instructions, /does not provide OAuth/);
     await service.handle({
       jsonrpc: '2.0',
       method: 'notifications/initialized',
@@ -782,6 +804,76 @@ async function main() {
       params: [],
     });
     assert.strictEqual(invalidParams.error.code, -32600);
+  });
+
+  for (const [label, params] of [
+    ['omitted params', undefined],
+    ['empty params', {}],
+    ['empty metadata', { _meta: {} }],
+    ['extension metadata', { _meta: { 'example.com/trace': 'sample' } }],
+  ]) {
+    await test(`accepts initialized notifications with ${label}`, async () => {
+      const { createMemoryMcpService } = await import(pathToFileURL(SERVER).href);
+      const service = createMemoryMcpService({ harness: 'claude' });
+      const initialized = await service.handle({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25', capabilities: {},
+          clientInfo: { name: 'metadata-test', version: '1.0.0' },
+        },
+      });
+      assert.strictEqual(initialized.error, undefined);
+      const notification = await service.handle({
+        jsonrpc: '2.0', method: 'notifications/initialized',
+        ...(params === undefined ? {} : { params }),
+      });
+      assert.strictEqual(notification, null);
+      const listed = await service.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      assert.strictEqual(listed.error, undefined);
+      assert.ok(listed.result.tools.some(tool => tool.name === 'memory_search'));
+    });
+  }
+
+  await test('ignores initialized notifications with malformed metadata or unknown params', async () => {
+    const { createMemoryMcpService } = await import(pathToFileURL(SERVER).href);
+    for (const params of [
+      ...[null, [], 'invalid', 1, false].map(_meta => ({ _meta })),
+      { _meta: {}, unexpected: true },
+    ]) {
+      const service = createMemoryMcpService({ harness: 'claude' });
+      await service.handle({
+        jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25', capabilities: {},
+          clientInfo: { name: 'metadata-test', version: '1.0.0' },
+        },
+      });
+      assert.strictEqual(await service.handle({
+        jsonrpc: '2.0', method: 'notifications/initialized', params,
+      }), null);
+      const listed = await service.handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      assert.strictEqual(listed.error?.code, -32002, JSON.stringify(params));
+    }
+  });
+
+  await test('does not initialize from a metadata notification sent before initialize', async () => {
+    const { createMemoryMcpService } = await import(pathToFileURL(SERVER).href);
+    const service = createMemoryMcpService({ harness: 'claude' });
+    const notification = {
+      jsonrpc: '2.0', method: 'notifications/initialized', params: { _meta: {} },
+    };
+    assert.strictEqual(await service.handle(notification), null);
+    const before = await service.handle({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    assert.strictEqual(before.error?.code, -32002);
+    await service.handle({
+      jsonrpc: '2.0', id: 2, method: 'initialize',
+      params: {
+        protocolVersion: '2025-11-25', capabilities: {},
+        clientInfo: { name: 'metadata-test', version: '1.0.0' },
+      },
+    });
+    const after = await service.handle({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
+    assert.strictEqual(after.error?.code, -32002);
   });
 
   await test('bounds queued transport work under a single-chunk request flood', async () => {
