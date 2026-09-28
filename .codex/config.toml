@@ -1,51 +1,30 @@
 #:schema https://developers.openai.com/codex/config-schema.json
 
-# Everything Claude Code (ECC) — Codex Reference Configuration (project-scoped layer)
+# ECC project-scoped reference: guidance, features and local role definitions.
+# Trusted-project loading, precedence and supported keys depend on the Codex
+# version and higher-level policy. Omitted settings inherit other config layers.
+# This file does not certify effective permissions or prevent configured tools
+# from running. The referenced role files retain their read-only sandbox requests.
 #
-# SCOPE — what this file is and is not:
-#
-#   This file is the **project-scoped default** that ships with the ECC plugin.
-#   Codex loads it from the repo root when the project is trusted. To keep a
-#   trusted repo from overriding the user's own policy, this file is restricted
-#   to *model selection*, *persistent instructions*, *features*, and *role
-#   definitions* only. Anything that gates execution (approval_policy,
-#   sandbox_mode, mcp_servers, notify, profiles.*) lives in
-#   `~/.codex/config.toml` and is documented in the "USER-LEVEL REFERENCE"
-#   appendix below as commented-out examples.
-#
-# Copy this file to `~/.codex/config.toml` for global defaults, or keep it in
-# the project root as `.codex/config.toml` for project-local settings.
-#
-# Official docs:
-# - https://developers.openai.com/codex/config-reference
-# - https://developers.openai.com/codex/multi-agent
-#
-# Security baseline: this file passes `ecc-agentshield scan` with zero
-# critical / high findings on `.codex/config.toml`. Verified by
-# `ecc-security-reviewer` against the ECC Development project's g-secure
-# lane; see ECC-SEC-1.1 for the run report.
+# Explicit user installs use the separate user-config.example.toml reference.
+# Do not copy this project file as an equivalent user-level baseline. The user
+# reference preserves ECC's existing runtime defaults, profiles and integrations;
+# review them before installation. Current Codex docs ignore notify/profiles in
+# project config; that is not a universal claim about older versions.
+# https://developers.openai.com/codex/config-reference
+# https://developers.openai.com/codex/multi-agent
 
-# Model selection
-# Leave `model` and `model_provider` unset so Codex CLI uses its current
-# built-in defaults. Uncomment and pin them only if you intentionally want
-# repo-local or global model overrides.
-
-# Persistent instructions are appended to every prompt (additive, unlike
-# model_instructions_file which replaces AGENTS.md).
+# Leave top-level model and model_provider unset to inherit other/default choices.
+# Existing ECC instruction key retained for sync compatibility, without claiming
+# support in every Codex version. Consult the supported version's reference.
 persistent_instructions = "Follow project AGENTS.md guidelines. Use available MCP servers when they can help."
 
-# model_instructions_file replaces built-in instructions instead of AGENTS.md,
-# so leave it unset unless you intentionally want a single override file.
-# model_instructions_file = "/absolute/path/to/instructions.md"
-
 [features]
-# Codex multi-agent collaboration is stable and on by default in current builds.
-# Keep the explicit toggle here so the repo documents its expectation clearly.
 multi_agent = true
 
-# Role limits and local role definitions.
-# These map to `.codex/agents/*.toml` and mirror the repo's explorer/reviewer/docs workflow.
 [agents]
+# Multi-agent role limits and local role definitions.
+# These map to `.codex/agents/*.toml` and mirror the repo's explorer/reviewer/docs workflow.
 max_threads = 6
 max_depth = 1
 
@@ -60,84 +39,3 @@ config_file = "agents/reviewer.toml"
 [agents.docs_researcher]
 description = "Documentation specialist that verifies APIs, framework behavior, and release notes."
 config_file = "agents/docs-researcher.toml"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# USER-LEVEL REFERENCE — copy into ~/.codex/config.toml, NOT the project root.
-#
-# Anything that controls Codex execution (approval prompts, sandbox limits,
-# external notifications, MCP server registration, named profiles) belongs in
-# the user's own config. Keeping it out of `.codex/config.toml` prevents a
-# trusted repo from loosening approvals, registering untrusted MCP servers,
-# or running notify commands on the user's machine.
-#
-# Below is the same surface area the previous reference file exposed, kept
-# here as commented-out examples so the install still ships a usable template.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# [mcp_servers.github]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-github"]
-# startup_timeout_sec = 30
-#
-# [mcp_servers.context7]
-# command = "npx"
-# args = ["-y", "@upstash/context7-mcp@latest"]
-# startup_timeout_sec = 30
-#
-# [mcp_servers.exa]
-# command = "npx"
-# args = ["-y", "mcp-remote", "https://mcp.exa.ai/mcp"]
-# startup_timeout_sec = 30
-#
-# [mcp_servers.memory]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-memory"]
-# startup_timeout_sec = 30
-#
-# [mcp_servers.playwright]
-# command = "npx"
-# args = ["-y", "@playwright/mcp@latest", "--extension"]
-# startup_timeout_sec = 30
-#
-# [mcp_servers.sequential-thinking]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
-# startup_timeout_sec = 30
-
-# Top-level runtime settings — USER-LEVEL only.
-# approval_policy = "on-request"
-# sandbox_mode = "workspace-write"
-# web_search = "live"
-
-# External notifications receive a JSON payload on stdin.
-# notify = [
-#   "terminal-notifier",
-#   "-title", "Codex ECC",
-#   "-message", "Task completed!",
-#   "-sound", "default",
-# ]
-
-# Profiles — switch with `codex -p <name>`. USER-LEVEL only.
-#
-# Notes for `codex-adapter-coder` / contributors:
-#   * `strict` is a safe read-only default; safe to keep as a documented
-#     example, but AgentShield flags any project-scoped profile block
-#     (rule `codex-project-config-escalates`) because it overrides user
-#     policy, so it lives in `~/.codex/config.toml` instead.
-#   * `yolo` is intentionally NOT shipped. `approval_policy = "never"`
-#     disables the human-in-the-loop check on every command, edit, and MCP
-#     call. AgentShield rule `codex-approval-never` blocks it as critical,
-#     and it is also called out by `codex-project-config-escalates`. If a
-#     user genuinely needs an unattended mode, they should define it in
-#     `~/.codex/config.toml` after explicitly opting in — never inherit it
-#     from a trusted repo.
-#
-# [profiles.strict]
-# approval_policy = "on-request"
-# sandbox_mode = "read-only"
-# web_search = "cached"
-#
-# [profiles.yolo]   # DO NOT uncomment in a project-scoped file.
-# approval_policy = "never"
-# sandbox_mode = "workspace-write"
-# web_search = "live"
