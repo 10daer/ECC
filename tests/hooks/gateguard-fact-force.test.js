@@ -5019,6 +5019,36 @@ function runTests() {
     });
   }
 
+  // --- Bracket classes in filter globs match exactly ---
+  const bracketCases = [
+    ['include class of a dot does not admit another character', 'src/fooXjs', "rg -g 'foo[.]js' fooXjs .", false],
+    ['include class of a dot admits the dot', 'src/widget.py', "rg -g 'widget[.]py' widget .", true],
+    ['include negated class admits another character', 'src/widget.py', "rg -g 'widge[!x].py' widget .", true],
+    ['include negated class rejects its member', 'src/widget.py', "rg -g 'widge[!t].py' widget .", false],
+    ['include caret-negated class rejects its member', 'src/widget.py', "rg -g 'widge[^t].py' widget .", false],
+    ['include range admits a member', 'src/widget.py', "rg -g 'widge[r-u].py' widget .", true],
+    ['include range rejects a non-member', 'src/widget.py', "rg -g 'widge[a-f].py' widget .", false],
+    ['include range is case-insensitive', 'src/widget.py', "rg -g 'widge[R-U].py' widget .", true],
+    ['include class with a literal ] first', 'src/widget.py', "rg -g 'widge[]t].py' widget .", true],
+    ['Grep include class of a dot does not admit another character', 'src/fooXjs', { pattern: 'fooXjs', glob: 'foo[.]js' }, false],
+    ['include with an unclosed class admits nothing', 'src/widget.py', "rg -g 'widget[.py' widget .", false],
+    ['include with an empty class admits nothing', 'src/widget.py', "rg -g 'widget[].py' widget .", false],
+    ['exclusion class covering the target blocks it', 'src/widget.py', "rg -g '!widge[t].py' widget .", false],
+    ['exclusion range covering the target blocks it', 'src/widget.py', "rg -g '!widge[s-u].py' widget .", false],
+    ['exclusion class of a dot does not cover another character', 'src/widgetXjs', "rg -g '!widget[.]js' widgetXjs .", true],
+    ['exclusion negated class does not cover its member', 'src/widget.py', "rg -g '!widge[!t].py' widget .", true],
+    ['exclusion with an unclosed class covers the target', 'src/widget.py', "rg -g '!zzz[' widget .", false],
+    ['exclusion with an empty negated class covers the target', 'src/widget.py', "rg -g '!zzz[!]' widget .", false]
+  ];
+  for (const [label, rel, search, credited] of bracketCases) {
+    c3Case(`bracket class: ${label}`, () => {
+      const input = typeof search === 'string' ? { command: search } : { ...search, path: c3Root };
+      const out = c3Edit(`${c3Root}/${rel}`, r2Turn(typeof search === 'string' ? 'Bash' : 'Grep', input));
+      if (credited) c3AssertCredited(out, label);
+      else c3AssertDenied(out, label);
+    });
+  }
+
   // --- Same-turn sibling creations and counters ---
   const c4Root = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, 'gateguard-c4-proj-')));
   const c4Env = { CLAUDE_PROJECT_DIR: c4Root, CLAUDE_TRANSCRIPT_PATH: '' };

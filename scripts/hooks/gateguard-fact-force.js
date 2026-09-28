@@ -2600,9 +2600,11 @@ function globTokens(glob) {
       tokens.push({ type: 'star' });
     } else if (ch === '?') {
       tokens.push({ type: 'one' });
-    } else if (ch === '[' && glob.indexOf(']', i + 2) !== -1) {
-      tokens.push({ type: 'one' }); // any character class: over-approximated as one character
-      i = glob.indexOf(']', i + 2);
+    } else if (ch === '[') {
+      const parsed = bracketClass(glob, i);
+      if (!parsed) return null;
+      tokens.push(parsed.token);
+      i = parsed.end;
     } else {
       tokens.push({ type: 'lit', ch });
     }
@@ -2610,9 +2612,36 @@ function globTokens(glob) {
   return tokens;
 }
 
-/** Glob match by dynamic programming, so a hostile glob cannot cause regex backtracking. */
+/** `[...]` with members, ranges, `!`/`^` negation and a leading literal `]`; null when unclosed. */
+function bracketClass(glob, open) {
+  let i = open + 1;
+  const negated = glob[i] === '!' || glob[i] === '^';
+  if (negated) i += 1;
+  const ranges = [];
+  for (let first = true; i < glob.length && (first || glob[i] !== ']'); first = false) {
+    if (glob[i + 1] === '-' && i + 2 < glob.length && glob[i + 2] !== ']') {
+      ranges.push([glob[i], glob[i + 2]]);
+      i += 3;
+    } else {
+      ranges.push([glob[i], glob[i]]);
+      i += 1;
+    }
+  }
+  if (i >= glob.length) return null;
+  return { token: { type: 'class', negated, ranges }, end: i };
+}
+
+function classMatches(token, ch) {
+  if (ch === '/') return false;
+  const forms = [ch, ch.toLowerCase(), ch.toUpperCase()];
+  const member = token.ranges.some(([lo, hi]) => forms.some(form => form >= lo && form <= hi));
+  return member !== token.negated;
+}
+
+/** Glob match by dynamic programming, so a hostile glob cannot cause regex backtracking; null when malformed. */
 function wildcardMatch(glob, text) {
   const tokens = globTokens(glob);
+  if (!tokens) return null;
   const n = text.length;
   let next = new Array(n + 1).fill(false);
   next[n] = true;
@@ -2623,6 +2652,7 @@ function wildcardMatch(glob, text) {
     for (let j = n; j >= 0; j--) {
       if (token.type === 'lit') row[j] = j < n && text[j] === token.ch && next[j + 1];
       else if (token.type === 'one') row[j] = j < n && text[j] !== '/' && next[j + 1];
+      else if (token.type === 'class') row[j] = j < n && classMatches(token, text[j]) && next[j + 1];
       else if (token.type === 'star') row[j] = next[j] || (j < n && text[j] !== '/' && row[j + 1]);
       else if (token.type === 'deep') row[j] = next[j] || (j < n && row[j + 1]);
       else {
@@ -2639,12 +2669,15 @@ function normalizeFilterGlob(glob) {
   return String(glob).toLowerCase().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
-/** Null when the glob is past the length or brace bounds. */
-function globMatches(glob, text) {
+/** Null when the glob is past the length or brace bounds; a malformed alternative counts as `malformed`. */
+function globMatches(glob, text, malformed) {
   if (glob.length > MAX_FILTER_GLOB_CHARS) return null;
   const alternatives = expandBraces(glob);
   if (!alternatives) return null;
-  return alternatives.some(alternative => wildcardMatch(alternative, text));
+  return alternatives.some(alternative => {
+    const matched = wildcardMatch(alternative, text);
+    return matched === null ? malformed : matched;
+  });
 }
 
 function targetSegments(ctx) {
@@ -2658,7 +2691,7 @@ function exclusionCoversTarget(exclusion, segments, stem) {
   if (stem !== null && stem.test(glob)) return true;
   for (let start = 0; start < segments.length; start++) {
     for (let end = start + 1; end <= segments.length; end++) {
-      const matched = globMatches(glob, segments.slice(start, end).join('/'));
+      const matched = globMatches(glob, segments.slice(start, end).join('/'), true);
       if (matched !== false) return true;
     }
   }
@@ -2674,13 +2707,13 @@ function filtersAdmitTarget(item, ctx, stem) {
   return !exclusions.some(exclusion => exclusionCoversTarget(exclusion, segments, stem));
 }
 
-/** Basename include globs that all miss the target stop its stem from crediting; oversized globs admit. */
+/** Basename include globs that all miss the target stop its stem from crediting; oversized globs admit, malformed ones do not. */
 function includesAdmitTarget(item, ctx) {
   const includes = Array.isArray(item.includes) ? item.includes : [];
   if (includes.length === 0) return true;
   const segments = targetSegments(ctx);
   const base = segments[segments.length - 1] || '';
-  return includes.some(include => globMatches(normalizeFilterGlob(include).replace(/^(?:\*\*\/)+/, ''), base) !== false);
+  return includes.some(include => globMatches(normalizeFilterGlob(include).replace(/^(?:\*\*\/)+/, ''), base, false) !== false);
 }
 
 function isBasenameGlob(glob) {
