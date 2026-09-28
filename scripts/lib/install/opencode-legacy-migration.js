@@ -109,7 +109,8 @@ function inspectLegacyOpencodeState(location) {
 function hashFileNoFollow(filePath, fileSystem = fs) {
   // The filesystem seam supplies operations, never the read-only access policy.
   const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
-  const descriptor = fileSystem.openSync(filePath, flags);
+  // Read-only opens ignore mode; adapters still receive an owner-only default.
+  const descriptor = fileSystem.openSync(filePath, flags, 0o600);
   try {
     const before = fileSystem.fstatSync(descriptor, { bigint: true });
     if (!before.isFile()) {
