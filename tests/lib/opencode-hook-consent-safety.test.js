@@ -366,6 +366,128 @@ function runTests() {
       });
     }));
   }
+  for (const rootForm of ['relative', 'missing']) {
+    for (const consent of [null, 'declined']) {
+      test(`${rootForm} source root keeps historical refusal for fresh ${consent || 'default'} apply`, () => fixture(value => {
+        const legacy = legacyPluginFixtures[0];
+        assert.strictEqual(sha256(legacy.content), legacy.sha256);
+        fs.unlinkSync(value.installStatePath);
+        for (const operation of value.basePlan.operations) fs.unlinkSync(operation.destinationPath);
+        const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+        fs.writeFileSync(alias, legacy.content);
+        const sourceRoot = rootForm === 'relative'
+          ? path.relative(process.cwd(), value.sourceRoot) : undefined;
+        if (sourceRoot) assert.strictEqual(path.isAbsolute(sourceRoot), false);
+        const plan = withHookConsent({ ...value.basePlan, sourceRoot }, consent);
+        assert.throws(() => applyInstallPlan(plan), /Refusing OpenCode hook deactivation/);
+        assert.strictEqual(fs.readFileSync(alias, 'utf8'), legacy.content);
+        assert.strictEqual(fs.existsSync(value.installStatePath), false);
+        for (const operation of value.basePlan.operations) assert.strictEqual(fs.existsSync(operation.destinationPath), false);
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      }));
+    }
+  }
+  for (const mode of ['doctor', 'repair']) {
+    for (const historical of [true, false]) {
+      test(`${mode} with relative repoRoot ${historical ? 'refuses historical ECC' : 'preserves unrelated user'} aliases`, () => fixture(value => {
+        applyInstallPlan(value.declinePlan);
+        const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+        const content = historical ? legacyPluginFixtures[0].content
+          : 'export default async () => ({ "user.plugin": () => {} });\n';
+        fs.writeFileSync(alias, content);
+        const before = fs.readFileSync(value.installStatePath);
+        const operationsBefore = value.basePlan.operations.map(operation => fs.readFileSync(operation.destinationPath));
+        const repoRoot = path.relative(process.cwd(), value.sourceRoot);
+        assert.strictEqual(path.isAbsolute(repoRoot), false);
+        if (mode === 'doctor') {
+          const result = buildDoctorReport({ repoRoot, homeDir: value.homeDir,
+            projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+          const issue = result.issues.find(entry => entry.code === 'opencode-hook-consent-violation');
+          assert.strictEqual(Boolean(issue), historical, JSON.stringify(result.issues));
+          if (historical) assert.match(issue.message, /OpenCode hook activation remains active/);
+        } else {
+          const result = repair(value, { repoRoot }).results[0];
+          if (historical) {
+            assert.strictEqual(result.status, 'error');
+            assert.match(result.error, /Refusing OpenCode hook deactivation/);
+            assert.notStrictEqual(result.stateRefreshed, true);
+          } else assert.strictEqual(result.status, 'ok', result.error);
+        }
+        assert.strictEqual(fs.readFileSync(alias, 'utf8'), content);
+        if (historical) assert.deepStrictEqual(fs.readFileSync(value.installStatePath), before);
+        else {
+          const { lastValidatedAt: _beforeValidation, ...priorState } = JSON.parse(before);
+          const { lastValidatedAt: _afterValidation, ...afterState } = readInstallState(value.installStatePath);
+          assert.deepStrictEqual(afterState, priorState, 'Only the validation timestamp may change');
+        }
+        assert.ok(!readInstallState(value.installStatePath).operations.some(operation => operation.destinationPath === alias));
+        assert.deepStrictEqual(value.basePlan.operations.map(operation => fs.readFileSync(operation.destinationPath)), operationsBefore);
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      }));
+    }
+  }
+  for (const mode of ['apply', 'repair']) {
+    test(`${mode} with relative root refuses a historical alias inserted after preflight`, () => fixture(value => {
+      const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+      const content = legacyPluginFixtures[0].content;
+      const repoRoot = path.relative(process.cwd(), value.sourceRoot);
+      withWritableOpenMutation(path.join(value.targetRoot, 'plugins', 'ecc-hooks.ts'),
+        () => fs.writeFileSync(alias, content), () => {
+          if (mode === 'apply') {
+            assert.throws(() => applyInstallPlan({ ...value.declinePlan, sourceRoot: repoRoot }),
+              /OpenCode hook activation remains active/);
+          } else {
+            const result = repair(value, { repoRoot }).results[0];
+            assert.strictEqual(result.status, 'error');
+            assert.match(result.error, /OpenCode hook activation remains active/);
+            assert.notStrictEqual(result.stateRefreshed, true);
+          }
+          assert.strictEqual(fs.readFileSync(alias, 'utf8'), content);
+          const state = readInstallState(value.installStatePath);
+          assert.ok(!state.operations.some(operation => operation.destinationPath === alias));
+          assert.strictEqual(state.request.hookConsent, value.state.request.hookConsent);
+          assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+        });
+    }));
+  }
+  for (const artifact of ['source', 'build']) {
+    test(`relative repoRoot attributes only trusted current ${artifact} bytes in doctor and repair`, () => fixture(value => {
+      applyInstallPlan(value.declinePlan);
+      const source = artifact === 'source'
+        ? path.join(value.sourceRoot, '.opencode', 'plugins', 'ecc-hooks.ts')
+        : path.join(value.sourceRoot, '.opencode', 'dist', 'plugins', 'index.js');
+      if (artifact === 'build') fs.writeFileSync(source, 'module.exports = { eccHook: true };\n');
+      const content = fs.readFileSync(source);
+      const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+      fs.writeFileSync(alias, content);
+      const before = fs.readFileSync(value.installStatePath);
+      const operationsBefore = value.basePlan.operations.map(operation => fs.readFileSync(operation.destinationPath));
+      const repoRoot = path.relative(process.cwd(), value.sourceRoot);
+      assert.strictEqual(path.isAbsolute(repoRoot), false);
+      const doctor = buildDoctorReport({ repoRoot, homeDir: value.homeDir,
+        projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+      assert.ok(doctor.issues.some(issue => issue.code === 'opencode-hook-consent-violation'), JSON.stringify(doctor.issues));
+      const result = repair(value, { repoRoot }).results[0];
+      assert.strictEqual(result.status, 'error');
+      assert.match(result.error, /Refusing OpenCode hook deactivation/);
+      assert.notStrictEqual(result.stateRefreshed, true);
+      assert.deepStrictEqual(fs.readFileSync(alias), content);
+      assert.deepStrictEqual(fs.readFileSync(value.installStatePath), before);
+      assert.deepStrictEqual(value.basePlan.operations.map(operation => fs.readFileSync(operation.destinationPath)), operationsBefore);
+      assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+    }));
+  }
+  for (const mode of ['doctor', 'repair']) {
+    test(`${mode} still rejects unsupported explicit repoRoot types`, () => fixture(value => {
+      for (const repoRoot of [{}, true, 1]) {
+        const invoke = mode === 'doctor'
+          ? () => buildDoctorReport({ repoRoot, homeDir: value.homeDir,
+            projectRoot: value.homeDir, targets: ['opencode'] })
+          : () => repair(value, { repoRoot });
+        assert.throws(invoke, error => error instanceof TypeError && error.code === 'ERR_INVALID_ARG_TYPE');
+      }
+    }));
+  }
   for (const artifact of ['source', 'build']) {
     test(`unrecorded ${artifact}-identical ECC alias still fails closed`, () => fixture(value => {
       applyInstallPlan(value.declinePlan);

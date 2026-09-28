@@ -398,8 +398,9 @@ const LEGACY_OPENCODE_PLUGIN_DIGESTS = Object.freeze([
 ]);
 
 function knownOpenCodePluginDigests(plan) {
-  if (typeof plan.sourceRoot !== 'string' || !path.isAbsolute(plan.sourceRoot)) return new Set();
+  // Historical refusal fingerprints do not depend on a current source checkout.
   const digests = new Set(LEGACY_OPENCODE_PLUGIN_DIGESTS);
+  if (typeof plan.sourceRoot !== 'string' || !path.isAbsolute(plan.sourceRoot)) return digests;
   const sourcePlan = { ...plan, targetRoot: plan.sourceRoot };
   for (const directory of ['.opencode/plugins', '.opencode/dist/plugins']) {
     for (const name of ['ecc-hooks', 'index']) {
