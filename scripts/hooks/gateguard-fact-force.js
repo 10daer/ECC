@@ -530,7 +530,7 @@ function wrapperValueOption(arg, valueFlags) {
   return null;
 }
 
-// Explicit external-launcher argv grammars used only by the dd classifier.
+// Explicit external-launcher argv grammars for dd and shell-wrapper discovery.
 // Unknown flags do not justify guessing which later argument executes.
 const DD_LAUNCHER_OPTIONS = {
   xargs: {
@@ -735,7 +735,7 @@ function isDestructiveQuoteAware(raw, depth = 0) {
       if (isDestructiveDd(tokens)) return true;
       if (isDestructiveSqlClient(tokens)) return true;
       if (isDestructiveFindExec(tokens)) return true;
-      const argv = unwrapLeadWrappers(tokens);
+      const argv = unwrapLeadWrappers(tokens, true, true);
       if (SHELL_WRAPPERS.has(commandBasename(argv[0]))) {
         const ci = argv.indexOf('-c', 1);
         if (ci !== -1 && argv[ci + 1] && isDestructiveQuoteAware(argv[ci + 1], depth + 1)) {
@@ -763,7 +763,8 @@ function commandBasename(token) {
 }
 
 /**
- * Detect a `dd` invocation carrying an `if=` operand.
+ * Detect a `dd` invocation carrying an `if=` or `of=` operand.
+ * Keep the existing input-file gate and include output-only writes from stdin.
  *
  * Token-based rather than a regex arm because the verdict has to depend on
  * `dd` being the command, not on `dd if=` appearing anywhere in the line:
@@ -779,7 +780,7 @@ function commandBasename(token) {
  */
 function isDestructiveDd(tokens, allowShellBuiltins = true) {
   const argv = unwrapLeadWrappers(tokens, allowShellBuiltins, true);
-  return commandBasename(argv[0]) === 'dd' && argv.slice(1).some(operand => /^if=/i.test(operand));
+  return commandBasename(argv[0]) === 'dd' && argv.slice(1).some(operand => /^(?:if|of)=/i.test(operand));
 }
 
 /**

@@ -185,6 +185,18 @@ function runDdRegressionTests() {
   };
   const destructive = [
     'dd if=/dev/zero of=/dev/sda',
+    'dd of=/dev/sda bs=1M',
+    'cat /dev/zero | dd of=/dev/sda',
+    'sudo dd of=/dev/sda < /dev/zero',
+    'dd bs=1M of="./output"',
+    "timeout 60 bash -c 'dd if=/dev/zero of=/dev/sda'",
+    "nohup sh -c 'dd if=input'",
+    "nice -n 5 sh -c 'dd if=input'",
+    "xargs sh -c 'dd if=input'",
+    "timeout 2 sh -c 'dd of=output'",
+    "nohup sh -c 'echo $(dd of=output)'",
+    "nice -n 5 sh -c 'cat <<EOF\n$(dd of=output)\nEOF'",
+    'find . -exec dd of=output \\;',
     'dd if=./image of=./out',
     'dd of=./out bs=1M if="./image"',
     "'/bin/dd' if=input of=output",
@@ -295,6 +307,16 @@ function runDdRegressionTests() {
   ];
   const passive = [
     'echo dd if=input',
+    'echo dd of=/dev/sda',
+    'grep dd of=output file',
+    "printf '%s' 'dd of=output'",
+    'dd count=0',
+    "timeout 2 echo 'sh -c dd of=output'",
+    "timeout 2 sh -c 'echo \"dd of=output\"'",
+    "nohup sh -c 'cat <<EOF\ndd of=output\nEOF'",
+    "nice -n 5 echo 'dd of=output'",
+    "xargs echo 'sh -c dd of=output'",
+    'echo "note; find . -exec dd of=output \\;"',
     'command -v dd',
     'command -v dd if=input',
     'command -V dd if=input',
@@ -410,7 +432,9 @@ function runDdRegressionTests() {
       ['sudo -u dd echo if=input', false],
       ["env -S 'echo ok; dd if=input'", false],
       ['find . -exec echo {} \\; -exec dd if=input \\;', true],
-      ['command -pv dd', false]
+      ['command -pv dd', false],
+      ["timeout 2 sh -c 'dd if=input'", true],
+      ['cat /dev/zero | dd of=/dev/sda', true]
     ]) {
       check(`dd hook-input contract: ${command}`, () => {
         fs.rmSync(stateDir, { recursive: true, force: true });
@@ -617,6 +641,7 @@ function runTests() {
     if (
       test(`denies dd whose input path is not word-initial: ${command}`, () => {
         const result = runBashHook({ tool_name: 'Bash', tool_input: { command } });
+        assert.strictEqual(result.code, 0, `hook should exit successfully for ${command}`);
         const output = parseOutput(result.stdout);
         assert.ok(output, 'hook should produce JSON output');
         assert.ok(output.hookSpecificOutput, 'hook should return a permission decision');
