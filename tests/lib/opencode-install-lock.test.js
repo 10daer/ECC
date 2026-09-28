@@ -233,5 +233,192 @@ test('engine ownership metadata is immutable and derived from the acquired descr
   } finally { release(); }
   assert.strictEqual(fs.existsSync(`${settingsPath}.ecc.lock`), false);
 });
+
+function captureThrown(callback) {
+  try { return { didThrow: false, result: callback() }; }
+  catch (value) { return { didThrow: true, value }; }
+}
+
+const falsyThrownValues = [undefined, null, false, 0, '', NaN];
+for (const [index, primary] of falsyThrownValues.entries()) {
+  for (const cleanupFails of [false, true]) {
+    test(`falsy callback value ${index} survives ${cleanupFails ? 'failed' : 'healthy'} cleanup`, root => {
+      let lease;
+      const caught = captureThrown(() => withOpenCodeInstallLocks([root], active => {
+        lease = active;
+        if (cleanupFails) {
+          fs.renameSync(lockPath(root), `${lockPath(root)}.owned`);
+          fs.writeFileSync(lockPath(root), 'replacement');
+        }
+        throw primary;
+      }));
+      assert.strictEqual(caught.didThrow, true, 'A thrown falsy value must not become success');
+      assert.ok(Object.is(caught.value, primary), 'Preserve the exact thrown value, including NaN');
+      assert.throws(() => acquireOpenCodeInstallLocks([root], lease), /inactive/);
+      if (cleanupFails) {
+        assert.strictEqual(fs.readFileSync(lockPath(root), 'utf8'), 'replacement');
+        assert.ok(fs.existsSync(`${lockPath(root)}.owned`));
+      } else assert.strictEqual(fs.existsSync(lockPath(root)), false);
+    });
+  }
+}
+
+for (const kind of ['frozen', 'nonextensible', 'nonwritable', 'accessor', 'proxy', 'primitive']) {
+  test(`${kind} callback primary survives cleanup failure without invoking accessors`, root => {
+    const a = path.join(root, 'a');
+    const b = path.join(root, 'b');
+    const marker = new Error('preexisting release diagnostic');
+    let accesses = 0;
+    let definitions = 0;
+    let primary = new Error('primary');
+    if (kind === 'frozen') Object.freeze(primary);
+    if (kind === 'nonextensible') Object.preventExtensions(primary);
+    if (kind === 'nonwritable') Object.defineProperty(primary, 'releaseError', { value: marker });
+    if (kind === 'accessor') Object.defineProperty(primary, 'releaseError', {
+      configurable: true,
+      get() { accesses++; throw new Error('getter must not run'); },
+      set() { accesses++; throw new Error('setter must not run'); }
+    });
+    if (kind === 'proxy') primary = new Proxy(primary, { defineProperty() {
+      definitions++;
+      assert.strictEqual(fs.existsSync(lockPath(a)), false, 'All safe cleanup precedes annotation');
+      throw new Error('annotation rejected');
+    } });
+    if (kind === 'primitive') primary = 'literal primary';
+    let lease;
+    const caught = captureThrown(() => withOpenCodeInstallLocks([a, b], active => {
+      lease = active;
+      fs.renameSync(lockPath(b), `${lockPath(b)}.owned`);
+      fs.writeFileSync(lockPath(b), 'replacement');
+      throw primary;
+    }));
+    assert.strictEqual(caught.didThrow, true);
+    assert.ok(Object.is(caught.value, primary));
+    assert.strictEqual(accesses, 0);
+    if (kind === 'proxy') assert.strictEqual(definitions, 1);
+    if (kind === 'nonwritable') assert.strictEqual(primary.releaseError, marker);
+    if (kind === 'accessor') {
+      const descriptor = Object.getOwnPropertyDescriptor(primary, 'releaseError');
+      assert.ok('value' in descriptor, 'Diagnostic should be an own data property');
+      assert.match(descriptor.value.message, /changed/);
+    }
+    assert.strictEqual(fs.existsSync(lockPath(a)), false);
+    assert.strictEqual(fs.readFileSync(lockPath(b), 'utf8'), 'replacement');
+    assert.ok(fs.existsSync(`${lockPath(b)}.owned`));
+    assert.throws(() => acquireOpenCodeInstallLocks([a], lease), /inactive/);
+  });
+}
+
+for (const kind of ['mutable', 'frozen', 'frozen array', 'non-array', 'readonly', 'accessor', 'proxy']) {
+  test(`three-root cleanup preserves ${kind} first failure and finishes reverse cleanup`, root => {
+    const roots = ['a', 'b', 'c'].map(name => path.join(root, name));
+    const [a, b, c] = roots;
+    const originalRename = fs.renameSync;
+    const secondary = new Error('second cleanup failure');
+    const priorDiagnostic = new Error('prior diagnostic');
+    const originalArray = Object.freeze([priorDiagnostic]);
+    let accesses = 0;
+    let primary = new Error('first cleanup failure');
+    if (kind === 'frozen') Object.freeze(primary);
+    if (kind === 'frozen array') primary.releaseErrors = originalArray;
+    if (kind === 'non-array') primary.releaseErrors = { push() { accesses++; throw new Error('caller push must not run'); } };
+    if (kind === 'readonly') Object.defineProperty(primary, 'releaseErrors', { value: originalArray });
+    if (kind === 'accessor') Object.defineProperty(primary, 'releaseErrors', {
+      get() { accesses++; throw new Error('caller getter must not run'); },
+      set() { accesses++; throw new Error('caller setter must not run'); }
+    });
+    if (kind === 'proxy') primary = new Proxy(primary, { defineProperty() {
+      assert.strictEqual(fs.existsSync(lockPath(a)), false, 'Finish cleanup before a diagnostic trap');
+      throw new Error('diagnostic trap');
+    } });
+    const holder = acquireOpenCodeInstallLocks(roots);
+    const attempts = [];
+    fs.renameSync = (from, to) => {
+      if (roots.some(candidate => lockPath(candidate) === from)) attempts.push(from);
+      if (from === lockPath(c)) throw primary;
+      if (from === lockPath(b)) throw secondary;
+      return originalRename(from, to);
+    };
+    let caught;
+    try { caught = captureThrown(() => holder.release()); }
+    finally { fs.renameSync = originalRename; }
+    assert.strictEqual(caught.didThrow, true);
+    assert.strictEqual(caught.value, primary);
+    assert.deepStrictEqual(attempts, [lockPath(c), lockPath(b), lockPath(a)]);
+    assert.strictEqual(fs.existsSync(lockPath(a)), false);
+    assert.ok(fs.existsSync(lockPath(b)) && fs.existsSync(lockPath(c)), 'Failed releases must not be claimed removed');
+    assert.strictEqual(accesses, 0);
+    assert.deepStrictEqual(originalArray, [priorDiagnostic], 'Never mutate a caller-owned diagnostics array');
+    if (['mutable', 'frozen array', 'non-array'].includes(kind)) {
+      assert.deepStrictEqual(primary.releaseErrors, [secondary]);
+      assert.notStrictEqual(primary.releaseErrors, originalArray);
+    }
+    if (kind === 'readonly') assert.strictEqual(primary.releaseErrors, originalArray);
+    assert.throws(() => acquireOpenCodeInstallLocks([a], holder.lease), /inactive/);
+  });
+}
+
+for (const [index, primary] of falsyThrownValues.entries()) {
+  test(`falsy first cleanup value ${index} is thrown after all remaining roots are attempted`, root => {
+    const roots = ['a', 'b', 'c'].map(name => path.join(root, name));
+    const [a, b, c] = roots;
+    const originalRename = fs.renameSync;
+    const secondary = new Error('second cleanup failure');
+    const attempts = [];
+    let lease;
+    let caught;
+    fs.renameSync = (from, to) => {
+      if (roots.some(candidate => lockPath(candidate) === from)) attempts.push(from);
+      if (from === lockPath(c)) throw primary;
+      if (from === lockPath(b)) throw secondary;
+      return originalRename(from, to);
+    };
+    try { caught = captureThrown(() => withOpenCodeInstallLocks(roots, active => { lease = active; return 'success'; })); }
+    finally { fs.renameSync = originalRename; }
+    assert.strictEqual(caught.didThrow, true);
+    assert.ok(Object.is(caught.value, primary));
+    assert.deepStrictEqual(attempts, [lockPath(c), lockPath(b), lockPath(a)]);
+    assert.strictEqual(fs.existsSync(lockPath(a)), false);
+    assert.ok(fs.existsSync(lockPath(b)) && fs.existsSync(lockPath(c)));
+    assert.throws(() => acquireOpenCodeInstallLocks([a], lease), /inactive/);
+  });
+}
+
+test('frozen acquisition failure survives rollback while replaced ownership is preserved', root => {
+  const roots = ['a', 'b', 'c'].map(name => path.join(root, name));
+  const [a, b, c] = roots;
+  const primary = Object.freeze(new Error('one-shot acquisition validation failure'));
+  const originalLink = fs.linkSync;
+  const originalStat = fs.lstatSync;
+  const originalRename = fs.renameSync;
+  let published = false;
+  let faults = 0;
+  let callbacks = 0;
+  const checked = [];
+  fs.linkSync = (from, to) => { originalLink(from, to); if (to === lockPath(c)) published = true; };
+  fs.lstatSync = (...args) => {
+    if (published && args[0] === c && faults === 0) {
+      faults++;
+      originalRename(lockPath(b), `${lockPath(b)}.owned`);
+      fs.writeFileSync(lockPath(b), 'replacement during rollback');
+      throw primary;
+    }
+    if (faults > 0 && roots.includes(args[0]) && args[1]?.bigint) checked.push(args[0]);
+    return originalStat(...args);
+  };
+  let caught;
+  try { caught = captureThrown(() => withOpenCodeInstallLocks(roots, () => { callbacks++; })); }
+  finally { fs.linkSync = originalLink; fs.lstatSync = originalStat; }
+  assert.strictEqual(caught.didThrow, true);
+  assert.strictEqual(caught.value, primary);
+  assert.strictEqual(faults, 1);
+  assert.strictEqual(callbacks, 0);
+  assert.deepStrictEqual(checked, [c, b, a]);
+  assert.strictEqual(fs.existsSync(lockPath(a)), false);
+  assert.strictEqual(fs.existsSync(lockPath(c)), false);
+  assert.strictEqual(fs.readFileSync(lockPath(b), 'utf8'), 'replacement during rollback');
+  assert.ok(fs.existsSync(`${lockPath(b)}.owned`));
+});
+
 console.log(`Results: Passed: ${passed}, Failed: ${failed}`);
 process.exitCode = failed ? 1 : 0;

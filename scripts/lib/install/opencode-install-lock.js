@@ -56,18 +56,31 @@ function assertOwnedLock(owned) {
   }
 }
 
+function annotateCleanupFailure(primary, property, value) {
+  try {
+    // Own data properties avoid invoking caller getters/setters. Frozen values,
+    // primitives and rejecting proxy traps simply retain no extra diagnostic.
+    Object.defineProperty(primary, property, { value, configurable: true, enumerable: true, writable: true });
+  } catch {
+    // Diagnostics must never replace the exact primary thrown value.
+  }
+}
+
 function releaseOwned(ownedLocks) {
-  let primaryError;
+  const failures = [];
   for (const owned of [...ownedLocks].reverse()) {
     try {
       assertOwnedLock(owned);
       owned.release();
     } catch (error) {
-      if (!primaryError) primaryError = error;
-      else (primaryError.releaseErrors ||= []).push(error);
+      failures.push(error);
     }
   }
-  if (primaryError) throw primaryError;
+  // Finish every safe release before touching any caller-owned error object.
+  if (failures.length > 0) {
+    if (failures.length > 1) annotateCleanupFailure(failures[0], 'releaseErrors', failures.slice(1));
+    throw failures[0];
+  }
 }
 
 function acquireOpenCodeInstallLocks(roots, existingLease) {
@@ -97,7 +110,7 @@ function acquireOpenCodeInstallLocks(roots, existingLease) {
     }
   } catch (error) {
     try { releaseOwned(ownedLocks); }
-    catch (releaseError) { error.releaseError = releaseError; }
+    catch (releaseError) { annotateCleanupFailure(error, 'releaseError', releaseError); }
     throw error;
   }
   const lease = Object.freeze({});
@@ -115,13 +128,17 @@ function acquireOpenCodeInstallLocks(roots, existingLease) {
 function withOpenCodeInstallLocks(roots, callback, existingLease) {
   if (typeof callback !== 'function') throw new TypeError('OpenCode install lock callback must be a function.');
   const holder = acquireOpenCodeInstallLocks(roots, existingLease);
+  let didThrow = false;
   let primaryError;
   let result;
   try { result = callback(holder.lease); }
-  catch (error) { primaryError = error; }
+  catch (error) { didThrow = true; primaryError = error; }
   try { holder.release(); }
-  catch (error) { if (primaryError) primaryError.releaseError = error; else primaryError = error; }
-  if (primaryError) throw primaryError;
+  catch (error) {
+    if (didThrow) annotateCleanupFailure(primaryError, 'releaseError', error);
+    else { didThrow = true; primaryError = error; }
+  }
+  if (didThrow) throw primaryError;
   return result;
 }
 
