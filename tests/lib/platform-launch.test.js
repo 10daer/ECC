@@ -21,36 +21,40 @@ test('openerCommandFor: unknown falls through to xdg-open', () => {
 });
 
 test('openBrowser: invalid url returns invalid-url without spawning', () => {
-  const r1 = openBrowser('');
-  assert.equal(r1.opened, false);
-  assert.equal(r1.reason, 'invalid-url');
-  const r2 = openBrowser(null);
-  assert.equal(r2.opened, false);
-  assert.equal(r2.reason, 'invalid-url');
+  let calls = 0;
+  const launch = () => { calls += 1; };
+  assert.deepEqual(openBrowser('', 'linux', launch), { opened: false, reason: 'invalid-url' });
+  assert.deepEqual(openBrowser(null, 'linux', launch), { opened: false, reason: 'invalid-url' });
+  assert.equal(calls, 0);
 });
 
-test('openBrowser: returns structured { opened, reason }', () => {
-  // Use a platform + URL that's syntactically valid. We can't easily assert
-  // whether the browser actually opens in CI, but the structure must match.
-  const r = openBrowser('http://localhost:0', 'linux');
-  assert.equal(typeof r.opened, 'boolean');
-  assert.equal(typeof r.reason, 'string');
-  assert.ok(r.reason.length > 0);
+test('openBrowser: reports synchronous launcher failures', () => {
+  const withCode = () => { throw Object.assign(new Error('missing launcher'), { code: 'ENOENT' }); };
+  const withoutCode = () => { throw new Error('launcher failed'); };
+  assert.deepEqual(openBrowser('http://localhost:0', 'linux', withCode), {
+    opened: false, reason: 'spawn-threw:ENOENT',
+  });
+  assert.deepEqual(openBrowser('http://localhost:0', 'linux', withoutCode), {
+    opened: false, reason: 'spawn-threw:unknown',
+  });
 });
 
 test('openBrowser: installs an error listener and detaches the launcher', () => {
   const handlers = new Map();
   let unrefCalls = 0;
+  let launchCalls = 0;
   const child = {
     on(event, listener) {
       handlers.set(event, listener);
     },
     unref() {
+      assert.equal(typeof handlers.get('error'), 'function', 'listen before detaching');
       unrefCalls += 1;
     },
   };
 
   const result = openBrowser('http://localhost:0', 'linux', (command, args, options) => {
+    launchCalls += 1;
     assert.equal(command, 'xdg-open');
     assert.deepEqual(args, ['http://localhost:0']);
     assert.deepEqual(options, { detached: true, stdio: 'ignore' });
@@ -58,7 +62,24 @@ test('openBrowser: installs an error listener and detaches the launcher', () => 
   });
 
   assert.deepEqual(result, { opened: true, reason: 'spawned' });
+  assert.equal(launchCalls, 1);
   assert.equal(unrefCalls, 1);
   assert.equal(typeof handlers.get('error'), 'function');
   assert.doesNotThrow(() => handlers.get('error')({ code: 'ENOENT' }));
+});
+
+test('openBrowser: a detach failure does not escape after the listener is installed', () => {
+  let listener;
+  const result = openBrowser('http://localhost:0', 'linux', () => ({
+    on(event, callback) {
+      assert.equal(event, 'error');
+      listener = callback;
+    },
+    unref() {
+      assert.equal(typeof listener, 'function');
+      throw new Error('cannot detach');
+    },
+  }));
+  assert.deepEqual(result, { opened: true, reason: 'spawned' });
+  assert.doesNotThrow(() => listener({ code: 'EACCES' }));
 });

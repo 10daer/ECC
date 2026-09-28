@@ -9,10 +9,11 @@
  * branch that silently no-op'd on Windows/Linux). This helper:
  *
  *   1. Dispatches `open` / `cmd /c start` / `xdg-open` based on process.platform
- *   2. Wires the child's 'error' event so ENOENT / EACCES propagate to the caller
- *      instead of being swallowed by detached spawns
- *   3. Returns a structured { opened, reason } result so CLI consumers can
- *      surface the truth (browser did/did not open) instead of a lying true/false
+ *   2. Handles the child's 'error' event so a missing launcher does not cause
+ *      an unhandled error after a detached spawn
+ *   3. Returns a structured { opened, reason } result for the launch request.
+ *      Later asynchronous errors cannot change the returned result; success
+ *      does not prove a browser opened.
  *
  * The signature is intentionally small (single function, no class) so callers
  * can import without picking up the rest of scripts/lib.
@@ -39,9 +40,8 @@ function openerCommandFor(platform, url) {
 /**
  * Open a URL in the user's default browser, dispatching per-platform.
  *
- * Always returns a structured result so callers can:
- *   - show a clear error to the agent (no silent failures)
- *   - keep JSON CLI output truthful when browsers cannot launch
+ * Returns the synchronous launch-request result. Asynchronous child errors
+ * are handled, but are not an acknowledgment that a browser opened.
  *
  * @param {string} url
  * @param {NodeJS.Platform} [platform] - injectable for tests; defaults to process.platform
