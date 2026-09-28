@@ -334,9 +334,72 @@ function readOpenCodeAliasForAttribution(plan, destinationPath) {
   }
 }
 
+// Finite, exact public ECC entrypoint history reachable from d3b8a3e908904e242ed2dbe66af62cca71131419.
+// Refusal evidence only: matching bytes never grant ownership or permission to
+// adopt, rewrite or delete an unrecorded file. Unknown modified/compiled variants
+// are not covered. No history lookup or plugin execution occurs at runtime.
+const LEGACY_OPENCODE_PLUGIN_DIGESTS = Object.freeze([
+  // a0600a00fbe3a193a44584ad55800ce82cec62af:.opencode/plugins/index.ts (blob 3a98f0ba6510d436cc9cf3e2161f8f69771d968a)
+  '7dd2d255da5d4344eb38ca93cf1765e425b0c01943f6e45428614662ebee0d4b',
+  // a0600a00fbe3a193a44584ad55800ce82cec62af:.opencode/plugins/ecc-hooks.ts (blob bf06c03f8ff6bdd835c5266921758a6db85152bf)
+  '5db9b59434af0d5971538f0176779733b8146d7a71fbd9055ae0183c26754068',
+  // 91ba9b4cf6c47c8130829004f8bb64762a76ccbb:.opencode/plugins/ecc-hooks.ts (blob 4aabde61203d4473e04d5a10803b0560b8c596e4)
+  'c683b9321d8b5fbc6889b1740f4583c4f94c84554ee97e2072f61de45c661bda',
+  // 1a8beb71c5282ddfe77c72ab0290961a820e3d89:.opencode/plugins/ecc-hooks.ts (blob 69b59727e552991a79c196aab8ec128173329d9a)
+  '1e890ce162325c9d7c579b0716383b6c297179edb78084c4b59cc8bf766ceb71',
+  // e65f12bf7ea474a6f5ac96991a251673f474b445:.opencode/plugins/index.ts (blob c1e17a1595403080490fcec6820c1485bb6afba9)
+  '965c5fac76ce0c3ceb3836814f5eb9ede8c9db50373a508c734f949cb321a21a',
+  // e65f12bf7ea474a6f5ac96991a251673f474b445:.opencode/plugins/ecc-hooks.ts (blob 54881ad868c276ff0d50cc83d8ae938464ad02da)
+  '5c043b84693a654fffe4b407e87411b28c9af8b92f5ef49a03caab7b27f03102',
+  // 2cdc218c45a81ce46035832b13bf68d91137301e:.opencode/plugins/ecc-hooks.ts (blob d496e61a538131ff6f33b2e6d941544e3d94c5d8)
+  '73692e599d271bbb9b7aac59f97e193518af2b5db3a3505af0376c8d8657220a',
+  // 5929d246946eeb5d147612ba06d60c575c5a4e21:.opencode/plugins/ecc-hooks.ts (blob 472f80f5ae9500fa9a0a7885b6ce4dc4b409d3d6)
+  'd7a410380ed2e0bcb613110b2810221d03a8944e50766bc7a4db2eb1b44446b6',
+  // ca185ef5f7667078a1e70a763bd3a9c71c48acf0:.opencode/plugins/ecc-hooks.ts (blob 22b1132f0964bd4ba5c1a4ad1bafa605de99eb6a)
+  '0345093b34e537d350c5b5aa0296511f558aa767e5104fb5ef05069013f3b5b6',
+  // 28e53a0bc10e286f68b53bb1e3b3f049021e57b9:.opencode/plugins/ecc-hooks.ts (blob 47265c0ebd031168d8e3a18f30036864338cd22c)
+  'e20ecd53714b1fd55baeff796c6f4538ebd4bae71ca1e791b2b8e29575061846',
+  // 591ab5cbd3f2f65860ea91c226e410b1502c8e2e:.opencode/plugins/ecc-hooks.ts (blob 49124c255003eb5517178a8ecad7dd453303df33)
+  'b9c22c76ae2464c9410963579ee5ff49003e4d79e32b69c228539ae7b15f5104',
+  // 6f452d48d258b39f4f6e1171b7ca18c6f7f61ad5:.opencode/plugins/ecc-hooks.ts (blob 6336081e97c4345f02adfdc0b9ad9e27dccdec04)
+  'c7122565cf97b896cc3da9009bf06daca7513b3e9ba7448c26b8872591dbf3f7',
+  // 3a08b0c7a85bda69ee9922a103e077a04d538150:.opencode/plugins/ecc-hooks.ts (blob bad6a4cecf2270a7d8a919daeb6541c94a810c48)
+  'e438603c13206365068b400063df0af98bd587842b80f09b97fe57f7ddef56e0',
+  // 29edd57708bee26f16363c16a28fec7f6b09f53f:.opencode/plugins/ecc-hooks.ts (blob 05792ce9ae86a785b746bdb843572e4b5bc93130)
+  '6a9063b2f67334a78d269d53f95679c33d6d126260f8e5fc7cc941fea9b903e8',
+  // 8141f6904f14fa8a83131e1cb5b6507d687e25bb:.opencode/plugins/ecc-hooks.ts (blob 606bcb7c59aa5e459d2093ffb9cf9208d1184c30)
+  'a198b640fd1faf1c75e96909eabf4ae24899de127b2447490eed813766013836',
+  // 6d613f67dd24189a8bb7fb1a2f5e535957f46a58:.opencode/plugins/index.ts (blob ca58596901d816147ac4eff525f1a885d36bd094)
+  'e89aaa309b7a0578bb69af4a2425744fcf14c2556cd34a1036bbcba448a0b517',
+  // 6d613f67dd24189a8bb7fb1a2f5e535957f46a58:.opencode/plugins/ecc-hooks.ts (blob 31cfa8ac31ac3cbc5c51b4b275017ef18b8f9033)
+  'd66a43e43ef9669589de593e8f94e750ee11d3c75cb5fe79e81636ef738c3e45',
+  // affbd334858368518c5baf5f84f74034dea1ea6f:.opencode/plugins/ecc-hooks.ts (blob ff8628b5fd47181cbee54367dc4e32e5392cde1a)
+  '4874a12639fd58da59a54fe5b2461c0ddd2eeca6770111615caa402ff0e95693',
+  // 0a87323eda77ee412fa3a3bf028a577536966505:.opencode/plugins/ecc-hooks.ts (blob fa96b805685e3c3e6f86535debca5ab8a5bea1ef)
+  '4e2330f340e074208cd323c1a833667032ce8db4febc4eaeda354bc49cb58bc4',
+  // a0a1eda8fc4828e58dc8aabcec4e25f9ef038a0a:.opencode/plugins/ecc-hooks.ts (blob 51bde010b4d426676b52ffc9567b1da80f4ca510)
+  'ca9abadee5d072121677168752fb4f3b16ce9fc7eb55a3c9c7f517377e0bf69b',
+  // 05acc275307a09eea89080619a35d7dbd20b128b:.opencode/plugins/ecc-hooks.ts (blob 9e4ab3fcd50f6610cfdfa5a7d0d71c2374f65745)
+  '96998990d6aac0b9535ab6ab60a0be1c284ffcca7e4ba04f1cfa0e67409a8146',
+  // a2b3cc1600e9cab58147ef01c03f9889b5a8cc86:.opencode/plugins/ecc-hooks.ts (blob 58a209283f70efe1dbfef5d78b4d72764c67f027)
+  '0697bfed6e6ad887443a32810e83adb5316d2c9c0490b98f9fcb6ea52bea84e3',
+  // 0c7deb26a344db095c04a213eba5634d4ccce030:.opencode/plugins/ecc-hooks.ts (blob 9193bb412920a1f1d5af98fda0a66d1e3295f46f)
+  'd666a94e9d0ccbcfdeffd59b624938cd44706571eec3771974c57fdbe28577c1',
+  // 48b883d7412914b04c8b185d9a82685b105d1734:.opencode/plugins/ecc-hooks.ts (blob 3053314750a61dbcdb06a9cca39492304457f582)
+  '16fe21ca801a613a0ae2fc1f8dd5c8474138dc31c75ea35cd8695884397f1f15',
+  // d70bab85e33af7a03b78c70dba7a7ce3b01d1b17:.opencode/plugins/ecc-hooks.ts (blob 1f158d7999f5f100e386587a94a90a08d512e278)
+  '0354270a5fc26809d0795ecc7eef1dee91de4905d58f26d5828d43af24767b96',
+  // 0e9f613fd196f6d4157765b17d39c2c42ebbf564:.opencode/plugins/ecc-hooks.ts (blob 50d23bfde3607832446fda26b25a3ed3e527e5d1)
+  '513190b6c935dac472efd11818b20d7f2479ec1f7be06ef7f4d241c2493ad9e3',
+  // 6d440c036df2c1b2fec957627d1202c3708e0627:.opencode/plugins/index.ts (blob d19a91f1a686d6ed060d08eddeb5aa05a4be6b75)
+  'e42c733adb177f84cea813663aa34c7868dbaa98c96950d0ef91cd211b8aa169',
+  // 6d440c036df2c1b2fec957627d1202c3708e0627:.opencode/plugins/ecc-hooks.ts (blob b64ffae7ce10cab9e5ed9b04cec23d62db9036e7)
+  '503ea491cbeadff5bf59b936a75bff65caaf1d71e47a953a9b9b790be780efef',
+]);
+
 function knownOpenCodePluginDigests(plan) {
-  const digests = new Set();
-  if (typeof plan.sourceRoot !== 'string' || !path.isAbsolute(plan.sourceRoot)) return digests;
+  if (typeof plan.sourceRoot !== 'string' || !path.isAbsolute(plan.sourceRoot)) return new Set();
+  const digests = new Set(LEGACY_OPENCODE_PLUGIN_DIGESTS);
   const sourcePlan = { ...plan, targetRoot: plan.sourceRoot };
   for (const directory of ['.opencode/plugins', '.opencode/dist/plugins']) {
     for (const name of ['ecc-hooks', 'index']) {

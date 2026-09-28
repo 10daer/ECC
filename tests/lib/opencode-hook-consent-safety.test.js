@@ -13,6 +13,47 @@ const { buildDoctorReport, repairInstalledStates } = require('../../scripts/lib/
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
 
+// Authentic public ECC source fixtures, kept as inert bytes (never imported).
+// Copying these bytes to an alias does not claim they were published build output.
+const legacyPluginFixtures = [
+  {
+    name: "2.2.1 barrel",
+    // https://github.com/affaan-m/ECC/blob/ca185ef5f7667078a1e70a763bd3a9c71c48acf0/.opencode/plugins/index.ts
+    sha256: '965c5fac76ce0c3ceb3836814f5eb9ede8c9db50373a508c734f949cb321a21a',
+    content: `/**
+ * ECC Plugins for OpenCode
+ *
+ * This module exports all ECC plugins for OpenCode integration.
+ * Plugins provide hook-based automation that mirrors Claude Code's hook system
+ * while taking advantage of OpenCode's more sophisticated 20+ event types.
+ */
+
+export { ECCHooksPlugin, default } from "./ecc-hooks.js"
+
+// Re-export for named imports
+export * from "./ecc-hooks.js"
+`,
+  },
+  {
+    name: "early barrel",
+    // https://github.com/affaan-m/ECC/blob/6d440c036df2c1b2fec957627d1202c3708e0627/.opencode/plugins/index.ts
+    sha256: 'e42c733adb177f84cea813663aa34c7868dbaa98c96950d0ef91cd211b8aa169',
+    content: `/**
+ * Everything Claude Code (ECC) Plugins for OpenCode
+ *
+ * This module exports all ECC plugins for OpenCode integration.
+ * Plugins provide hook-based automation that mirrors Claude Code's hook system
+ * while taking advantage of OpenCode's more sophisticated 20+ event types.
+ */
+
+export { ECCHooksPlugin, default } from "./ecc-hooks"
+
+// Re-export for named imports
+export * from "./ecc-hooks"
+`,
+  },
+];
+
 function fixture(callback, enabled = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-opencode-write-')));
   const homeDir = path.join(root, 'home');
@@ -257,6 +298,72 @@ function runTests() {
       const { lastValidatedAt: _afterValidation, ...afterState } = readInstallState(value.installStatePath);
       assert.deepStrictEqual(afterState, priorState, 'Only the legitimate validation timestamp may change');
       assert.ok(!afterState.operations.some(operation => operation.destinationPath === destination), 'Do not adopt a user plugin');
+    }));
+  }
+  for (const legacy of legacyPluginFixtures) {
+    for (const consent of [null, 'declined']) {
+      test(`fresh ${consent || 'default'} apply refuses the unrecorded historical ${legacy.name}`, () => fixture(value => {
+        assert.strictEqual(sha256(legacy.content), legacy.sha256, 'Preserve exact public-source fixture bytes');
+        assert.notStrictEqual(sha256(fs.readFileSync(path.join(value.sourceRoot, '.opencode/plugins/ecc-hooks.ts'))), legacy.sha256);
+        assert.notStrictEqual(sha256(fs.readFileSync(path.join(REPO_ROOT, '.opencode/plugins/index.ts'))), legacy.sha256);
+        fs.unlinkSync(value.installStatePath);
+        for (const operation of value.basePlan.operations) fs.unlinkSync(operation.destinationPath);
+        const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+        assert.ok(!value.basePlan.operations.some(operation => operation.destinationPath === alias));
+        fs.writeFileSync(alias, legacy.content);
+        assert.throws(() => applyInstallPlan(withHookConsent(value.basePlan, consent)), /Refusing OpenCode hook deactivation/);
+        assert.strictEqual(fs.readFileSync(alias, 'utf8'), legacy.content);
+        assert.strictEqual(fs.existsSync(value.installStatePath), false, 'Do not adopt an unrecorded historical alias');
+        for (const operation of value.basePlan.operations) assert.strictEqual(fs.existsSync(operation.destinationPath), false);
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      }));
+    }
+    for (const mode of ['doctor', 'repair']) {
+      test(`${mode} refuses the unrecorded historical ${legacy.name} without changing ownership`, () => fixture(value => {
+        applyInstallPlan(value.declinePlan);
+        const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+        fs.writeFileSync(alias, legacy.content);
+        const before = fs.readFileSync(value.installStatePath);
+        const operationsBefore = value.basePlan.operations.map(operation => fs.readFileSync(operation.destinationPath));
+        assert.ok(!readInstallState(value.installStatePath).operations.some(operation => operation.destinationPath === alias));
+        if (mode === 'doctor') {
+          const result = buildDoctorReport({ repoRoot: value.sourceRoot, homeDir: value.homeDir,
+            projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+          const issue = result.issues.find(entry => entry.code === 'opencode-hook-consent-violation');
+          assert.ok(issue, JSON.stringify(result.issues));
+          assert.match(issue.message, /OpenCode hook activation remains active/);
+        } else {
+          const result = repair(value).results[0];
+          assert.strictEqual(result.status, 'error');
+          assert.match(result.error, /Refusing OpenCode hook deactivation/);
+          assert.notStrictEqual(result.stateRefreshed, true);
+        }
+        assert.strictEqual(fs.readFileSync(alias, 'utf8'), legacy.content);
+        assert.deepStrictEqual(fs.readFileSync(value.installStatePath), before);
+        assert.deepStrictEqual(value.basePlan.operations.map(operation => fs.readFileSync(operation.destinationPath)), operationsBefore);
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      }));
+    }
+  }
+  for (const mode of ['apply', 'repair']) {
+    test(`${mode} refuses a historical alias inserted after preflight before state refresh`, () => fixture(value => {
+      const destination = path.join(value.targetRoot, 'plugins', 'ecc-hooks.ts');
+      const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+      const content = legacyPluginFixtures[0].content;
+      withWritableOpenMutation(destination, () => fs.writeFileSync(alias, content), () => {
+        if (mode === 'apply') assert.throws(() => applyInstallPlan(value.declinePlan), /OpenCode hook activation remains active/);
+        else {
+          const result = repair(value).results[0];
+          assert.strictEqual(result.status, 'error');
+          assert.match(result.error, /OpenCode hook activation remains active/);
+          assert.notStrictEqual(result.stateRefreshed, true);
+        }
+        assert.strictEqual(fs.readFileSync(alias, 'utf8'), content);
+        const state = readInstallState(value.installStatePath);
+        assert.ok(!state.operations.some(operation => operation.destinationPath === alias));
+        assert.strictEqual(state.request.hookConsent, value.state.request.hookConsent);
+        assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
+      });
     }));
   }
   for (const artifact of ['source', 'build']) {
