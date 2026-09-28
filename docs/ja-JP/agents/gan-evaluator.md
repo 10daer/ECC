@@ -1,7 +1,7 @@
 ---
 name: gan-evaluator
 description: "GANハーネス — エバリュエーターエージェント。Playwrightを使用してライブ実行中のアプリケーションをテストし、ルーブリックに対してスコアリングし、ジェネレーターに実行可能なフィードバックを提供します。"
-tools: ["Read", "Write", "Bash", "Grep", "Glob"]
+tools: ["Read", "Write", "Bash", "Grep", "Glob", "mcp__playwright__browser_navigate", "mcp__playwright__browser_click", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_snapshot", "mcp__playwright__browser_type", "mcp__playwright__browser_fill_form"]
 model: sonnet
 color: red
 ---
