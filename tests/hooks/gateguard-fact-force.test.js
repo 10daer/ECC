@@ -155,6 +155,342 @@ function loadDirectHook(env = {}) {
   return require(hookScript);
 }
 
+
+// Fast, pure classification matrix. These strings are input data, never shell commands.
+function runDdRegressionTests() {
+  const environment = {
+    GATEGUARD_STATE_DIR: stateDir,
+    CLAUDE_SESSION_ID: TEST_SESSION_ID,
+    GATEGUARD_DISABLED: '',
+    ECC_GATEGUARD: 'on',
+    GATEGUARD_BASH_EXTRA_DESTRUCTIVE: '',
+    GATEGUARD_BASH_ROUTINE_DISABLED: '1',
+    GATEGUARD_EXEMPT_GLOBS: '',
+    ECC_HOOKS_ENABLED: 'true',
+    ECC_HOOK_PROFILE: 'standard',
+    ECC_DISABLED_HOOKS: '',
+    ECC_DRY_RUN: '0',
+    ECC_HOOK_CONFIG: path.join(stateDir, 'no-managed-config.json'),
+    CLAUDE_PLUGIN_ROOT: path.resolve(__dirname, '../..'),
+    ECC_PLUGIN_ROOT: path.resolve(__dirname, '../..')
+  };
+  const original = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]));
+  Object.assign(process.env, environment);
+  let hook;
+  let passed = 0;
+  let failed = 0;
+  const check = (name, fn) => {
+    if (test(name, fn)) passed++;
+    else failed++;
+  };
+  const destructive = [
+    'dd if=/dev/zero of=/dev/sda',
+    'dd of=/dev/sda bs=1M',
+    'cat /dev/zero | dd of=/dev/sda',
+    'sudo dd of=/dev/sda < /dev/zero',
+    'dd bs=1M of="./output"',
+    "timeout 60 bash -c 'dd if=/dev/zero of=/dev/sda'",
+    "nohup sh -c 'dd if=input'",
+    "nice -n 5 sh -c 'dd if=input'",
+    "xargs sh -c 'dd if=input'",
+    "timeout 2 sh -c 'dd of=output'",
+    "nohup sh -c 'echo $(dd of=output)'",
+    "nice -n 5 sh -c 'cat <<EOF\n$(dd of=output)\nEOF'",
+    'find . -exec dd of=output \\;',
+    'dd if=./image of=./out',
+    'dd of=./out bs=1M if="./image"',
+    "'/bin/dd' if=input of=output",
+    'sudo -u root dd if=input',
+    'command dd if=input of=output',
+    'xargs dd if=input of=output',
+    'xargs -- dd if=input',
+    'xargs -0 -I{} dd if=input',
+    'xargs -n 2 -P4 dd if=input',
+    'xargs -a input --delimiter=, dd if=input',
+    'xargs --max-args 2 dd if=input',
+    'xargs -e dd if=input',
+    'xargs -i dd if=input',
+    'xargs --replace dd if=input',
+    'xargs -J{} dd if=input',
+    'timeout 2 dd if=input of=output',
+    'timeout -k 1 -s TERM 2s dd if=input',
+    'timeout --kill-after=1 --signal=TERM --foreground 2 dd if=input',
+    'timeout -- 2 dd if=input',
+    'nice dd if=input of=output',
+    'nice -n 5 dd if=input',
+    'nice --adjustment=-5 dd if=input',
+    'nice -5 dd if=input',
+    'nice --5 dd if=input',
+    'nohup dd if=input of=output',
+    'nohup -- dd if=input',
+    'command nice -n 2 timeout 3 env A=1 dd if=input',
+    'command -p dd if=input',
+    'command -- dd if=input',
+    'exec dd if=input of=output',
+    'exec -a ddname dd if=input',
+    'exec -addname dd if=input',
+    'exec -cl dd if=input',
+    'exec -- dd if=input',
+    'A=1 command -p exec -a ddname dd if=input',
+    'sudo --user=root dd if=input',
+    'sudo -uroot dd if=input',
+    'sudo -nu root dd if=input',
+    'sudo -nuroot dd if=input',
+    'doas -nu root dd if=input',
+    'sudo -g staff dd if=input',
+    'sudo --group staff dd if=input',
+    'sudo -C 3 dd if=input',
+    'sudo -D /tmp dd if=input',
+    'sudo -- dd if=input',
+    'doas -u root dd if=input',
+    'doas -C /tmp/doas.conf dd if=input',
+    'env -u FOO dd if=input',
+    'env -uFOO dd if=input',
+    'env -C /tmp dd if=input',
+    'env -C/tmp dd if=input',
+    'env --argv0 ddname dd if=input',
+    'env -a ddname dd if=input',
+    'env -addname dd if=input',
+    'env --unset=FOO --chdir=/tmp --argv0=ddname dd if=input',
+    'A=1 env B=2 sudo -u root dd if=input',
+    'sudo A=1 dd if=input',
+    "env -S 'dd if=input of=output'",
+    "env --split-string='dd if=input'",
+    'env -Sdd if=input',
+    "env -iS 'dd if=input'",
+    'env -iuFOO dd if=input',
+    "env -S 'sudo -u root dd' if=input",
+    "env -S 'sh -c \"dd if=input\"'",
+    "env -S 'env -S \"dd if=input\"'",
+    "env -S 'dd\\_if=input'",
+    "env -S 'dd if=input # trailing comment'",
+    String.raw`env -S 'dd "if=input\_file"'`,
+    String.raw`env -S 'dd "if=input\"quote"'`,
+    'echo $(dd if=input of=output)',
+    'echo "$(dd if=./input)"',
+    'echo `dd if=input`',
+    '(dd if=input)',
+    '{ dd if=input; }',
+    'echo $({ (dd if=input); })',
+    "sh -c 'echo $(dd if=input)'",
+    "sh -c 'echo `dd if=input`'",
+    "sh -c '(dd if=input)'",
+    "sh -c 'cat <<EOF\n$(dd if=input)\nEOF'",
+    "sh -c 'sh <<EOF\ndd if=input\nEOF'",
+    'find . -exec dd if=input of=output \\;',
+    'printf note; find . -exec dd if=input \\;',
+    'echo "note; passive text"; find . -exec dd if=input \\;',
+    "sh -c 'printf note; find . -exec dd if=input \\;'",
+    'find . -exec sudo -u root dd if=input \\;',
+    'find . -exec echo {} \\; -exec dd if=input of=output \\;',
+    'find . -exec echo {} + -exec dd if=input \\;',
+    'find . -exec echo + -exec dd if=argument \\; -exec dd if=actual \\;',
+    'find . -execdir dd if=input \\;',
+    'find . -ok dd if=input \\;',
+    'find . -okdir dd if=input \\;',
+    'find . -name -exec -exec dd if=input \\;',
+    "find . -printf '-exec' -exec dd if=input \\;",
+    "find . -fprintf '-exec' '-exec' -exec dd if=input \\;",
+    ['cat <<EOF', '$(dd if=input)', 'EOF'].join('\n'),
+    ['sh <<EOF', 'dd if=input', 'EOF'].join('\n'),
+    ["cat <<'EOF'", 'dd if=input', 'EOF', 'dd if=after'].join('\n'),
+    'sudo -u postgres psql -c "drop table users"',
+    "env -S 'sudo -u postgres psql' -c 'drop table users'",
+    "sh -c 'psql -c \"drop table users\"'",
+    'git push --force origin main',
+    'git push --force-with-lease origin main',
+    `${'env '.repeat(40)}dd if=input`,
+    'git reset --hard',
+    'git stash clear',
+    'git restore tracked.txt',
+    "find . -exec 'rm' {} \\;"
+  ];
+  const passive = [
+    'echo dd if=input',
+    'echo dd of=/dev/sda',
+    'grep dd of=output file',
+    "printf '%s' 'dd of=output'",
+    'dd count=0',
+    "timeout 2 echo 'sh -c dd of=output'",
+    "timeout 2 sh -c 'echo \"dd of=output\"'",
+    "nohup sh -c 'cat <<EOF\ndd of=output\nEOF'",
+    "nice -n 5 echo 'dd of=output'",
+    "xargs echo 'sh -c dd of=output'",
+    'echo "note; find . -exec dd of=output \\;"',
+    'command -v dd',
+    'command -v dd if=input',
+    'command -V dd if=input',
+    'command -V dd',
+    'command -pv dd',
+    'command -pV dd if=input',
+    'command echo dd if=input',
+    'xargs echo dd if=input',
+    'xargs -I dd echo if=input',
+    'xargs -d dd echo if=input',
+    'xargs --arg-file dd echo if=input',
+    'xargs -edd echo if=input',
+    'xargs --replace=dd echo if=input',
+    'xargs --help dd if=input',
+    'timeout 2 echo dd if=input',
+    'timeout -s dd 2 echo if=input',
+    'timeout --help dd if=input',
+    'nice -n 2 echo dd if=input',
+    'nice --version dd if=input',
+    'nohup echo dd if=input',
+    'nohup --help dd if=input',
+    'xargs command dd if=input',
+    'timeout 2 command dd if=input',
+    'exec -a dd echo if=input',
+    'exec -add echo if=input',
+    'exec echo dd if=input',
+    'command A=1 dd if=input',
+    "echo 'command dd if=input'",
+    "echo 'exec dd if=input'",
+    'sudo command dd if=input',
+    'env command dd if=input',
+    'exec command dd if=input',
+    'grep dd if=/dev/zero file',
+    "printf '%s' 'dd if=input'",
+    'echo add if=1',
+    'echo truncated',
+    'sudo -u dd echo if=input',
+    'sudo --user=dd echo if=input',
+    'sudo -udd echo if=input',
+    'sudo -nu dd echo if=input',
+    'doas -nu dd echo if=input',
+    'env -iu dd echo if=input',
+    'doas -u dd echo if=input',
+    'env -u dd echo if=input',
+    'env -C dd echo if=input',
+    'env --argv0 dd echo if=input',
+    'env -a dd echo if=input',
+    'env -- -u dd if=input',
+    'A=dd echo if=input',
+    'echo sudo -u root dd if=input',
+    "env -S 'echo dd if=input'",
+    String.raw`env -S 'echo "dd if=input\"quote"'`,
+    "env -S 'echo ok; dd if=input'",
+    "env -S 'echo ok | dd if=input'",
+    "env -S 'echo ok & dd if=input'",
+    "env -S 'echo $(dd if=input)'",
+    "env -S 'echo `dd if=input`'",
+    "env -S 'echo # dd if=input'",
+    "env -S 'echo\\c dd if=input'",
+    "env -S 'echo \\$(dd if=input)'",
+    "echo 'env -S dd if=input'",
+    "env -S ''",
+    'env -S',
+    "env -S '\"dd if=input'",
+    "env -S 'dd if=input\\q'",
+    "env -S '${UNREAD_HOST_COMMAND} if=input'",
+    "echo '$(dd if=input)'",
+    "echo '`dd if=input`'",
+    "echo '(dd if=input)'",
+    "echo '{ dd if=input; }'",
+    "sh -c 'echo \"dd if=input\"'",
+    "sh -c 'cat <<EOF\ndd if=input\nEOF'",
+    ["cat <<'EOF'", 'dd if=input; $(dd if=input)', 'EOF'].join('\n'),
+    ['cat <<EOF', 'dd if=input', 'EOF'].join('\n'),
+    ['cat <<EOF', '\\$(dd if=input)', 'EOF'].join('\n'),
+    'psql -c "SELECT \'drop table\' FROM audit_log"',
+    'echo "drop table users"',
+    'git commit -m "drop table users"',
+    'git push --force-with-lease origin feature-branch',
+    'echo "note; find . -exec dd if=input \\;"',
+    "printf '%s' 'note; find . -exec dd if=input \\;'",
+    'echo "note | find . -exec dd if=input \\;"',
+    'echo "note & find . -exec dd if=input \\;"',
+    "find . -name 'x -exec dd if=input' -print",
+    'find . -exec echo -exec dd if=input \\;',
+    'find . -exec echo + -exec dd if=input \\;',
+    "find . -exec echo '-exec dd if=input' \\;",
+    'find . -execdir echo dd if=input \\;',
+    'find . -ok echo -exec dd if=input \\;',
+    'find . -okdir echo dd if=input \\;',
+    'find . -exec command dd if=input \\;',
+    'git status',
+    'git diff --stat',
+    'git restore --staged tracked.txt'
+  ];
+  try {
+    hook = loadDirectHook();
+    for (const command of destructive) {
+      check(`dd/preservation destructive: ${JSON.stringify(command)}`, () => {
+        assert.deepStrictEqual(hook.classifyDestructiveCommand('Bash', command), [
+          'gateguard.bash-compatible-destructive'
+        ]);
+      });
+    }
+    for (const command of passive) {
+      check(`dd/preservation passive: ${JSON.stringify(command)}`, () => {
+        assert.deepStrictEqual(hook.classifyDestructiveCommand('Bash', command), []);
+      });
+    }
+    for (const [command, denied] of [
+      ['sudo -u root dd if=input', true],
+      ["sh -c 'echo $(dd if=input)'", true],
+      ['sudo -u dd echo if=input', false],
+      ["env -S 'echo ok; dd if=input'", false],
+      ['find . -exec echo {} \\; -exec dd if=input \\;', true],
+      ['command -pv dd', false],
+      ["timeout 2 sh -c 'dd if=input'", true],
+      ['cat /dev/zero | dd of=/dev/sda', true]
+    ]) {
+      check(`dd hook-input contract: ${command}`, () => {
+        fs.rmSync(stateDir, { recursive: true, force: true });
+        fs.mkdirSync(stateDir, { recursive: true });
+        const input = { tool_name: 'Bash', tool_input: { command } };
+        const result = spawnSync(process.execPath, [runner, 'pre:bash:gateguard-fact-force',
+          'scripts/hooks/gateguard-fact-force.js', 'standard,strict'], {
+          input: JSON.stringify(input), encoding: 'utf8', timeout: 3000,
+          env: { ...process.env, ...environment }, stdio: ['pipe', 'pipe', 'pipe']
+        });
+        assert.ifError(result.error);
+        assert.strictEqual(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout);
+        if (denied) {
+          assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny');
+          assert.match(output.hookSpecificOutput.permissionDecisionReason, /Destructive/);
+        } else {
+          assert.deepStrictEqual(output, input, 'allow must be actual JSON pass-through, not silence');
+        }
+      });
+    }
+    check('main batch warning and invisible-path sanitizer stay intact', () => {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+      fs.mkdirSync(stateDir, { recursive: true });
+      const result = hook.run({ tool_name: 'Write', tool_input: { file_path: '/src/a\u0091b\u200bc.js' } });
+      assert.strictEqual(result.exitCode, 0);
+      const output = JSON.parse(result.stdout).hookSpecificOutput;
+      assert.strictEqual(output.permissionDecision, 'deny');
+      assert.match(output.permissionDecisionReason, /parallel batch/);
+      assert.ok(!output.permissionDecisionReason.includes('\u0091'));
+      assert.ok(!output.permissionDecisionReason.includes('\u200b'));
+      assert.match(output.permissionDecisionReason, /c\.js/);
+    });
+    check('disabled hook remains silent through the routing wrapper', () => {
+      const result = spawnSync(process.execPath, [runner, 'pre:bash:gateguard-fact-force',
+        'scripts/hooks/gateguard-fact-force.js', 'standard,strict'], {
+        input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'dd if=input' } }),
+        encoding: 'utf8', timeout: 3000,
+        env: { ...process.env, ...environment, ECC_DISABLED_HOOKS: 'pre:bash:gateguard-fact-force' },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      assert.ifError(result.error);
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.strictEqual(result.stdout, '');
+    });
+    return { passed, failed };
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true });
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    delete require.cache[require.resolve(hookScript)];
+  }
+}
+
 function runTests() {
   console.log('\n=== Testing gateguard-fact-force ===\n');
 
@@ -280,6 +616,91 @@ function runTests() {
   )
     passed++;
   else failed++;
+
+  // --- Test 4b: dd targets that do not start with a word character ---
+  /**
+   * #2642: DESTRUCTIVE_SQL_DD carried one trailing \b across every alternation
+   * arm. `dd\s+if=` ends in `=`, so that \b demanded the NEXT character be a
+   * word character: `dd if=x` was denied while the disk-wipe spelling
+   * `dd if=/dev/zero of=/dev/sda` and the relative `dd if=./img` were allowed.
+   * These run through the real hook, since the report is specifically that the
+   * published hook lets the slash-prefixed form through.
+   */
+  for (const command of [
+    'dd if=/dev/zero of=/dev/sda',
+    'dd if=./disk.img of=/dev/sdb',
+    'dd if="/dev/zero" of=/dev/sda',
+    // Wrapped invocations must still resolve to the dd command word.
+    'sudo dd if=/dev/zero of=/dev/sda',
+    // dd operands are order-free; a text pattern anchored on `dd if=` missed
+    // both the reversed and the intervening-option spellings.
+    'dd of=/dev/sda if=/dev/zero',
+    'dd bs=1M if=/dev/zero of=/dev/sda'
+  ]) {
+    clearState();
+    if (
+      test(`denies dd whose input path is not word-initial: ${command}`, () => {
+        const result = runBashHook({ tool_name: 'Bash', tool_input: { command } });
+        assert.strictEqual(result.code, 0, `hook should exit successfully for ${command}`);
+        const output = parseOutput(result.stdout);
+        assert.ok(output, 'hook should produce JSON output');
+        assert.ok(output.hookSpecificOutput, 'hook should return a permission decision');
+        assert.strictEqual(
+          output.hookSpecificOutput.permissionDecision,
+          'deny',
+          `${command} must be gated as destructive`
+        );
+        assert.ok(output.hookSpecificOutput.permissionDecisionReason.includes('Destructive'));
+      })
+    )
+      passed++;
+    else failed++;
+  }
+
+  // --- Test 4c: widening the dd arm must not gate ordinary commands ---
+  /**
+   * SQL keywords retain their word boundaries; dd is checked only at command
+   * position. `truncated`, `add if=` and prose mentioning dd stay passive.
+   */
+  for (const command of [
+    'echo add if=1',
+    'echo truncated output',
+    'git status',
+    // `dd if=` as another command's argument runs no dd at all. The old text
+    // match gated these; the command-word check is what keeps them out.
+    'echo dd if=/dev/zero',
+    'grep dd if=/dev/zero file',
+    'echo dd if=x'
+  ]) {
+    clearState();
+    if (
+      test(`does not gate as destructive: ${command}`, () => {
+        // Prime the session so the separate first-command routine gate cannot
+        // be mistaken for a destructive denial.
+        runBashHook({ tool_name: 'Bash', tool_input: { command: 'printf ready' } });
+        const result = runBashHook({ tool_name: 'Bash', tool_input: { command } });
+        // Assert the hook actually answered before reading the decision: a
+        // crashed or silent hook makes parseOutput return null, and a bare
+        // `if (output)` would let this case pass without testing anything.
+        assert.strictEqual(result.code, 0, `hook should exit 0 for ${command}`);
+        const output = parseOutput(result.stdout);
+        assert.ok(output, `hook should produce JSON output for ${command}`);
+        const decision = output.hookSpecificOutput;
+        if (decision) {
+          const reason = decision.permissionDecisionReason || '';
+          assert.ok(
+            decision.permissionDecision !== 'deny' || !reason.includes('Destructive'),
+            `${command} must not be gated as destructive`
+          );
+        } else {
+          // Pass-through echoes the input back unchanged.
+          assert.strictEqual(output.tool_name, 'Bash', 'pass-through should preserve input');
+        }
+      })
+    )
+      passed++;
+    else failed++;
+  }
 
   // --- Test 5: denies first routine Bash, allows second ---
   clearState();
@@ -3397,8 +3818,17 @@ function runTests() {
     failed++;
   }
 
+  const ddResults = runDdRegressionTests();
+  passed += ddResults.passed;
+  failed += ddResults.failed;
   console.log(`\n  ${passed} passed, ${failed} failed\n`);
   process.exit(failed > 0 ? 1 : 0);
 }
 
-runTests();
+if (process.argv.includes('--dd-only')) {
+  const { passed, failed } = runDdRegressionTests();
+  console.log(`\n  ${passed} passed, ${failed} failed\n`);
+  process.exitCode = failed > 0 ? 1 : 0;
+} else {
+  runTests();
+}
