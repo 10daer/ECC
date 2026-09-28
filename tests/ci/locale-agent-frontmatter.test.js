@@ -138,7 +138,7 @@ function main() {
         const fields = frontmatter(filePath);
         if (!fields) continue;
         const want = canonical.get(file).model;
-        if (want !== undefined && fields.model !== undefined && fields.model !== want) {
+        if (want !== undefined && fields.model !== want) {
           drift.push(`${rel(filePath)}: ${fields.model} != ${want}`);
         }
       }
@@ -156,9 +156,9 @@ function main() {
         if (!fields) continue;
         const want = toolSet(canonical.get(file).tools);
         const have = toolSet(fields.tools);
-        if (want === null || have === null) continue;
+        if (want === null) continue;
         if (!sameSet(want, have)) {
-          drift.push(`${rel(filePath)}: [${[...have]}] != [${[...want]}]`);
+          drift.push(`${rel(filePath)}: ${have === null ? '<missing>' : `[${[...have]}]`} != [${[...want]}]`);
         }
       }
       assert.deepStrictEqual(
