@@ -5,10 +5,13 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { applyInstallPlan } = require('../../scripts/lib/install/apply');
+const { createFileSystemLoader } = require('./helpers/load-with-file-system');
+const fileSystem = { ...fs };
+const load = createFileSystemLoader(fileSystem);
+const { applyInstallPlan } = load(require.resolve('../../scripts/lib/install/apply'));
 const { withHookConsent } = require('../../scripts/lib/install/hook-consent');
 const { createInstallState, readInstallState, writeInstallState } = require('../../scripts/lib/install-state');
-const { buildDoctorReport, repairInstalledStates } = require('../../scripts/lib/install-lifecycle');
+const { buildDoctorReport, repairInstalledStates } = load(require.resolve('../../scripts/lib/install-lifecycle'));
 
 const REPO_ROOT = path.resolve(__dirname, '../..');
 const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -98,8 +101,16 @@ function fixture(callback, enabled = false) {
     const basePlan = { target: 'opencode', adapter, homeDir, sourceRoot, targetRoot,
       installRoot: targetRoot, installStatePath, operations, warnings: [],
       selectedModuleIds: state.resolution.selectedModules, statePreview: state };
-    callback({ root, homeDir, sourceRoot, targetRoot, installStatePath, state, basePlan,
-      declinePlan: withHookConsent(basePlan, 'declined') });
+    const previousCwd = process.cwd();
+    try {
+      // Hosted Windows checkouts and os.tmpdir() may be on different drives.
+      // Anchor relative-root callers inside their private fixture on every OS.
+      process.chdir(root);
+      callback({ root, homeDir, sourceRoot, targetRoot, installStatePath, state, basePlan,
+        declinePlan: withHookConsent(basePlan, 'declined') });
+    } finally {
+      process.chdir(previousCwd);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -112,11 +123,11 @@ function repair(value, extra = {}) {
 }
 
 function withWritableOpenMutation(filePath, mutate, callback) {
-  const originalOpen = fs.openSync;
-  const originalClose = fs.closeSync;
+  const originalOpen = fileSystem.openSync;
+  const originalClose = fileSystem.closeSync;
   let injected = false;
   const descriptors = new Set();
-  fs.openSync = function (candidate, flags, ...rest) {
+  fileSystem.openSync = function (candidate, flags, ...rest) {
     const writable = typeof flags === 'number'
       ? Boolean(flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR))
       : /[wa+]/.test(flags);
@@ -129,7 +140,7 @@ function withWritableOpenMutation(filePath, mutate, callback) {
     if (matches && writable) descriptors.add(fd);
     return fd;
   };
-  fs.closeSync = function (fd) {
+  fileSystem.closeSync = function (fd) {
     descriptors.delete(fd);
     return originalClose.call(fs, fd);
   };
@@ -138,8 +149,8 @@ function withWritableOpenMutation(filePath, mutate, callback) {
     assert.ok(injected, 'The destination writable-open boundary must be exercised');
     assert.strictEqual(descriptors.size, 0, 'Every owned writable descriptor must close');
   } finally {
-    fs.openSync = originalOpen;
-    fs.closeSync = originalClose;
+    fileSystem.openSync = originalOpen;
+    fileSystem.closeSync = originalClose;
   }
 }
 
@@ -158,6 +169,27 @@ function runTests() {
     try { callback(); passed++; console.log(`  PASS ${name}`); }
     catch (error) { failed++; console.error(`  FAIL ${name}: ${error.stack}`); }
   };
+  test('relative-root fixture remains relative across Windows checkout and temp drives', () => {
+    const source = 'C:\\private\\source';
+    assert.strictEqual(path.win32.isAbsolute(path.win32.relative('D:\\checkout', source)), true);
+    const relative = path.win32.relative('C:\\private', source);
+    assert.strictEqual(relative, 'source');
+    assert.strictEqual(path.win32.isAbsolute(relative), false);
+    assert.strictEqual(path.win32.resolve('C:\\private', relative), source);
+  });
+  test('private filesystem injection never patches the process filesystem or module cache', () => fixture(value => {
+    const nativeOpen = fs.openSync;
+    const nativeClose = fs.closeSync;
+    const cachedApply = require.cache[require.resolve('../../scripts/lib/install/apply')];
+    const destination = path.join(value.targetRoot, 'plugins/ecc-hooks.ts');
+    withWritableOpenMutation(destination, () => {
+      assert.strictEqual(fs.openSync, nativeOpen);
+      assert.strictEqual(fs.closeSync, nativeClose);
+    }, () => assert.strictEqual(applyInstallPlan(value.declinePlan).applied, true));
+    assert.strictEqual(fs.openSync, nativeOpen);
+    assert.strictEqual(fs.closeSync, nativeClose);
+    assert.strictEqual(require.cache[require.resolve('../../scripts/lib/install/apply')], cachedApply);
+  }));
   for (const relativePath of ['plugins/ecc-hooks.ts', 'opencode.json']) {
     for (const mode of ['apply', 'repair']) {
       test(`${mode} preserves a same-inode ${relativePath} edit at writable open`, () => fixture(value => {
@@ -366,6 +398,37 @@ function runTests() {
       });
     }));
   }
+  for (const consent of [null, 'declined', 'enabled']) {
+    test(`nested JavaScript entrypoint applies with ${consent || 'default'} consent semantics`, () => fixture(value => {
+      const sourceRelativePath = '.opencode/plugins/custom/index.js';
+      const sourcePath = path.join(value.sourceRoot, sourceRelativePath);
+      const destinationPath = path.join(value.targetRoot, 'plugins/custom/index.js');
+      const content = 'export default async () => ({ event: () => {} });\n';
+      fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+      fs.writeFileSync(sourcePath, content);
+      const operation = { kind: 'copy-file', moduleId: 'platform-configs', sourceRelativePath,
+        sourcePath, destinationPath, ownership: 'managed', scaffoldOnly: false };
+      const selectedModuleIds = consent === 'enabled' ? ['platform-configs', 'hooks-runtime'] : ['platform-configs'];
+      const plan = withHookConsent({ ...value.basePlan, selectedModuleIds,
+        operations: [...value.basePlan.operations, operation] }, consent);
+      assert.strictEqual(applyInstallPlan(plan).applied, true);
+      assert.strictEqual(fs.readFileSync(destinationPath, 'utf8'), consent === 'enabled'
+        ? content : 'export default async () => ({});\n');
+    }));
+  }
+  test('nested package metadata fails before writing and never receives a JavaScript tombstone', () => fixture(value => {
+    const destinationPath = path.join(value.targetRoot, 'plugins/custom/package.json');
+    const sourcePath = path.join(value.sourceRoot, '.opencode/plugins/custom/package.json');
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    fs.writeFileSync(sourcePath, '{"main":"index.js"}\n');
+    const before = fs.readFileSync(value.installStatePath);
+    const operation = { kind: 'copy-file', sourceRelativePath: '.opencode/plugins/custom/package.json',
+      sourcePath, destinationPath, ownership: 'managed' };
+    assert.throws(() => applyInstallPlan(withHookConsent({ ...value.basePlan,
+      operations: [...value.basePlan.operations, operation] }, 'declined')), /unsupported.*package/i);
+    assert.strictEqual(fs.existsSync(destinationPath), false);
+    assert.deepStrictEqual(fs.readFileSync(value.installStatePath), before);
+  }));
   for (const rootForm of ['relative', 'missing']) {
     for (const consent of [null, 'declined']) {
       test(`${rootForm} source root keeps historical refusal for fresh ${consent || 'default'} apply`, () => fixture(value => {
@@ -523,9 +586,9 @@ function runTests() {
       const destination = path.join(value.targetRoot, 'plugins', planned ? 'ecc-hooks.ts' : 'index.js');
       const content = planned ? fs.readFileSync(destination) : Buffer.from('// unreadable user plugin\n');
       if (!planned) fs.writeFileSync(destination, content);
-      const originalOpen = fs.openSync;
+      const originalOpen = fileSystem.openSync;
       let refusedReads = 0;
-      fs.openSync = function (candidate, ...args) {
+      fileSystem.openSync = function (candidate, ...args) {
         if (typeof candidate === 'string' && path.resolve(candidate) === destination) {
           refusedReads++;
           throw Object.assign(new Error('Synthetic plugin read permission denied'), { code: 'EACCES' });
@@ -537,7 +600,7 @@ function runTests() {
         else assert.strictEqual(applyInstallPlan(value.declinePlan).applied, true);
         assert.ok(refusedReads > 0, 'The permission boundary must be exercised');
       } finally {
-        fs.openSync = originalOpen;
+        fileSystem.openSync = originalOpen;
       }
       assert.deepStrictEqual(fs.readFileSync(destination), content);
       if (!planned) assert.ok(!readInstallState(value.installStatePath).operations.some(operation => operation.destinationPath === destination));

@@ -14,8 +14,8 @@ const {
   disableOpenCodeHookPluginRegistration,
   getDisabledOpenCodePluginContent,
   getRecordedHookConsent,
-  isOpenCodeHookActivationOperation,
-  isOpenCodePluginEntrypoint,
+  getOpenCodeActivationPathKind,
+  getOpenCodeSourceActivationKind,
   planMaterializesHookRuntime,
   shouldDisableOpenCodeHooks,
 } = require('./hook-consent');
@@ -42,7 +42,8 @@ const {
   prepareUserOwnedFileGuard,
   preserveUnwrittenFiles,
 } = require('./ownership-guard');
-const { cleanupLegacyOpencodeInstall, getLegacyLocationForPlan } = require('./opencode-legacy-migration');
+const { cleanupLegacyOpencodeInstall, getLegacyLocationForPlan, inspectLegacyOpencodeState,
+  verifyManagedLegacyFile } = require('./opencode-legacy-migration');
 const { writeFileNoFollow } = require('./guarded-write');
 const { withOpenCodeInstallLocks } = require('./opencode-install-lock');
 const {
@@ -313,12 +314,7 @@ function getOpenCodeActivationKind(plan, operation) {
   const relative = operation.destinationPath
     ? path.relative(plan.targetRoot, operation.destinationPath).split(path.sep).join('/').toLowerCase()
     : '';
-  if (/^plugins\/(?:[^/]+\.(?:[cm]?js|ts)|[^/]+\/(?:index\.(?:[cm]?js|ts)|package\.json))$/.test(relative)) {
-    return 'plugin';
-  }
-  if (relative === 'opencode.json') return 'config';
-  if (isOpenCodePluginEntrypoint(operation)) return 'plugin';
-  return isOpenCodeHookActivationOperation(operation) ? 'config' : null;
+  return getOpenCodeActivationPathKind(relative) || getOpenCodeSourceActivationKind(operation);
 }
 
 function readOpenCodeAliasForAttribution(plan, destinationPath) {
@@ -473,8 +469,11 @@ function assertOpenCodeHookDeactivationReady(plan, options = {}) {
   const desired = new Map(plan.operations.filter(operation => getOpenCodeActivationKind(plan, operation))
     .map(operation => [comparablePath(operation.destinationPath), operation]));
   const snapshot = new Map();
-  for (const [key, operation] of openCodeActivationCandidates(plan, [...previous.values()])) {
+  for (const [key, operation] of openCodeActivationCandidates(plan, [...previous.values(), ...(options.legacyOperations || [])])) {
     const kind = getOpenCodeActivationKind(plan, operation);
+    if (kind === 'package') {
+      throw new Error(`Unsupported OpenCode package metadata deactivation: ${operation.destinationPath}`);
+    }
     const expectedTransform = kind === 'plugin'
       ? 'opencode-disable-plugin-entrypoint' : 'opencode-disable-ecc-hooks';
     const replacement = desired.get(key);
@@ -498,8 +497,14 @@ function assertOpenCodeHookDeactivationReady(plan, options = {}) {
       }
       continue;
     }
-    if (kind === 'plugin' && inactive) continue;
+    if (inactive && (kind === 'plugin' || options.allowVerifiedLegacyRemoval)) continue;
     const recorded = previous.get(key);
+    if (options.allowVerifiedLegacyRemoval && recorded) {
+      const verified = verifyManagedLegacyFile(recorded, {
+        targetRoot: plan.targetRoot, installStatePath: plan.installStatePath,
+      }, plan.sourceRoot);
+      if (verified.destinationPath && verified.digest === digest) continue;
+    }
     if (!replacement || replacement.kind !== 'copy-file'
       || replacement.contentTransform !== expectedTransform
       || !recorded || recorded.contentSha256 !== digest) {
@@ -530,15 +535,27 @@ function getOpenCodeActivationWriteOptions(operation, snapshot) {
 function getOpenCodeInstallRoots(plan) {
   const roots = [plan.targetRoot];
   const legacy = getLegacyLocationForPlan(plan);
-  if (legacy) {
-    try {
-      fs.lstatSync(legacy.targetRoot);
-      roots.push(legacy.targetRoot);
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-  }
+  const inspection = inspectLegacyOpencodeState(legacy);
+  if (inspection.status === 'unreadable') throw new Error(inspection.error);
+  if (inspection.status === 'valid') roots.push(legacy.targetRoot);
   return roots;
+}
+
+function inspectLegacyOpenCodeDeactivation(plan) {
+  const location = getLegacyLocationForPlan(plan);
+  if (!location || comparablePath(location.targetRoot) === comparablePath(plan.targetRoot)) return null;
+  const inspection = inspectLegacyOpencodeState(location);
+  if (inspection.status === 'unreadable') throw new Error(inspection.error);
+  if (inspection.status !== 'valid') return null;
+  const legacyPlan = { ...plan, ...location, operations: [] };
+  assertOpenCodeHookDeactivationReady(legacyPlan, { allowVerifiedLegacyRemoval: true });
+  return { plan: legacyPlan, operations: inspection.state.operations.filter(operation => operation.ownership === 'managed') };
+}
+
+function assertOpenCodeLeaseCoverage(plan, lease) {
+  if (plan.adapter?.target !== 'opencode') return;
+  // Reuse checks opaque ownership without acquiring extra roots out of order.
+  withOpenCodeInstallLocks(getOpenCodeInstallRoots(plan), () => {}, lease);
 }
 
 function findPreviousManagedHooks(previousState, plan, operation) {
@@ -704,7 +721,7 @@ function applyInstallPlan(plan, dependencies = {}) {
     assertSafeInstallOperation(plan, { destinationPath: plan.installStatePath });
     return withOpenCodeInstallLocks(
       getOpenCodeInstallRoots(plan),
-      () => applyInstallPlanLocked(plan, dependencies, false),
+      lease => applyInstallPlanLocked(plan, { ...dependencies, opencodeLease: lease }, false),
       dependencies.opencodeLease
     );
   }
@@ -732,6 +749,8 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
   if (typeof beforeInstallStateRead === 'function') {
     beforeInstallStateRead({ plan });
   }
+  assertOpenCodeLeaseCoverage(plan, dependencies.opencodeLease);
+  const legacyActivation = inspectLegacyOpenCodeDeactivation(plan);
   const activationSnapshot = assertOpenCodeHookDeactivationReady(plan);
   const migration = prepareExcludedPathsReconciliation(
     plan,
@@ -953,6 +972,9 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
     ];
   }
 
+  assertOpenCodeLeaseCoverage(appliedPlan, dependencies.opencodeLease);
+  // Recheck removable bytes after canonical writes, before legacy cleanup.
+  inspectLegacyOpenCodeDeactivation(appliedPlan);
   let opencodeMigrationWarnings = [];
   try {
     const opencodeMigration = cleanupLegacyOpencodeInstall(appliedPlan);
@@ -966,6 +988,12 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
     opencodeMigrationWarnings = [
       `Legacy OpenCode cleanup did not finish: ${error.message}. Content under ~/.opencode was preserved; rerun the OpenCode install or review it manually.`,
     ];
+  }
+
+  if (legacyActivation) {
+    assertOpenCodeHookDeactivationReady(legacyActivation.plan, {
+      requireInactive: true, legacyOperations: legacyActivation.operations,
+    });
   }
 
   let excludedPathsRemoved = [];
@@ -1001,6 +1029,7 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
 module.exports = {
   applyInstallPlan,
   assertOpenCodeActivationUnchanged,
+  assertOpenCodeLeaseCoverage,
   assertOpenCodeHookDeactivationReady,
   getOpenCodeActivationKind,
   getOpenCodeActivationWriteOptions,

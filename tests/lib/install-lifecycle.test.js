@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { createFileSystemLoader } = require('./helpers/load-with-file-system');
 
 const {
   buildDoctorReport,
@@ -206,11 +207,11 @@ function writeOpencodeState(homeDir, overrides = {}) {
   };
 }
 
-function writeRecordedOpenCodeActivation(homeDir) {
+function writeRecordedOpenCodeActivation(homeDir, sourceRoot = REPO_ROOT) {
   const targetRoot = path.join(homeDir, '.config', 'opencode');
   const operations = ['opencode.json', 'plugins/ecc-hooks.ts', 'plugins/index.ts'].map(relativePath => {
     const sourceRelativePath = `.opencode/${relativePath}`;
-    const content = fs.readFileSync(path.join(REPO_ROOT, sourceRelativePath));
+    const content = fs.readFileSync(path.join(sourceRoot, sourceRelativePath));
     const destinationPath = path.join(targetRoot, relativePath);
     fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
     fs.writeFileSync(destinationPath, content);
@@ -225,6 +226,32 @@ function writeRecordedOpenCodeActivation(homeDir) {
     resolution: { selectedModules: ['platform-configs'] },
     operations,
   });
+}
+
+// These race fixtures read public source as inert bytes into a private source
+// tree. Fake payload construction must never move/write repository build output.
+function withPrivateOpenCodeSource(homeDir, callback) {
+  const sourceRoot = path.join(homeDir, 'source');
+  fs.mkdirSync(path.join(sourceRoot, 'manifests'), { recursive: true });
+  const files = {
+    'package.json': { name: 'private-opencode-race-fixture', version: CURRENT_PACKAGE_VERSION },
+    'manifests/install-modules.json': { version: CURRENT_MANIFEST_VERSION, modules: [{
+      id: 'platform-configs', kind: 'platform', description: 'Private race fixture.',
+      paths: ['.opencode'], targets: ['opencode'], dependencies: [],
+      defaultInstall: false, cost: 'light', stability: 'stable',
+    }] },
+    'manifests/install-profiles.json': { version: 1, profiles: {} },
+    'manifests/install-components.json': { version: 1, components: [] },
+  };
+  for (const [relative, value] of Object.entries(files)) {
+    fs.writeFileSync(path.join(sourceRoot, relative), formatJson(value));
+  }
+  for (const relative of ['opencode.json', 'plugins/ecc-hooks.ts', 'plugins/index.ts']) {
+    const destination = path.join(sourceRoot, '.opencode', relative);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(path.join(REPO_ROOT, '.opencode', relative), destination);
+  }
+  callback(sourceRoot);
 }
 
 function withTemporarilyMovedPath(filePath, callback) {
@@ -2159,28 +2186,33 @@ function runTests() {
 
   if (test('OpenCode repair preserves activation bytes changed between health inspection and write', () => {
     const homeDir = createTempDir('install-lifecycle-opencode-health-race-');
+    const fileSystem = { ...fs };
+    const cacheEntry = require.cache[require.resolve('../../scripts/lib/install-lifecycle')];
+    const isolatedRepair = createFileSystemLoader(fileSystem)(
+      require.resolve('../../scripts/lib/install-lifecycle')
+    ).repairInstalledStates;
     const originalOpenSync = fs.openSync;
     const originalReadFileSync = fs.readFileSync;
     const originalCloseSync = fs.closeSync;
     const descriptors = new Set();
     try {
-      withTemporarilyMovedPath(path.join(REPO_ROOT, '.opencode', 'dist'), () => {
-        const recorded = writeRecordedOpenCodeActivation(homeDir);
+      withPrivateOpenCodeSource(homeDir, sourceRoot => {
+        const recorded = writeRecordedOpenCodeActivation(homeDir, sourceRoot);
         const pluginPath = path.join(recorded.targetRoot, 'plugins', 'ecc-hooks.ts');
         const canonicalPluginPath = fs.realpathSync(pluginPath);
         const changedContent = 'globalThis.userChangedHook = true;\n';
         const stateBefore = fs.readFileSync(recorded.installStatePath);
         let changed = false;
-        fs.openSync = function trackActivationDescriptor(candidate, ...args) {
+        fileSystem.openSync = function trackActivationDescriptor(candidate, ...args) {
           const descriptor = originalOpenSync.call(fs, candidate, ...args);
           if (typeof candidate === 'string' && [pluginPath, canonicalPluginPath].includes(path.resolve(candidate))) descriptors.add(descriptor);
           return descriptor;
         };
-        fs.closeSync = function releaseActivationDescriptor(descriptor) {
+        fileSystem.closeSync = function releaseActivationDescriptor(descriptor) {
           descriptors.delete(descriptor);
           return originalCloseSync.call(fs, descriptor);
         };
-        fs.readFileSync = function mutateAfterHealthRead(candidate, ...args) {
+        fileSystem.readFileSync = function mutateAfterHealthRead(candidate, ...args) {
           const content = originalReadFileSync.call(fs, candidate, ...args);
           // Lifecycle reads pass an encoding argument; the consent snapshot
           // reads the descriptor as raw bytes with no second argument.
@@ -2192,8 +2224,8 @@ function runTests() {
         };
         let result;
         try {
-          result = repairInstalledStates({
-            repoRoot: REPO_ROOT, homeDir, projectRoot: homeDir, targets: ['opencode'],
+          result = isolatedRepair({
+            repoRoot: sourceRoot, homeDir, projectRoot: homeDir, targets: ['opencode'],
             buildOpencodePayload(repoRoot) {
               const distDir = path.join(repoRoot, '.opencode', 'dist');
               fs.mkdirSync(path.join(distDir, 'plugins'), { recursive: true });
@@ -2202,9 +2234,9 @@ function runTests() {
             },
           });
         } finally {
-          fs.openSync = originalOpenSync;
-          fs.readFileSync = originalReadFileSync;
-          fs.closeSync = originalCloseSync;
+          fileSystem.openSync = originalOpenSync;
+          fileSystem.readFileSync = originalReadFileSync;
+          fileSystem.closeSync = originalCloseSync;
         }
         assert.strictEqual(changed, true, 'The health-read boundary was exercised');
         assert.strictEqual(result.results[0].status, 'error');
@@ -2219,39 +2251,48 @@ function runTests() {
         assert.notStrictEqual(result.results[0].stateRefreshed, true);
       });
     } finally {
-      fs.openSync = originalOpenSync;
-      fs.readFileSync = originalReadFileSync;
-      fs.closeSync = originalCloseSync;
+      fileSystem.openSync = originalOpenSync;
+      fileSystem.readFileSync = originalReadFileSync;
+      fileSystem.closeSync = originalCloseSync;
       cleanup(homeDir);
+      assert.strictEqual(descriptors.size, 0, 'Every tracked descriptor must close');
+      assert.strictEqual(fs.openSync, originalOpenSync, 'Native fs must remain untouched');
+      assert.strictEqual(fs.closeSync, originalCloseSync);
+      assert.strictEqual(require.cache[require.resolve('../../scripts/lib/install-lifecycle')], cacheEntry);
     }
   })) passed++; else failed++;
 
   if (test('OpenCode repair rejects an active alias introduced during writes before refreshing state', () => {
     const homeDir = createTempDir('install-lifecycle-opencode-alias-race-');
+    const fileSystem = { ...fs };
+    const cacheEntry = require.cache[require.resolve('../../scripts/lib/install-lifecycle')];
+    const isolatedRepair = createFileSystemLoader(fileSystem)(
+      require.resolve('../../scripts/lib/install-lifecycle')
+    ).repairInstalledStates;
     const originalOpenSync = fs.openSync;
     const originalWriteFileSync = fs.writeFileSync;
     const originalWriteSync = fs.writeSync;
     const originalCloseSync = fs.closeSync;
     const descriptors = new Set();
     try {
-      withTemporarilyMovedPath(path.join(REPO_ROOT, '.opencode', 'dist'), () => {
-        const recorded = writeRecordedOpenCodeActivation(homeDir);
+      withPrivateOpenCodeSource(homeDir, sourceRoot => {
+        const recorded = writeRecordedOpenCodeActivation(homeDir, sourceRoot);
         const pluginPath = path.join(recorded.targetRoot, 'plugins', 'index.ts');
         const canonicalPluginPath = fs.realpathSync(pluginPath);
         const aliasPath = path.join(recorded.targetRoot, 'plugins', 'index.js');
-        const aliasContent = fs.readFileSync(path.join(REPO_ROOT, '.opencode', 'plugins', 'index.ts'), 'utf8');
+        const aliasContent = fs.readFileSync(path.join(sourceRoot, '.opencode', 'plugins', 'index.ts'), 'utf8');
         const stateBefore = fs.readFileSync(recorded.installStatePath);
         let inserted = false;
-        fs.openSync = function trackPluginWriteDescriptor(candidate, ...args) {
+        fileSystem.openSync = function trackPluginWriteDescriptor(candidate, ...args) {
           const descriptor = originalOpenSync.call(fs, candidate, ...args);
           if (typeof candidate === 'string' && [pluginPath, canonicalPluginPath].includes(path.resolve(candidate))) descriptors.add(descriptor);
           return descriptor;
         };
-        fs.closeSync = function releasePluginWriteDescriptor(descriptor) {
+        fileSystem.closeSync = function releasePluginWriteDescriptor(descriptor) {
           descriptors.delete(descriptor);
           return originalCloseSync.call(fs, descriptor);
         };
-        fs.writeSync = function insertAliasAfterPluginWrite(candidate, ...args) {
+        fileSystem.writeSync = function insertAliasAfterPluginWrite(candidate, ...args) {
           const result = originalWriteSync.call(fs, candidate, ...args);
           if (!inserted && descriptors.has(candidate)) {
             inserted = true;
@@ -2261,8 +2302,8 @@ function runTests() {
         };
         let result;
         try {
-          result = repairInstalledStates({
-            repoRoot: REPO_ROOT, homeDir, projectRoot: homeDir, targets: ['opencode'],
+          result = isolatedRepair({
+            repoRoot: sourceRoot, homeDir, projectRoot: homeDir, targets: ['opencode'],
             buildOpencodePayload(repoRoot) {
               const distDir = path.join(repoRoot, '.opencode', 'dist');
               fs.mkdirSync(path.join(distDir, 'plugins'), { recursive: true });
@@ -2271,9 +2312,9 @@ function runTests() {
             },
           });
         } finally {
-          fs.openSync = originalOpenSync;
-          fs.writeSync = originalWriteSync;
-          fs.closeSync = originalCloseSync;
+          fileSystem.openSync = originalOpenSync;
+          fileSystem.writeSync = originalWriteSync;
+          fileSystem.closeSync = originalCloseSync;
         }
         assert.strictEqual(inserted, true, 'The plugin-write boundary was exercised');
         assert.strictEqual(result.results[0].status, 'error');
@@ -2285,10 +2326,14 @@ function runTests() {
         assert.notStrictEqual(result.results[0].stateRefreshed, true);
       });
     } finally {
-      fs.openSync = originalOpenSync;
-      fs.writeSync = originalWriteSync;
-      fs.closeSync = originalCloseSync;
+      fileSystem.openSync = originalOpenSync;
+      fileSystem.writeSync = originalWriteSync;
+      fileSystem.closeSync = originalCloseSync;
       cleanup(homeDir);
+      assert.strictEqual(descriptors.size, 0, 'Every tracked descriptor must close');
+      assert.strictEqual(fs.openSync, originalOpenSync, 'Native fs must remain untouched');
+      assert.strictEqual(fs.closeSync, originalCloseSync);
+      assert.strictEqual(require.cache[require.resolve('../../scripts/lib/install-lifecycle')], cacheEntry);
     }
   })) passed++; else failed++;
 

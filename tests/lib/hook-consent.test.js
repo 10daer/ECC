@@ -11,6 +11,7 @@ const {
   formatHookCapabilityDisclosure,
   getRecordedHookConsent,
   isHookRuntimeOperation,
+  isOpenCodePluginEntrypoint,
   planMaterializesHookRuntime,
   resolveHookConsentFlags,
   withHookConsent,
@@ -200,6 +201,25 @@ function runTests() {
     assert.strictEqual(getRecordedHookConsent({ ...state, request: { hookConsent: 'enabled' } }), 'enabled');
     assert.strictEqual(getRecordedHookConsent({ ...state, resolution: { selectedModules: ['hooks-runtime'] } }), 'enabled');
     assert.strictEqual(getRecordedHookConsent({ operations: [{ kind: 'update-claude-settings' }] }), 'enabled');
+  })) passed++; else failed++;
+
+  if (test('source classification covers nested JavaScript but refuses package metadata deactivation', () => {
+    for (const extension of ['ts', 'js', 'mjs', 'cjs']) {
+      for (const sourceRelativePath of [`.opencode/plugins/custom/index.${extension}`,
+        `.OPENCODE\\DIST\\PLUGINS\\CUSTOM\\INDEX.${extension.toUpperCase()}`]) {
+        const operation = { kind: 'copy-file', moduleId: 'platform-configs', sourceRelativePath };
+        assert.strictEqual(isOpenCodePluginEntrypoint(operation), true, sourceRelativePath);
+        const plan = withHookConsent({ target: 'opencode', operations: [operation], selectedModuleIds: [] });
+        assert.strictEqual(plan.operations[0].contentTransform, 'opencode-disable-plugin-entrypoint');
+      }
+    }
+    const operation = { kind: 'copy-file', sourceRelativePath: '.opencode/plugins/custom/package.json' };
+    for (const decision of [null, 'declined']) {
+      assert.throws(() => withHookConsent({ target: 'opencode', operations: [operation], selectedModuleIds: [] }, decision),
+        /unsupported.*package/i);
+    }
+    assert.strictEqual(isOpenCodePluginEntrypoint(operation), false);
+    assert.strictEqual(isOpenCodePluginEntrypoint({ sourceRelativePath: '.opencode/plugins/lib/utility.js' }), false);
   })) passed++; else failed++;
 
   if (test('formats one numbered disclosure line per capability group', () => {

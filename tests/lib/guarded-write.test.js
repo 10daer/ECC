@@ -157,10 +157,16 @@ test('a parent replacement before native open is refused even when the file iden
   assert.strictEqual(typeof descriptor, 'number');
   assert.strictEqual(closes, 1);
   assert.strictEqual(truncates, 0);
-  const replacementIdentity = fs.statSync(file, { bigint: true });
-  assert.strictEqual(replacementIdentity.dev, fileIdentity.dev);
-  assert.strictEqual(replacementIdentity.ino, fileIdentity.ino);
-  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'old activation bytes');
+  const postconditionFd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const replacementIdentity = fs.fstatSync(postconditionFd, { bigint: true });
+    assert.ok(replacementIdentity.isFile());
+    assert.strictEqual(replacementIdentity.dev, fileIdentity.dev);
+    assert.strictEqual(replacementIdentity.ino, fileIdentity.ino);
+    assert.strictEqual(fs.readFileSync(postconditionFd, 'utf8'), 'old activation bytes');
+  } finally {
+    fs.closeSync(postconditionFd);
+  }
   assert.ok(fs.statSync(`${parent}.old`).isDirectory());
 });
 test('a denied native open preserves its cause without closing an unallocated descriptor', ({ file, options }) => {

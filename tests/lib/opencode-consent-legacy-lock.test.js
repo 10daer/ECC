@@ -6,10 +6,14 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { applyInstallPlan } = require('../../scripts/lib/install/apply');
-const { repairInstalledStates } = require('../../scripts/lib/install-lifecycle');
+const { createFileSystemLoader } = require('./helpers/load-with-file-system');
+const fileSystem = { ...fs };
+const load = createFileSystemLoader(fileSystem);
+const { applyInstallPlan } = load(require.resolve('../../scripts/lib/install/apply'));
+const { withHookConsent } = require('../../scripts/lib/install/hook-consent');
+const { repairInstalledStates, buildDoctorReport } = load(require.resolve('../../scripts/lib/install-lifecycle'));
 const { createInstallState, readInstallState, writeInstallState } = require('../../scripts/lib/install-state');
-const { withOpenCodeInstallLocks } = require('../../scripts/lib/install/opencode-install-lock');
+const { withOpenCodeInstallLocks } = load(require.resolve('../../scripts/lib/install/opencode-install-lock'));
 
 const SOURCE_RELATIVE_PATH = path.join('skills', 'skill-comply', 'SKILL.md');
 const SKILL_CONTENT = '---\nname: skill-comply\ndescription: Synthetic migration fixture.\n---\n\n# Inert fixture\n';
@@ -131,6 +135,43 @@ function assertBothLocksReleased(value) {
   }
 }
 
+function addLegacyActivations(value, consent = null) {
+  const manifestPath = path.join(value.sourceRoot, 'manifests', 'install-modules.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath));
+  manifest.modules.push({ id: 'platform-configs', kind: 'platform', description: 'Inert config fixture.',
+    paths: ['.opencode'], targets: ['opencode'], dependencies: [], defaultInstall: false,
+    cost: 'light', stability: 'stable' });
+  writeJson(manifestPath, manifest);
+  const state = readInstallState(value.legacyStatePath);
+  state.request.modules.push('platform-configs');
+  state.request.hookConsent = consent;
+  state.resolution.selectedModules.push('platform-configs');
+  for (const [relative, content] of [
+    ['opencode.json', '{"plugin":["./plugins"],"userSetting":true}\n'],
+    ['plugins/ecc-hooks.ts', 'export default async () => ({ "session.created": () => {} });\n'],
+  ]) {
+    const sourceRelativePath = `.opencode/${relative}`;
+    const sourcePath = path.join(value.sourceRoot, sourceRelativePath);
+    const destinationPath = path.join(value.legacyRoot, relative);
+    for (const file of [sourcePath, destinationPath]) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content);
+    }
+    state.operations.push({ kind: 'copy-file', moduleId: 'platform-configs', sourceRelativePath,
+      destinationPath, ownership: 'managed', scaffoldOnly: false, strategy: 'preserve-relative-path',
+      contentSha256: sha256(content) });
+  }
+  writeInstallState(value.legacyStatePath, state);
+  return state;
+}
+
+function buildInertPayload(sourceRoot) {
+  const dist = path.join(sourceRoot, '.opencode', 'dist');
+  fs.mkdirSync(path.join(dist, 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(dist, 'tools'), { recursive: true });
+  fs.writeFileSync(path.join(dist, 'index.js'), 'module.exports = {};\n');
+}
+
 function runTests() {
   let passed = 0;
   let failed = 0;
@@ -188,6 +229,161 @@ function runTests() {
     assertSourceUnchanged(value);
     assertBothLocksReleased(value);
   });
+  for (const unrelated of ['directory', 'file', 'symlink', 'invalid-state', 'malformed-state', 'non-ECC-state']) {
+    test(`canonical apply ignores an unrelated legacy ${unrelated} without locking it`, value => {
+      fs.rmSync(value.legacyRoot, { recursive: true, force: true });
+      if (unrelated === 'file') fs.writeFileSync(value.legacyRoot, 'user file');
+      else if (unrelated === 'symlink') {
+        fs.mkdirSync(value.canonicalRoot, { recursive: true });
+        fs.symlinkSync(value.canonicalRoot, value.legacyRoot, process.platform === 'win32' ? 'junction' : 'dir');
+      } else {
+        fs.mkdirSync(value.legacyRoot, { recursive: true });
+        if (unrelated === 'malformed-state') fs.writeFileSync(value.legacyStatePath, '{malformed');
+        if (unrelated === 'invalid-state') writeJson(value.legacyStatePath, { unrelated: true });
+        if (unrelated === 'non-ECC-state') {
+          const state = { ...value.canonicalPlan.statePreview, target: { id: 'user-tool', target: 'user-tool',
+            root: value.legacyRoot, installStatePath: value.legacyStatePath } };
+          writeJson(value.legacyStatePath, state);
+        }
+      }
+      const previousLedger = fs.existsSync(value.legacyStatePath)
+        ? fs.readFileSync(value.legacyStatePath) : null;
+      const original = fileSystem.openSync;
+      let legacyLocks = 0;
+      fileSystem.openSync = (candidate, ...args) => {
+        if (typeof candidate === 'string' && candidate.startsWith(lockPath(value.legacyRoot))) { legacyLocks++; throw new Error('Unrelated legacy root must not be locked'); }
+        return original(candidate, ...args);
+      };
+      try {
+        const plan = withHookConsent({ ...value.canonicalPlan, operations: [],
+          statePreview: { ...value.canonicalPlan.statePreview, operations: [] } });
+        assert.strictEqual(applyInstallPlan(plan).applied, true);
+        assert.strictEqual(legacyLocks, 0);
+        if (previousLedger) assert.deepStrictEqual(fs.readFileSync(value.legacyStatePath), previousLedger);
+        if (unrelated === 'file') assert.strictEqual(fs.readFileSync(value.legacyRoot, 'utf8'), 'user file');
+        if (unrelated === 'symlink') assert.ok(fs.lstatSync(value.legacyRoot).isSymbolicLink());
+      } finally { fileSystem.openSync = original; }
+      assert.strictEqual(fs.existsSync(lockPath(value.canonicalRoot)), false);
+    });
+  }
+  test('unreadable legacy ECC state remains an explicit failure before writes', value => {
+    const original = fileSystem.openSync;
+    let attempted = false;
+    fileSystem.openSync = (candidate, ...args) => {
+      if (candidate === value.legacyStatePath) {
+        attempted = true;
+        throw Object.assign(new Error('Synthetic unreadable legacy state'), { code: 'EACCES' });
+      }
+      return original(candidate, ...args);
+    };
+    try {
+      assert.throws(() => applyInstallPlan(value.canonicalPlan), /Unable to inspect legacy/);
+      assert.ok(attempted);
+      assert.strictEqual(fs.existsSync(value.canonicalStatePath), false);
+    } finally { fileSystem.openSync = original; }
+  });
+  for (const boundary of ['beforeInstallStateRead', 'beforeInstallStateWrite']) {
+    test(`new valid legacy state at ${boundary} is never cleaned without its lock`, value => {
+      const originalState = fs.readFileSync(value.legacyStatePath);
+      fs.rmSync(value.legacyRoot, { recursive: true, force: true });
+      let injected = false;
+      assert.throws(() => applyInstallPlan(value.canonicalPlan, {
+        [boundary]() {
+          injected = true;
+          fs.mkdirSync(path.dirname(value.legacyFile), { recursive: true });
+          fs.writeFileSync(value.legacyFile, SKILL_CONTENT);
+          fs.writeFileSync(value.legacyStatePath, originalState);
+        },
+      }), /lease does not cover/);
+      assert.ok(injected);
+      assert.deepStrictEqual(fs.readFileSync(value.legacyStatePath), originalState);
+      assert.strictEqual(fs.readFileSync(value.legacyFile, 'utf8'), SKILL_CONTENT);
+      assert.strictEqual(fs.existsSync(lockPath(value.canonicalRoot)), false);
+      assert.strictEqual(fs.existsSync(lockPath(value.legacyRoot)), false);
+    });
+  }
+  for (const consent of [null, 'declined']) {
+    test(`verified active legacy copies migrate under ${consent || 'default'} consent with no hooks`, value => {
+      addLegacyActivations(value, consent);
+      const before = fs.readFileSync(value.legacyStatePath);
+      const doctor = buildDoctorReport({ repoRoot: value.sourceRoot, homeDir: value.homeDir,
+        projectRoot: value.homeDir, targets: ['opencode'], env: {} });
+      assert.ok(doctor.results[0].issues.some(issue => issue.code === 'legacy-opencode-layout'));
+      assert.ok(!doctor.results[0].issues.some(issue => issue.code === 'opencode-hook-consent-violation'));
+      assert.deepStrictEqual(fs.readFileSync(value.legacyStatePath), before);
+      let builds = 0;
+      const result = repair(value, sourceRoot => {
+        builds++;
+        for (const target of [value.canonicalRoot, value.legacyRoot]) assert.ok(fs.existsSync(lockPath(target)));
+        buildInertPayload(sourceRoot);
+      });
+      assert.strictEqual(result.results[0].status, 'repaired', JSON.stringify(result));
+      assert.strictEqual(builds, 1);
+      const state = readInstallState(value.canonicalStatePath);
+      assert.ok(!state.resolution.selectedModules.includes('hooks-runtime'));
+      assert.notStrictEqual(state.request.hookConsent, 'enabled');
+      assert.strictEqual(fs.readFileSync(path.join(value.canonicalRoot, 'plugins/ecc-hooks.ts'), 'utf8'),
+        'export default async () => ({});\n');
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(value.canonicalRoot, 'opencode.json'))).plugin, []);
+      for (const relative of ['opencode.json', 'plugins/ecc-hooks.ts', 'ecc-install-state.json']) {
+        assert.strictEqual(fs.existsSync(path.join(value.legacyRoot, relative)), false);
+      }
+      assertBothLocksReleased(value);
+    });
+  }
+  for (const defect of ['modified', 'missing-digest', 'source-mismatch', 'source-missing', 'symlink', 'unrecorded-alias', 'merge-json']) {
+    test(`legacy ${defect} activation refuses before build and preserves ownership`, value => {
+      const state = addLegacyActivations(value);
+      const plugin = path.join(value.legacyRoot, 'plugins/ecc-hooks.ts');
+      const source = path.join(value.sourceRoot, '.opencode/plugins/ecc-hooks.ts');
+      if (defect === 'modified') fs.writeFileSync(plugin, 'user edit\n');
+      if (defect === 'missing-digest') delete state.operations[2].contentSha256;
+      if (defect === 'source-mismatch') fs.writeFileSync(source, 'different trusted source\n');
+      if (defect === 'source-missing') fs.unlinkSync(source);
+      if (defect === 'symlink') { fs.unlinkSync(plugin); fs.symlinkSync(source, plugin); }
+      if (defect === 'unrecorded-alias') fs.copyFileSync(source, path.join(value.legacyRoot, 'plugins/index.js'));
+      if (defect === 'merge-json') state.operations[1].kind = 'merge-json';
+      writeInstallState(value.legacyStatePath, state);
+      const before = fs.readFileSync(value.legacyStatePath);
+      let builds = 0;
+      const result = repair(value, () => { builds++; throw new Error('Must refuse before build'); });
+      assert.strictEqual(result.results[0].status, 'error', defect);
+      assert.strictEqual(builds, 0);
+      assert.deepStrictEqual(fs.readFileSync(value.legacyStatePath), before);
+      assert.strictEqual(fs.existsSync(value.canonicalStatePath), false);
+      assertBothLocksReleased(value);
+    });
+  }
+  for (const failure of ['late-edit', 'remove-error', 'quarantine-edit']) {
+    test(`legacy ${failure} never reports successful deactivation`, value => {
+      addLegacyActivations(value);
+      const plugin = path.join(value.legacyRoot, 'plugins/ecc-hooks.ts');
+      const originalRename = fileSystem.renameSync;
+      const before = fs.readFileSync(value.legacyStatePath);
+      let failedRemoval = false;
+      fileSystem.renameSync = (from, ...args) => {
+        if (failure === 'remove-error' && from === plugin) {
+          failedRemoval = true;
+          throw Object.assign(new Error('Synthetic removal denial'), { code: 'EACCES' });
+        }
+        if (failure === 'quarantine-edit' && from === plugin) fs.writeFileSync(plugin, 'user edit at quarantine\n');
+        return originalRename(from, ...args);
+      };
+      try {
+        const result = repair(value, sourceRoot => {
+          buildInertPayload(sourceRoot);
+          if (failure === 'late-edit') fs.writeFileSync(plugin, 'user edit after preflight\n');
+        });
+        assert.strictEqual(result.results[0].status, 'error', JSON.stringify(result));
+        assert.notStrictEqual(result.results[0].stateRefreshed, true);
+        assert.deepStrictEqual(fs.readFileSync(value.legacyStatePath), before);
+        if (failure === 'late-edit') assert.strictEqual(fs.readFileSync(plugin, 'utf8'), 'user edit after preflight\n');
+        else if (failure === 'quarantine-edit') assert.strictEqual(fs.readFileSync(plugin, 'utf8'), 'user edit at quarantine\n');
+        else assert.ok(failedRemoval, 'The actual cleanup removal was attempted');
+      } finally { fileSystem.renameSync = originalRename; }
+      assertBothLocksReleased(value);
+    });
+  }
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
   return { passed, failed };
 }
