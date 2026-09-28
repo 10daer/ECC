@@ -443,6 +443,9 @@ function renderControlPaneHtml() {
     // the newest data any load brought, and the error box the outcome of the
     // newest load that has finished, so a load that finishes late can neither
     // replace newer data nor overrule a newer outcome.
+    const SNAPSHOT_DEADLINE_MS = 10000;
+    const SNAPSHOT_POLL_INTERVAL_MS = 15000;
+    let snapshotsInFlight = 0;
     let loadsStarted = 0;
     let newestFinished = 0;
     let shownLoad = 0;
@@ -656,11 +659,28 @@ function renderControlPaneHtml() {
     async function load(live = false) {
       const id = ++loadsStarted;
       const query = state.query;
+      snapshotsInFlight++;
+      let snapshotTimer = null;
       try {
         const url = new URL('/api/snapshot', window.location.href);
         if (query) url.searchParams.set('query', query);
-        const response = await fetch(url);
-        const snapshot = await readJsonResponse(response);
+        const controller = new AbortController();
+        let rejectDeadline;
+        const deadline = new Promise((_resolve, reject) => { rejectDeadline = reject; });
+        snapshotTimer = setTimeout(() => {
+          // Reject first so the fixed timeout wins over an abort rejection.
+          rejectDeadline(new Error('Snapshot request timed out after 10 seconds.'));
+          controller.abort();
+        }, SNAPSHOT_DEADLINE_MS);
+        // Only fetch/body decoding races the deadline. Late abort-ignoring
+        // responses have no rendering or state side effects after losing.
+        const snapshot = await Promise.race([
+          (async () => {
+            const response = await fetch(url, { signal: controller.signal });
+            return readJsonResponse(response);
+          })(),
+          deadline
+        ]);
         // A snapshot that cannot be shown fails its load like one that could
         // not be fetched, and older data may still take the board.
         if (id > shownLoad) {
@@ -673,6 +693,9 @@ function renderControlPaneHtml() {
         failure = { error, live };
         showFailure();
         return;
+      } finally {
+        if (snapshotTimer !== null) clearTimeout(snapshotTimer);
+        snapshotsInFlight--;
       }
       if (id < newestFinished) {
         // A newer load failed first. This data is still the newest on the
@@ -756,11 +779,12 @@ function renderControlPaneHtml() {
         .catch(error => showError('#app', error));
     };
 
-    // Live board: refresh on a gentle interval; pause while a prompt/tab is hidden.
+    // Only automatic polls coalesce. Manual/query loads retain ordered overlap.
+    // Browser suspension may delay timers; this is not a wall-clock server SLA.
     setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || snapshotsInFlight > 0) return;
       load(true).catch(error => showError('#app', error));
-    }, 15000);
+    }, SNAPSHOT_POLL_INTERVAL_MS);
 
     load().catch(error => showError('#app', error));
   </script>
