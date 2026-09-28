@@ -42,7 +42,13 @@ const {
   prepareUserOwnedFileGuard,
   preserveUnwrittenFiles,
 } = require('./ownership-guard');
-const { cleanupLegacyOpencodeInstall } = require('./opencode-legacy-migration');
+const { cleanupLegacyOpencodeInstall, getLegacyLocationForPlan } = require('./opencode-legacy-migration');
+const { writeFileNoFollow } = require('./guarded-write');
+const { withOpenCodeInstallLocks } = require('./opencode-install-lock');
+const {
+  completeExcludedPathsReconciliation,
+  prepareExcludedPathsReconciliation,
+} = require('./excluded-paths-reconciliation');
 const { buildInstallIndex, rewriteRelativeLinks } = require('./link-rewrite');
 const { adaptAntigravityAgent } = require('./antigravity-agent');
 
@@ -303,7 +309,7 @@ function comparablePath(filePath) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-function openCodeActivationKind(plan, operation) {
+function getOpenCodeActivationKind(plan, operation) {
   const relative = operation.destinationPath
     ? path.relative(plan.targetRoot, operation.destinationPath).split(path.sep).join('/').toLowerCase()
     : '';
@@ -318,7 +324,7 @@ function openCodeActivationKind(plan, operation) {
 function openCodeActivationCandidates(plan, previousOperations) {
   const candidates = new Map();
   for (const operation of [...previousOperations, ...plan.operations]) {
-    if (openCodeActivationKind(plan, operation) && operation.destinationPath) {
+    if (getOpenCodeActivationKind(plan, operation) && operation.destinationPath) {
       candidates.set(comparablePath(operation.destinationPath), operation);
     }
   }
@@ -343,9 +349,10 @@ function activationIsInactive(kind, operation, content) {
   if (kind === 'plugin') {
     return content.toString('utf8') === getDisabledOpenCodePluginContent();
   }
-  const config = JSON.parse(content.toString('utf8'));
-  // Validate the shape through the same transformer used by installation.
-  disableOpenCodeHookPluginRegistration(content.toString('utf8'), operation.sourceRelativePath);
+  const text = content.toString('utf8');
+  // Validate first so malformed JSON retains its source context.
+  disableOpenCodeHookPluginRegistration(text, operation.sourceRelativePath || operation.destinationPath);
+  const config = JSON.parse(text);
   return !Array.isArray(config.plugin) || !config.plugin.includes('./plugins');
 }
 
@@ -365,11 +372,11 @@ function assertOpenCodeHookDeactivationReady(plan, options = {}) {
   const previous = new Map(((previousState && previousState.operations) || [])
     .filter(operation => operation.ownership === 'managed' && operation.destinationPath)
     .map(operation => [comparablePath(operation.destinationPath), operation]));
-  const desired = new Map(plan.operations.filter(operation => openCodeActivationKind(plan, operation))
+  const desired = new Map(plan.operations.filter(operation => getOpenCodeActivationKind(plan, operation))
     .map(operation => [comparablePath(operation.destinationPath), operation]));
   const snapshot = new Map();
   for (const [key, operation] of openCodeActivationCandidates(plan, [...previous.values()])) {
-    const kind = openCodeActivationKind(plan, operation);
+    const kind = getOpenCodeActivationKind(plan, operation);
     const expectedTransform = kind === 'plugin'
       ? 'opencode-disable-plugin-entrypoint' : 'opencode-disable-ecc-hooks';
     const replacement = desired.get(key);
@@ -412,6 +419,28 @@ function assertOpenCodeActivationUnchanged(plan, operation, snapshot) {
   if (digest !== snapshot.get(key)) {
     throw new Error(`Refusing OpenCode hook deactivation: activation changed after preflight at ${operation.destinationPath}`);
   }
+}
+
+function getOpenCodeActivationWriteOptions(operation, snapshot) {
+  const key = comparablePath(operation.destinationPath);
+  if (!snapshot.has(key)) return {};
+  const digest = snapshot.get(key);
+  return { expectedContent: Object.freeze(digest === null
+    ? { kind: 'absent' } : { kind: 'sha256', digest }) };
+}
+
+function getOpenCodeInstallRoots(plan) {
+  const roots = [plan.targetRoot];
+  const legacy = getLegacyLocationForPlan(plan);
+  if (legacy) {
+    try {
+      fs.lstatSync(legacy.targetRoot);
+      roots.push(legacy.targetRoot);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  return roots;
 }
 
 function findPreviousManagedHooks(previousState, plan, operation) {
@@ -573,6 +602,14 @@ function previewInstallPlan(plan) {
 
 function applyInstallPlan(plan, dependencies = {}) {
   assertHookConsentReady(plan);
+  if (plan.adapter?.target === 'opencode') {
+    assertSafeInstallOperation(plan, { destinationPath: plan.installStatePath });
+    return withOpenCodeInstallLocks(
+      getOpenCodeInstallRoots(plan),
+      () => applyInstallPlanLocked(plan, dependencies, false),
+      dependencies.opencodeLease
+    );
+  }
   const isClaudeManualTarget = plan.adapter
     && (plan.adapter.target === 'claude' || plan.adapter.target === 'claude-project');
   const settingsPathToLock = isClaudeManualTarget
@@ -598,9 +635,12 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
     beforeInstallStateRead({ plan });
   }
   const activationSnapshot = assertOpenCodeHookDeactivationReady(plan);
-  const migration = prepareHookConsentMigration(
+  const migration = prepareExcludedPathsReconciliation(
     plan,
-    prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+    prepareHookConsentMigration(
+      plan,
+      prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+    )
   );
   const appliedPlan = {
     ...plan,
@@ -640,7 +680,7 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
       if (typeof beforeOperationWrite === 'function') {
         beforeOperationWrite({ plan: appliedPlan, operation });
       }
-      assertNoNewUserOwnedFile(migration, operation);
+      assertNoNewUserOwnedFile(migration, operation, appliedPlan);
       assertOpenCodeActivationUnchanged(appliedPlan, operation, activationSnapshot);
 
       if (
@@ -728,7 +768,20 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
             index: linkIndex,
           })
           : transformed;
-        fs.writeFileSync(operation.destinationPath, installedContent, 'utf8');
+        const writeOptions = getOpenCodeActivationWriteOptions(operation, activationSnapshot);
+        if (writeOptions.expectedContent) {
+          writeFileNoFollow(operation.destinationPath, installedContent, {
+            ...writeOptions,
+            action: 'install OpenCode activation',
+            validateDestination(destinationPath) {
+              assertSafeInstallOperation(appliedPlan, { destinationPath });
+              assertSafeClaudeSkillOperation(appliedPlan, { destinationPath });
+              return destinationPath;
+            },
+          });
+        } else {
+          fs.writeFileSync(operation.destinationPath, installedContent, 'utf8');
+        }
         writtenDestinations.add(operation.destinationPath);
         continue;
       }
@@ -817,17 +870,31 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
     ];
   }
 
+  let excludedPathsRemoved = [];
+  let excludedPathsWarnings = [];
+  try {
+    const excludedReconciliation = completeExcludedPathsReconciliation(migration, appliedPlan);
+    excludedPathsRemoved = excludedReconciliation.removedPaths;
+    excludedPathsWarnings = excludedReconciliation.warnings;
+  } catch (error) {
+    excludedPathsWarnings = [
+      `Excluded-paths reconciliation did not finish: ${error.message}. Previously managed files under excluded source paths were preserved; remove them manually or rerun the install.`,
+    ];
+  }
+
     return {
       ...plan,
       statePreview: finalState,
       plannedOperations: [...plan.operations],
       operations: migration.appliedOperations,
       skippedOperations: migration.skippedOperations,
+      reconciledExcludedPaths: excludedPathsRemoved,
       warnings: [
         ...(Array.isArray(plan.warnings) ? plan.warnings : []),
         ...migration.warnings,
         ...antigravityMigrationWarnings,
         ...opencodeMigrationWarnings,
+        ...excludedPathsWarnings,
       ],
       applied: true,
     };
@@ -837,6 +904,9 @@ module.exports = {
   applyInstallPlan,
   assertOpenCodeActivationUnchanged,
   assertOpenCodeHookDeactivationReady,
+  getOpenCodeActivationKind,
+  getOpenCodeActivationWriteOptions,
+  getOpenCodeInstallRoots,
   assertSafeInstallOperation,
   prepareHookConsentMigration,
   previewInstallPlan,

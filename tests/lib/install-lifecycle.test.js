@@ -2230,6 +2230,7 @@ function runTests() {
     const homeDir = createTempDir('install-lifecycle-opencode-alias-race-');
     const originalOpenSync = fs.openSync;
     const originalWriteFileSync = fs.writeFileSync;
+    const originalWriteSync = fs.writeSync;
     const originalCloseSync = fs.closeSync;
     const descriptors = new Set();
     try {
@@ -2250,8 +2251,8 @@ function runTests() {
           descriptors.delete(descriptor);
           return originalCloseSync.call(fs, descriptor);
         };
-        fs.writeFileSync = function insertAliasAfterPluginWrite(candidate, ...args) {
-          const result = originalWriteFileSync.call(fs, candidate, ...args);
+        fs.writeSync = function insertAliasAfterPluginWrite(candidate, ...args) {
+          const result = originalWriteSync.call(fs, candidate, ...args);
           if (!inserted && descriptors.has(candidate)) {
             inserted = true;
             originalWriteFileSync.call(fs, aliasPath, aliasContent);
@@ -2271,7 +2272,7 @@ function runTests() {
           });
         } finally {
           fs.openSync = originalOpenSync;
-          fs.writeFileSync = originalWriteFileSync;
+          fs.writeSync = originalWriteSync;
           fs.closeSync = originalCloseSync;
         }
         assert.strictEqual(inserted, true, 'The plugin-write boundary was exercised');
@@ -2285,7 +2286,7 @@ function runTests() {
       });
     } finally {
       fs.openSync = originalOpenSync;
-      fs.writeFileSync = originalWriteFileSync;
+      fs.writeSync = originalWriteSync;
       fs.closeSync = originalCloseSync;
       cleanup(homeDir);
     }
