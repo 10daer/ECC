@@ -1288,7 +1288,6 @@ function runTests() {
         adapter: { id: 'test-install', target: 'test-install', kind: 'project' },
         target: 'test-install',
         targetRoot: path.join(tempDir, 'installed'),
-        adapter: { id: 'test-install', target: 'test-install' },
         installStatePath,
         statePreview: {
           schemaVersion: 'ecc.install.v1',
