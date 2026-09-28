@@ -493,6 +493,35 @@ test('distinguishes foreach statements from the pipeline alias', () => {
   ]);
 });
 
+test('foreach headers and nested bodies retain destructive scanning', () => {
+  for (const command of [
+    'foreach ($x in $(Remove-Item -Force C:/tmp/demo)) { $x }',
+    'foreach ($x in (Remove-Item -Force C:/tmp/demo)) { $x }',
+    'FoReAcH  \n ($x in @("a")) { Remove-Item -Force C:/tmp/demo }',
+    'Get-Date; foreach ($x in "a") { foreach ($y in "b") { Remove-Item -Force C:/tmp/demo } }',
+  ]) expectRules(command, [RULES.REMOVE_FORCE]);
+  for (const command of [
+    'FoReAcH \n ($x in @("a", "b")) { $x }',
+    'Get-Date; foreach ($x in "a") { $x }',
+    'foreach ($x in @({ Remove-Item -Force C:/tmp/demo })) { $x }',
+    'Write-Output "foreach ($x in Remove-Item -Force C:/tmp/demo)"',
+  ]) expectSafe(command);
+});
+
+test('short dynamic groups preserve following command boundaries', () => {
+  for (const command of [
+    'iex ($a)\nRemove-Item -Force C:/tmp/demo',
+    'iex ($a) | Remove-Item -Force C:/tmp/demo',
+    '& ($a); iex ($b); Remove-Item -Force C:/tmp/demo',
+  ]) expectRules(command, [RULES.DYNAMIC_EXECUTION, RULES.REMOVE_FORCE]);
+});
+
+test('resolved scalar output longer than its group preserves following commands', () => {
+  expectRules("$name='Remove-Item'; & $($name) -Force C:/tmp/demo; Clear-Content C:/tmp/demo", [
+    RULES.REMOVE_FORCE, RULES.CLEAR_CONTENT,
+  ]);
+});
+
 test('classifies invoked static script-block variables but leaves assignments inert', () => {
   expectSafe('$cleanup = { Remove-Item -Force C:/tmp/demo }');
   expectRules('$cleanup = { Remove-Item -Force C:/tmp/demo }; & $cleanup', [
