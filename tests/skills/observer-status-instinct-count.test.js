@@ -95,8 +95,10 @@ function runStatus(files, { run = spawnSync, setup = () => {}, remove = fs.rmSyn
     // Only this foreground shell's own PID is advertised. No observer, sleep,
     // provider or other background child is started or signalled.
     const program = 'printf "%s\\n" "$$" > "$CLV2_HOMUNCULUS_DIR/.observer.pid"\nexec "$BASH" "$1" status';
-    const result = run(bashBinary, ['--noprofile', '--norc', '-c', program,
-      'observer-status-test', toShellPath(observerScript)], {
+    const wrapper = path.join(fixture.root, 'status-wrapper.sh');
+    fs.writeFileSync(wrapper, `${program}\n`, { flag: 'wx', mode: 0o600 });
+    const result = run(bashBinary, ['--noprofile', '--norc', toShellPath(wrapper),
+      toShellPath(observerScript)], {
       cwd: fixture.root, encoding: 'utf8', env: fixture.env,
       timeout: childTimeoutMs, maxBuffer: childMaxBuffer, killSignal: 'SIGKILL',
     });
@@ -142,8 +144,9 @@ function cleanupTests() {
         assert.ok(options.env.CLV2_CONFIG.endsWith('/absent-config.json'));
         assert.ok(!fs.existsSync(options.env.CLV2_CONFIG));
         assert.strictEqual(args.at(-1), toShellPath(observerScript));
-        assert.match(args[3], /\nexec "\$BASH" "\$1" status$/);
-        assert.doesNotMatch(args[3], /sleep|kill|&/);
+        const program = args.includes('-c') ? args[3] : fs.readFileSync(path.join(root, 'status-wrapper.sh'), 'utf8');
+        assert.match(program, /\nexec "\$BASH" "\$1" status\n?$/);
+        assert.doesNotMatch(program, /sleep|kill|&/);
         return { status: 0, stdout: 'Instincts: 0\n', stderr: '' };
       } }), 0);
       assert.ok(!fs.existsSync(root));
@@ -227,6 +230,38 @@ function buildTests() {
         assert.ok(!fs.existsSync(path.join(options.cwd, 'unwanted')));
         return result;
       } }), 1);
+    })],
+    ['status dispatches a fixed private wrapper file without inline shell code', () => {
+      let root;
+      assert.strictEqual(runStatus([], { run: (_command, args, options) => {
+        root = options.cwd;
+        assert.deepStrictEqual(args.slice(0, 2), ['--noprofile', '--norc']);
+        assert.ok(!args.includes('-c'), 'status must dispatch a wrapper file, not inline code');
+        assert.strictEqual(args.length, 4);
+        const wrapper = path.join(root, 'status-wrapper.sh');
+        assert.strictEqual(args[2], toShellPath(wrapper));
+        assert.strictEqual(args[3], toShellPath(observerScript));
+        assert.strictEqual(fs.readFileSync(wrapper, 'utf8'),
+          'printf "%s\\n" "$$" > "$CLV2_HOMUNCULUS_DIR/.observer.pid"\nexec "$BASH" "$1" status\n');
+        if (process.platform !== 'win32') assert.strictEqual(fs.statSync(wrapper).mode & 0o777, 0o600);
+        return { status: 0, stdout: 'Instincts: 0\n', stderr: '' };
+      } }), 0);
+      assert.ok(!fs.existsSync(root));
+    }],
+    ['status target path metacharacters remain data and exec retains the advertised PID', shellTest(() => {
+      let target;
+      assert.strictEqual(runStatus([], { setup: fixture => {
+        target = path.join(fixture.root, 'status \' $() `literal` ; &.sh');
+        fs.writeFileSync(target,
+          '[ "$#" -eq 1 ] && [ "$1" = status ] || exit 96\n'
+          + 'IFS= read -r advertised < "$CLV2_HOMUNCULUS_DIR/.observer.pid"\n'
+          + '[ "$advertised" = "$$" ] || exit 95\n'
+          + 'printf "Instincts: 0\\n"\n', { flag: 'wx', mode: 0o600 });
+      }, run: (command, args, options) => {
+        assert.strictEqual(args.at(-1), toShellPath(observerScript));
+        return spawnSync(command, [...args.slice(0, -1), toShellPath(target)], options);
+      } }), 0);
+      assert.ok(!fs.existsSync(target));
     })],
     ['linked regular files count without traversing directory links', shellTest(() => {
       assert.strictEqual(runStatus(['a.md', 'b.yaml', 'c.yml', 'd.YAML', '.note.MD',
