@@ -19,6 +19,9 @@ const {
 } = require('../../scripts/ci/verify-release-gates.js');
 const lifecycleRunnerSource = load('tests/ci/packed-artifact-lifecycle.js');
 
+// A pending Promise alone does not keep Node alive. Only a completed queue
+// may report success, including when a deadline regression leaves it unsettled.
+process.exitCode = 1;
 let passed = 0;
 let failed = 0;
 let pendingTests = Promise.resolve();
