@@ -66,6 +66,14 @@ try {
   assert.strictEqual(lexicalStorage, canonicalStorage, '.. route must reuse the physical observer key');
   assert.strictEqual(trailingSlashStorage, canonicalStorage, 'trailing slash must reuse the physical observer key');
 
+  const spacedRoot = path.join(testRoot, 'homunculus with spaces');
+  fs.mkdirSync(spacedRoot, { recursive: true });
+  const spacedStorage = storageFor(spacedRoot);
+  assert.ok(
+    spacedStorage.includes('/homunculus with spaces/projects/'),
+    `paths containing spaces must stay intact when canonicalized: ${spacedStorage}`
+  );
+
   try {
     fs.symlinkSync(actualRoot, aliasRoot, 'dir');
     const symlinkStorage = storageFor(aliasRoot);
