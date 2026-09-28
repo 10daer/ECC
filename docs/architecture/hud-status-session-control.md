@@ -101,3 +101,11 @@ timed-out mutation returns HTTP 503 with `code: STATE_STORE_BUSY` and
 `Retry-After: 1`; invalid mutations continue to return HTTP 400. Each worker
 closes its store before reporting the result and exits naturally, including
 when the requesting browser disconnects, to avoid interrupting a write.
+
+At most two board-mutation workers may exist in a server process, shared
+across database paths and server instances. Admission happens before worker
+creation. When both slots are occupied, extra requests receive the same
+retryable HTTP 503 immediately; they are not queued or executed later.
+A slot remains occupied until the worker actually exits, including after a
+result, error, or browser disconnect. Construction failure releases the slot
+immediately. This bounds waiting workers even while the database is locked.
