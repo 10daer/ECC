@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createFileSystemLoader } = require('./helpers/load-with-file-system');
+const { assertFilePostimage } = require('./helpers/assert-file-postimage');
 const fileSystem = { ...fs };
 const load = createFileSystemLoader(fileSystem);
 const { applyInstallPlan } = load(require.resolve('../../scripts/lib/install/apply'));
@@ -393,6 +394,7 @@ function runTests() {
       finally { fs.closeSync(setupFd); }
       const opened = new Set();
       const flagsSeen = [];
+      const modesSeen = [];
       const contents = [];
       let closes = 0;
       let quarantinePath;
@@ -402,11 +404,12 @@ function runTests() {
         constants: { ...fs.constants,
           O_RDONLY: fs.constants.O_RDONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC,
           O_NOFOLLOW: 0 },
-        openSync(file, flags) {
+        openSync(file, flags, mode) {
           quarantinePath = file;
           flagsSeen.push(flags);
+          modesSeen.push(mode);
           if (boundary === 'missing') fs.unlinkSync(file);
-          const fd = fs.openSync(file, flags);
+          const fd = fs.openSync(file, flags, mode);
           opened.add(fd);
           return fd;
         },
@@ -435,11 +438,12 @@ function runTests() {
         else assert.throws(remove, error => error === injectedError);
         assert.deepStrictEqual(flagsSeen,
           [fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)]);
+        assert.deepStrictEqual(modesSeen, [0o600]);
         assert.strictEqual(opened.size, 0);
         assert.strictEqual(closes, boundary === 'missing' ? 0 : 1);
         if (boundary === 'existing') assert.deepStrictEqual(contents, [SKILL_CONTENT]);
         if (boundary === 'read-error' || boundary === 'stat-error') {
-          assert.strictEqual(fs.readFileSync(value.legacyFile, 'utf8'), SKILL_CONTENT);
+          assertFilePostimage(value.legacyFile, stat, SKILL_CONTENT);
         } else {
           assert.strictEqual(fs.existsSync(value.legacyFile), false);
         }
@@ -447,6 +451,83 @@ function runTests() {
       } finally {
         for (const fd of opened) fs.closeSync(fd);
       }
+    });
+  }
+  for (const defect of ['identity', 'bytes', 'path snapshot']) {
+    test(`descriptor postimage assertion refuses different ${defect}`, value => {
+      const fd = fs.openSync(value.legacyFile, 'r');
+      let identity;
+      try { identity = fs.fstatSync(fd, { bigint: true }); }
+      finally { fs.closeSync(fd); }
+      if (defect === 'identity') identity = { ...identity, ino: identity.ino + 1n };
+      if (defect === 'bytes') fs.writeFileSync(value.legacyFile, 'changed private fixture bytes');
+      const opened = [];
+      const closed = [];
+      const facade = { ...fs,
+        openSync(...args) { const value = fs.openSync(...args); opened.push(value); return value; },
+        closeSync(value) { fs.closeSync(value); closed.push(value); },
+      };
+      if (defect === 'path snapshot') {
+        const otherFd = fs.openSync(path.join(value.legacyRoot, 'different-file'), 'wx', 0o600);
+        let otherIdentity;
+        try { otherIdentity = fs.fstatSync(otherFd, { bigint: true }); }
+        finally { fs.closeSync(otherFd); }
+        // Supply a real second-file snapshot without renaming any open Windows file.
+        facade.lstatSync = () => otherIdentity;
+      }
+      assert.throws(() => assertFilePostimage(value.legacyFile, identity, SKILL_CONTENT, facade),
+        /postimage (ino|bytes|path ino) must match/);
+      assert.strictEqual(opened.length, 1);
+      assert.deepStrictEqual(closed, opened, 'a failed assertion still closes its owned descriptor');
+    });
+  }
+  for (const boundary of ['open', 'fstat', 'read', 'identity', 'fstat-close', 'read-close',
+    'identity-close', 'close', 'falsy-close']) {
+    test(`descriptor postimage assertion preserves the ${boundary} failure and closes once`, value => {
+      const setupFd = fs.openSync(value.legacyFile, 'r');
+      let identity;
+      try { identity = fs.fstatSync(setupFd, { bigint: true }); }
+      finally { fs.closeSync(setupFd); }
+      const primary = boundary === 'falsy-close' ? undefined : new Error(`Synthetic ${boundary}`);
+      const closeFailure = new Error('Synthetic close failure');
+      const opened = [];
+      const closed = [];
+      const facade = { ...fs,
+        openSync(...args) {
+          if (boundary === 'open') throw primary;
+          const fd = fs.openSync(...args);
+          opened.push(fd);
+          return fd;
+        },
+        fstatSync(...args) {
+          if (boundary.startsWith('fstat')) throw primary;
+          return fs.fstatSync(...args);
+        },
+        readFileSync(...args) {
+          if (boundary.startsWith('read') || boundary === 'falsy-close') throw primary;
+          return fs.readFileSync(...args);
+        },
+        closeSync(fd) {
+          assert.ok(opened.includes(fd), 'only close an owned descriptor');
+          fs.closeSync(fd);
+          closed.push(fd);
+          if (boundary.endsWith('close')) throw closeFailure;
+        },
+      };
+      if (boundary.startsWith('identity')) identity = { ...identity, ino: identity.ino + 1n };
+      let threw = false;
+      try {
+        assertFilePostimage(value.legacyFile, identity, SKILL_CONTENT, facade);
+      } catch (error) {
+        threw = true;
+        if (boundary.startsWith('identity')) {
+          assert.strictEqual(error.code, 'ERR_ASSERTION');
+          assert.match(error.message, /postimage ino must match/);
+        } else assert.strictEqual(error, boundary === 'close' ? closeFailure : primary);
+      }
+      assert.ok(threw, 'the failure must propagate');
+      assert.strictEqual(opened.length, boundary === 'open' ? 0 : 1);
+      assert.deepStrictEqual(closed, opened, 'close each owned descriptor exactly once');
     });
   }
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);

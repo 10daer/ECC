@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { writeFileNoFollow } = require('../../scripts/lib/install/guarded-write');
+const { assertFilePostimage } = require('./helpers/assert-file-postimage');
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 let passed = 0;
 let failed = 0;
@@ -164,16 +165,7 @@ test('a parent replacement before native open is refused even when the file iden
   assert.strictEqual(typeof descriptor, 'number');
   assert.strictEqual(closes, 1);
   assert.strictEqual(truncates, 0);
-  const postconditionFd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-  try {
-    const replacementIdentity = fs.fstatSync(postconditionFd, { bigint: true });
-    assert.ok(replacementIdentity.isFile());
-    assert.strictEqual(replacementIdentity.dev, fileIdentity.dev);
-    assert.strictEqual(replacementIdentity.ino, fileIdentity.ino);
-    assert.strictEqual(fs.readFileSync(postconditionFd, 'utf8'), 'old activation bytes');
-  } finally {
-    fs.closeSync(postconditionFd);
-  }
+  assertFilePostimage(file, fileIdentity, 'old activation bytes');
   assert.ok(fs.statSync(`${parent}.old`).isDirectory());
 });
 test('a denied native open preserves its cause without closing an unallocated descriptor', ({ file, options }) => {
