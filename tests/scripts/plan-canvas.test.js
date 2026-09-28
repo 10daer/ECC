@@ -67,6 +67,69 @@ function printResults(results) {
   process.exitCode = results.failed > 0 ? 1 : 0;
 }
 
+// A failed or stalled close may leave handles alive. Bound the whole async
+// run, then drain both output queues before exiting so the summary survives.
+// A blocked event loop or broken output sink still needs an outer watchdog.
+async function runTestProcess(run, suite, { timeoutMs = 60_000, flushTimeoutMs = 2_000 } = {}) {
+  process.exitCode = 1;
+  let deadline;
+  const timeout = new Promise(resolve => {
+    deadline = setTimeout(() => resolve({
+      failed: true,
+      error: new Error(`Plan Canvas test deadline exceeded (${timeoutMs}ms); setup, test, or cleanup did not settle`),
+    }), timeoutMs);
+  });
+  const execution = Promise.resolve().then(run).then(
+    () => ({ failed: false }),
+    error => ({ failed: true, error })
+  );
+  const outcome = await Promise.race([execution, timeout]);
+  clearTimeout(deadline);
+  const results = {
+    ...suite.results,
+    failed: suite.results.failed + (outcome.failed ? 1 : 0),
+  };
+  let status = results.failed > 0 ? 1 : 0;
+  try {
+    if (outcome.failed) console.error(failureText(outcome.error));
+    console.log('\n' + '='.repeat(40));
+    printResults(results);
+    console.log('='.repeat(40));
+  } catch {
+    status = 1;
+  }
+  // Capture the result before a late task can affect process.exitCode. The
+  // deadline loser is observed by execution's rejection handler above.
+  process.exitCode = status;
+  let flushDeadline;
+  const flushed = await Promise.race([
+    Promise.all([process.stdout, process.stderr].map(stream => new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = error => {
+        if (settled) return;
+        settled = true;
+        stream.removeListener('error', onError);
+        stream.removeListener('close', onClose);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onError = error => finish(error || new Error('Test output stream failed'));
+      const onClose = () => finish(new Error('Test output stream closed before flush'));
+      if (stream.destroyed || stream.writableEnded) {
+        onClose();
+        return;
+      }
+      stream.once('error', onError);
+      stream.once('close', onClose);
+      try { stream.write('', error => error ? onError(error) : finish()); }
+      catch (error) { onError(error); }
+    }))).then(() => true, () => false),
+    new Promise(resolve => { flushDeadline = setTimeout(() => resolve(false), flushTimeoutMs); }),
+  ]);
+  clearTimeout(flushDeadline);
+  process.exit(flushed ? status : 1);
+}
+
 // Compile the exact trusted module privately; this is not a security sandbox.
 // Relative dependencies retain normal resolution, without rewriting source or
 // changing module loaders, shared exports, or require.cache.
@@ -928,19 +991,15 @@ async function integrationCleanupTests(test) {
   });
 }
 
-async function main() {
+async function main(suite = createTestRunner()) {
   console.log('\n=== Testing plan-canvas server ===\n');
 
-  const suite = createTestRunner();
   const { test } = suite;
   await artifactSecurityTests(test);
   await artifactRaceTests(test);
   await fixtureIsolationTests(test);
   await integrationCleanupTests(test);
-  if (process.argv.includes('--artifact-security-only')) {
-    printResults(suite.results);
-    return;
-  }
+  if (process.argv.includes('--artifact-security-only')) return;
 
   await withResourceScope(async resources => {
     const integrationTest = (name, callback) => test(name, () => withResourceScope(owned => callback({
@@ -1350,16 +1409,7 @@ async function main() {
     });
   });
 
-  console.log('\n' + '='.repeat(40));
-  printResults(suite.results);
-  console.log('='.repeat(40));
 }
 
-// Stay nonzero if setup or cleanup stalls without a live handle or summary.
-process.exitCode = 1;
-main().catch(err => {
-  console.error(failureText(err));
-  console.log('Passed: 0');
-  console.log('Failed: 1');
-  process.exitCode = 1;
-});
+const suite = createTestRunner();
+runTestProcess(() => main(suite), suite);
