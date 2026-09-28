@@ -60,10 +60,43 @@ class ClaudeProvider(LLMProvider):
             model = input.model or _DEFAULT_MODEL
             system_parts = [msg.content for msg in input.messages if msg.role == Role.SYSTEM]
             api_messages: list[dict[str, Any]] = []
+            # The Anthropic Messages API requires `tool_result` blocks in the
+            # user turn *immediately* following the matching assistant
+            # `tool_use` turn. Once a different user/assistant message has
+            # been emitted between the two, any later `tool_result` becomes
+            # an orphan that the API rejects with a 400. Track the ids of
+            # tool_use blocks whose immediate-after-tool_result window is
+            # still open, and consume an id as soon as a matching tool_result
+            # is processed.
+            pending_tool_use_ids: set[str] = set()
             for message in input.messages:
                 if message.role == Role.SYSTEM:
                     continue
+                if message.role == Role.ASSISTANT and message.tool_calls:
+                    # A new assistant turn closes any prior window and opens
+                    # a new one for the tool_use blocks emitted here.
+                    pending_tool_use_ids = {
+                        tc.id for tc in message.tool_calls if tc.id
+                    }
+                elif message.role != Role.TOOL:
+                    # Any non-TOOL message (USER text, plain ASSISTANT
+                    # reply, ...) closes the immediate-after-tool_use
+                    # window for every pending id.
+                    pending_tool_use_ids.clear()
                 serialized = message.to_anthropic_dict()
+                if serialized is None:
+                    # Orphan tool message (no tool_call_id) — already noted
+                    # at serialization time; skip it here too.
+                    continue
+                if message.role == Role.TOOL and message.tool_call_id:
+                    if message.tool_call_id not in pending_tool_use_ids:
+                        # tool_result whose matching tool_use is no longer
+                        # immediately before this message (e.g. a user text
+                        # turn was interleaved). Drop rather than let the
+                        # whole request 400 out on `tool_use_id` lookup.
+                        pending_tool_use_ids.discard(message.tool_call_id)
+                        continue
+                    pending_tool_use_ids.discard(message.tool_call_id)
                 merges_with_previous = (
                     message.role == Role.TOOL
                     and bool(api_messages)

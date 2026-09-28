@@ -44,15 +44,24 @@ class Message:
             ]
         return result
 
-    def to_anthropic_dict(self) -> dict[str, Any]:
-        """Serialize a message using the Anthropic Messages API format."""
+    def to_anthropic_dict(self) -> dict[str, Any] | None:
+        """Serialize a message using the Anthropic Messages API format.
+
+        Returns None for TOOL messages that lack a `tool_call_id`: the
+        Anthropic API rejects `"tool_use_id": ""` with a confusing 400,
+        so orphan tool results are dropped at serialization time rather
+        than silently corrupting the request payload. The caller is
+        responsible for logging the skip.
+        """
         if self.role == Role.TOOL:
+            if not self.tool_call_id:
+                return None
             return {
                 "role": Role.USER.value,
                 "content": [
                     {
                         "type": "tool_result",
-                        "tool_use_id": self.tool_call_id or "",
+                        "tool_use_id": self.tool_call_id,
                         "content": self.content,
                     }
                 ],

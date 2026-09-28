@@ -200,3 +200,90 @@ def test_generate_without_system_does_not_set_system_or_cache_control() -> None:
     params = provider.client.messages.last_params
     assert "cache_control" not in params
     assert "system" not in params
+
+
+@pytest.mark.unit
+def test_to_anthropic_dict_drops_orphan_tool_message_with_no_tool_call_id() -> None:
+    """A TOOL message without a `tool_call_id` would serialize to
+    `"tool_use_id": ""`, which the Anthropic API rejects with a 400. The
+    serializer must return None so the provider skips it (chenhz01 #3057)."""
+    message = Message(role=Role.TOOL, content="orphan", tool_call_id=None)
+
+    assert message.to_anthropic_dict() is None
+
+    empty = Message(role=Role.TOOL, content="orphan", tool_call_id="")
+
+    assert empty.to_anthropic_dict() is None
+
+
+@pytest.mark.unit
+def test_generate_drops_tool_message_with_no_tool_call_id() -> None:
+    """End-to-end: orphan TOOL messages (no `tool_call_id`) are skipped
+    rather than corrupting the request payload with empty tool_use_id."""
+    provider = make_provider(make_response([SimpleNamespace(type="text", text="ok")]))
+
+    provider.generate(
+        LLMInput(
+            messages=[
+                Message(role=Role.USER, content="hi"),
+                Message(role=Role.ASSISTANT, content="", tool_calls=[
+                    ToolCall(id="toolu_1", name="search", arguments={"q": "x"}),
+                ]),
+                Message(role=Role.TOOL, content="results", tool_call_id="toolu_1"),
+                Message(role=Role.TOOL, content="orphan", tool_call_id=None),
+            ]
+        )
+    )
+
+    params = provider.client.messages.last_params
+    # The orphan must not appear in the serialized payload at all.
+    flat_tool_use_ids: list[str] = []
+    for msg in params["messages"]:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    flat_tool_use_ids.append(block["tool_use_id"])
+    assert flat_tool_use_ids == ["toolu_1"]
+
+
+@pytest.mark.unit
+def test_generate_drops_tool_result_orphaned_by_interleaved_user_text() -> None:
+    """A tool_result that no longer immediately follows its tool_use (a
+    user text turn was interleaved) would 400 on the API because the
+    Anthropic Messages API requires tool_result in the user turn
+    directly after the tool_use. Drop it (chenhz01 #3057)."""
+    provider = make_provider(make_response([SimpleNamespace(type="text", text="ok")]))
+
+    provider.generate(
+        LLMInput(
+            messages=[
+                Message(role=Role.USER, content="hi"),
+                Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="toolu_1", name="search", arguments={"q": "x"}),
+                    ],
+                ),
+                # tool_result for toolu_1 — immediately after tool_use, kept
+                Message(role=Role.TOOL, content="results", tool_call_id="toolu_1"),
+                # User text turn interleaved BEFORE the second tool_result
+                Message(role=Role.USER, content="while you were at it"),
+                # tool_result whose tool_use is no longer immediately before
+                Message(role=Role.TOOL, content="stale", tool_call_id="toolu_1"),
+            ]
+        )
+    )
+
+    params = provider.client.messages.last_params
+    flat_tool_use_ids: list[str] = []
+    for msg in params["messages"]:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    flat_tool_use_ids.append(block["tool_use_id"])
+    # Only the first tool_result (which immediately follows its tool_use)
+    # survives; the interleaved one is dropped.
+    assert flat_tool_use_ids == ["toolu_1"]
