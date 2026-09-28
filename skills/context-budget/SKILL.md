@@ -43,46 +43,55 @@ Scan all component directories and estimate token consumption:
 - Estimate schema overhead at ~500 tokens per tool
 - Flag: servers with >20 tools, servers that wrap simple CLI commands (`gh`, `git`, `npm`, `supabase`, `vercel`)
 
-**Session scaffolding** (measured from the transcript)
+**Persisted-record bytes** (optional)
 
-Everything above is loaded once at startup. A *reconnect* re-injects much of it again as `attachment`
-lines in the session transcript — and that re-injection is charged to the same context window.
+For a local file diagnostic, explicitly select a stable, regular JSONL file or a snapshot you
+intend to inspect. Replace the example path below; this does not find or reconnect a session.
+The snippet prints aggregate byte counts only. It reads one line at a time, so memory use depends
+on the largest record; avoid very large records and actively growing files.
 
 ```sh
-f=$(ls -t ~/.claude/projects/"${PWD//\//-}"/*.jsonl 2>/dev/null | head -1)
-[ -n "$f" ] || { echo "no transcript for this project yet"; exit 0; }
-python3 - "$f" <<'EOF'
-import json,sys
-tot=att=0
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    if not line.strip(): continue
-    tot+=len(line.encode())
-    try:
-        if json.loads(line).get("type")=="attachment": att+=len(line.encode())
-    except Exception: pass          # a malformed line counts as conversation, never crashes
-if tot==0: print("empty transcript"); raise SystemExit
-pct = att*100.0/tot
-print(f"transcript {tot}B | scaffolding {att}B ({pct:.1f}%) | rest {tot-att}B")
-if att*10 > tot*4: print(f"WARNING: scaffolding is {pct:.1f}% of the transcript (>40%)")
+python3 - "/path/to/selected-session.jsonl" <<'EOF'
+import json
+import sys
+
+total = attachment = other = unclassified = 0
+try:
+    with open(sys.argv[1], "rb") as source:
+        for raw in source:
+            size = len(raw)
+            total += size
+            try:
+                record = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                unclassified += size
+                continue
+            record_type = record.get("type") if isinstance(record, dict) else None
+            if not isinstance(record_type, str):
+                unclassified += size
+            elif record_type == "attachment":
+                attachment += size
+            else:
+                other += size
+except OSError:
+    print("Cannot read selected JSONL file.", file=sys.stderr)
+    raise SystemExit(1)
+
+pct = attachment * 100.0 / total if total else 0.0
+print(f"persisted {total}B | attachment records {attachment}B ({pct:.1f}%) | "
+      f"other records {other}B | unclassified {unclassified}B")
 EOF
 ```
 
-Measured on a session that had reconnected once: **33,884 of 49,830 bytes — 68% scaffolding**
-(`skill_listing` 14.6KB, `mcp_instructions_delta` 8.1KB, `deferred_tools_delta` 7.1KB,
-`agent_listing_delta` 2.6KB) against 15.9KB of conversation.
+The three categories add up to the original file bytes, including line endings and blank lines.
+`attachment` is an exact record-type filter, not a guarantee about a harness's current internal
+schema. Other records have a different string `type`; malformed JSON, invalid UTF-8, nonobject
+values, missing or non-string types, and blank lines are unclassified. Neither category means
+"conversation," and the percentage is only a share of persisted bytes.
 
-**What this number is, and what it is not.**
-
-- It *is* a cost signal. Scaffolding is real context spend, and it is rebuilt on every reconnect —
-  so trimming a skill or an MCP server saves tokens **once per reconnect**, not once per session.
-  That strengthens every recommendation elsewhere in this skill.
-- It is **not** a headroom estimate, in either direction. Attachments *are* charged, so excluding
-  them overstates free space. And after a compaction the pre-compaction turns remain in the JSONL
-  while the model's active context holds only the much smaller summary — so counting persisted bytes
-  overstates what is actually loaded. **A transcript is a durable log, not a view of the context
-  window; do not report remaining room from its size.**
-- Report it as two separate figures — scaffolding share of the transcript, and conversation bytes —
-  and treat both as diagnostics rather than as a fullness gauge.
+These counts do not establish active context, remaining room, token usage, billing, or what a
+reconnect loads. For current harness-reported context and usage, use the version-appropriate
+[`/context` and `/usage` commands (`/cost` is an alias)](https://code.claude.com/docs/en/commands).
 
 **CLAUDE.md** (project + user-level)
 - Count tokens per file in the CLAUDE.md chain
