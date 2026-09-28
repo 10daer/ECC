@@ -38,6 +38,12 @@ const {
   completeExcludedPathsReconciliation,
   prepareExcludedPathsReconciliation,
 } = require('./excluded-paths-reconciliation');
+const {
+  completeStaleOperationsReconciliation,
+  describeStaleOperationsPreview,
+  prepareStaleOperationsReconciliation,
+  withoutStaleOperations,
+} = require('./stale-operations-reconciliation');
 const { buildInstallIndex, rewriteRelativeLinks } = require('./link-rewrite');
 const { adaptAntigravityAgent } = require('./antigravity-agent');
 
@@ -400,9 +406,12 @@ function prepareHookConsentMigration(plan, migration) {
 }
 
 function previewInstallPlan(plan) {
-  const migration = prepareHookConsentMigration(
+  const migration = prepareStaleOperationsReconciliation(
     plan,
-    prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+    prepareHookConsentMigration(
+      plan,
+      prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+    )
   );
   const appliedPlan = {
     ...plan,
@@ -414,7 +423,7 @@ function previewInstallPlan(plan) {
     : [];
   return {
     ...plan,
-    statePreview: migration.finalState,
+    statePreview: withoutStaleOperations(migration.finalState, migration),
     plannedOperations: [...plan.operations],
     operations: migration.appliedOperations,
     skippedOperations: migration.skippedOperations,
@@ -422,6 +431,7 @@ function previewInstallPlan(plan) {
       ...(Array.isArray(plan.warnings) ? plan.warnings : []),
       ...migration.warnings,
       ...hookConsentWarnings,
+      ...describeStaleOperationsPreview(migration),
     ],
     applied: false,
   };
@@ -453,11 +463,14 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
   if (typeof beforeInstallStateRead === 'function') {
     beforeInstallStateRead({ plan });
   }
-  const migration = prepareExcludedPathsReconciliation(
+  const migration = prepareStaleOperationsReconciliation(
     plan,
-    prepareHookConsentMigration(
+    prepareExcludedPathsReconciliation(
       plan,
-      prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+      prepareHookConsentMigration(
+        plan,
+        prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+      )
     )
   );
   const appliedPlan = {
@@ -605,7 +618,12 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
         );
       }
 
-      finalState = stateWithContentDigests(migration.finalState, appliedPlan);
+      // Stale records leave only the successful final state; the bridge and
+      // failure checkpoint above keep them so a failed install retains ownership.
+      finalState = stateWithContentDigests(
+        withoutStaleOperations(migration.finalState, migration),
+        appliedPlan
+      );
       if (typeof beforeInstallStateWrite === 'function') {
         beforeInstallStateWrite({ plan: appliedPlan, state: finalState });
       }
@@ -685,6 +703,18 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
     ];
   }
 
+  let stalePathsRemoved = [];
+  let stalePathsWarnings = [];
+  try {
+    const staleReconciliation = completeStaleOperationsReconciliation(migration, appliedPlan);
+    stalePathsRemoved = staleReconciliation.removedPaths;
+    stalePathsWarnings = staleReconciliation.warnings;
+  } catch (error) {
+    stalePathsWarnings = [
+      `Stale install-state reconciliation did not finish: ${error.message}. Files ECC no longer installs were preserved; remove them manually if unwanted.`,
+    ];
+  }
+
     return {
       ...plan,
       statePreview: finalState,
@@ -692,12 +722,14 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
       operations: migration.appliedOperations,
       skippedOperations: migration.skippedOperations,
       reconciledExcludedPaths: excludedPathsRemoved,
+      reconciledStalePaths: stalePathsRemoved,
       warnings: [
         ...(Array.isArray(plan.warnings) ? plan.warnings : []),
         ...migration.warnings,
         ...antigravityMigrationWarnings,
         ...opencodeMigrationWarnings,
         ...excludedPathsWarnings,
+        ...stalePathsWarnings,
       ],
       applied: true,
     };
