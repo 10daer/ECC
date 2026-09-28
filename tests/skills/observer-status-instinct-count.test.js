@@ -1,11 +1,7 @@
 /**
- * Regression tests for #2859: `start-observer.sh status` counted only *.yaml.
- *
- * The producer writes `<id>.md` (agents/observer-loop.sh instructs the analyzer
- * to) and the loader accepts .yaml/.yml/.md (ALLOWED_INSTINCT_EXTENSIONS in
- * scripts/instinct-cli.py), so the one command an operator runs to confirm that
- * learning works reported `Instincts: 0` on a working install — and an operator
- * cannot tell that apart from a silently dead observer.
+ * Regression tests for #2859: status counts eligible top-level instinct files.
+ * The loader accepts .yaml/.yml/.md; files can contain zero or many instincts,
+ * so this count does not establish parsed-record counts or observer health.
  */
 
 'use strict';
@@ -19,9 +15,12 @@ const path = require('path');
 const repoRoot = path.resolve(__dirname, '..', '..');
 const skillRoot = path.join(repoRoot, 'skills', 'continuous-learning-v2');
 const observerScript = path.join(skillRoot, 'agents', 'start-observer.sh');
-const detectProject = path.join(skillRoot, 'scripts', 'detect-project.sh');
 const instinctCli = path.join(skillRoot, 'scripts', 'instinct-cli.py');
-const bashBinary = process.env.ECC_TEST_BASH || (process.platform === 'win32' ? null : 'bash');
+const bashBinary = process.env.ECC_TEST_BASH || (process.platform === 'win32' ? null : '/bin/bash');
+const childTimeoutMs = 3000;
+const childMaxBuffer = 64 * 1024;
+
+class SkipTest extends Error {}
 
 function toShellPath(filePath) {
   const normalized = filePath.split(path.sep).join('/');
@@ -32,181 +31,241 @@ function readAllowedExtensions() {
   const cliSource = fs.readFileSync(instinctCli, 'utf8');
   const match = cliSource.match(/ALLOWED_INSTINCT_EXTENSIONS\s*=\s*\(([^)]*)\)/);
   assert.ok(match, 'ALLOWED_INSTINCT_EXTENSIONS not found in instinct-cli.py');
-  return match[1]
-    .split(',')
+  return match[1].split(',')
     .map(part => part.trim().replace(/^["']|["']$/g, ''))
     .filter(Boolean);
 }
 
-function readStatusCounter() {
-  const observerSource = fs.readFileSync(observerScript, 'utf8');
-  const counter = observerSource
-    .split('\n')
-    .filter(line => line.includes('instinct_count=') || line.includes('instinct_find_expr='))
-    .join('\n');
-  assert.ok(counter, 'status branch no longer computes an instinct count');
-  return counter;
-}
-
-function resolvePython() {
-  for (const candidate of [process.env.ECC_TEST_PYTHON, 'python3', 'python']) {
-    if (!candidate) continue;
-    const probe = spawnSync(candidate, ['-c', 'print(1)'], { encoding: 'utf8' });
-    if (probe.status === 0) return candidate;
+function fixtureAt(root) {
+  const home = path.join(root, 'home');
+  const temp = path.join(root, 'tmp');
+  const bin = path.join(root, 'bin');
+  const homunculus = path.join(root, 'homunculus');
+  const instincts = path.join(homunculus, 'instincts', 'personal');
+  const unexpected = path.join(root, 'unexpected-command');
+  for (const directory of [home, temp, bin, instincts]) fs.mkdirSync(directory, { recursive: true });
+  for (const command of ['python', 'python3', 'git', 'claude']) {
+    fs.writeFileSync(path.join(bin, command),
+      '#!/bin/sh\nprintf unexpected > "$FIXTURE_UNEXPECTED_COMMAND"\nexit 97\n', { mode: 0o700 });
   }
-  return null;
+  fs.writeFileSync(path.join(homunculus, 'observations.jsonl'), '');
+  return {
+    root, instincts, unexpected,
+    env: {
+      PATH: [toShellPath(bin), '/usr/bin', '/bin'].join(':'),
+      HOME: toShellPath(home), USERPROFILE: home, TMPDIR: toShellPath(temp),
+      TMP: temp, TEMP: temp, LC_ALL: 'C',
+      ...(process.platform === 'win32' ? { SystemRoot: process.env.SystemRoot } : {}),
+      CLV2_NO_PROJECT: '1', CLV2_HOMUNCULUS_DIR: toShellPath(homunculus),
+      CLV2_CONFIG: toShellPath(path.join(root, 'absent-config.json')),
+      CLV2_PYTHON_CMD: toShellPath(path.join(bin, 'python3')),
+      FIXTURE_UNEXPECTED_COMMAND: toShellPath(unexpected),
+    },
+  };
 }
 
-const pythonCmd = bashBinary ? resolvePython() : null;
-
-function runStatus(files) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-observer-'));
+function withFixture(callback, remove = fs.rmSync) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-observer-')));
+  let failed = false; let primary; let result;
   try {
-    const projectDir = path.join(tmp, 'proj');
-    fs.mkdirSync(projectDir, { recursive: true });
-    const writes = files
-      .map(name => `printf 'id: x' > "$INST/${name}"`)
-      .join('\n      ');
-    const script = [
-      `source "${toShellPath(detectProject)}"`,
-      'INST="$PROJECT_DIR/instincts/personal"',
-      'mkdir -p "$INST/nested"',
-      writes,
-      ': > "$PROJECT_DIR/observations.jsonl"',
-      'sleep 10 &',
-      'OBSERVER_PID=$!',
-      'echo "$OBSERVER_PID" > "$PROJECT_DIR/.observer.pid"',
-      `bash "${toShellPath(observerScript)}" status`,
-      'status=$?',
-      'kill "$OBSERVER_PID" 2>/dev/null || true',
-      'exit $status',
-    ].join('\n');
-    const result = spawnSync(bashBinary, ['-c', script], {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        CLV2_HOMUNCULUS_DIR: toShellPath(path.join(tmp, 'homunculus')),
-        CLAUDE_PROJECT_DIR: toShellPath(projectDir),
-        CLV2_PYTHON_CMD: pythonCmd,
-      },
-    });
-    assert.strictEqual(result.status, 0, result.stderr || result.stdout);
-    const line = (result.stdout || '').split('\n').find(l => l.startsWith('Instincts:'));
-    assert.ok(line, `no "Instincts:" line in status output:\n${result.stdout}`);
-    return Number(line.split(':')[1].trim());
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    result = callback(fixtureAt(root));
+  } catch (error) {
+    failed = true;
+    primary = error;
   }
+  try { remove(root, { recursive: true, force: true }); }
+  catch (error) { if (!failed) throw error; }
+  if (failed) throw primary;
+  return result;
+}
+
+function checkChild(result) {
+  if (result.error) throw result.error;
+  assert.strictEqual(result.status, 0, result.stderr || result.stdout || `child signal: ${result.signal}`);
+}
+
+function runStatus(files, { run = spawnSync, setup = () => {}, remove = fs.rmSync } = {}) {
+  return withFixture(fixture => {
+    for (const name of files) {
+      const target = path.join(fixture.instincts, name);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, 'id: fixture\n');
+    }
+    setup(fixture);
+    // Only this foreground shell's own PID is advertised. No observer, sleep,
+    // provider or other background child is started or signalled.
+    const program = 'printf "%s\\n" "$$" > "$CLV2_HOMUNCULUS_DIR/.observer.pid"\nexec "$BASH" "$1" status';
+    const result = run(bashBinary, ['--noprofile', '--norc', '-c', program,
+      'observer-status-test', toShellPath(observerScript)], {
+      cwd: fixture.root, encoding: 'utf8', env: fixture.env,
+      timeout: childTimeoutMs, maxBuffer: childMaxBuffer, killSignal: 'SIGKILL',
+    });
+    checkChild(result);
+    assert.ok(!fs.existsSync(fixture.unexpected), 'status must not invoke Git, Python or a provider');
+    const lines = (result.stdout || '').split('\n').filter(line => line.startsWith('Instincts:'));
+    assert.strictEqual(lines.length, 1, `expected one count in status output:\n${result.stdout}`);
+    assert.match(lines[0], /^Instincts:\s+\d+\s*$/);
+    return Number(lines[0].split(':')[1].trim());
+  }, remove);
+}
+
+function fileLink(target, link, type = 'file') {
+  try { fs.symlinkSync(target, link, type); }
+  catch (error) {
+    const unsupported = ['ENOSYS', 'ENOTSUP'].includes(error.code)
+      || (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code));
+    if (unsupported) throw new SkipTest(`symlink capability unavailable: ${error.code}`);
+    throw error;
+  }
+}
+
+function shellTest(fn) {
+  return () => {
+    if (!bashBinary) throw new SkipTest('requires bash; set ECC_TEST_BASH on Windows');
+    return fn();
+  };
+}
+
+function cleanupTests() {
+  return [
+    ['status child has a private environment and bounded execution', () => {
+      let root;
+      assert.strictEqual(runStatus([], { run: (_command, args, options) => {
+        root = options.cwd;
+        assert.strictEqual(options.timeout, childTimeoutMs);
+        assert.strictEqual(options.maxBuffer, childMaxBuffer);
+        assert.strictEqual(options.killSignal, 'SIGKILL');
+        assert.strictEqual(options.env.CLV2_NO_PROJECT, '1');
+        for (const key of ['BASH_ENV', 'ENV', 'NODE_OPTIONS', 'ANTHROPIC_API_KEY', 'CLAUDE_PROJECT_DIR']) {
+          assert.ok(!Object.hasOwn(options.env, key), `unexpected inherited ${key}`);
+        }
+        assert.ok(options.env.CLV2_CONFIG.endsWith('/absent-config.json'));
+        assert.ok(!fs.existsSync(options.env.CLV2_CONFIG));
+        assert.strictEqual(args.at(-1), toShellPath(observerScript));
+        assert.match(args[3], /\nexec "\$BASH" "\$1" status$/);
+        assert.doesNotMatch(args[3], /sleep|kill|&/);
+        return { status: 0, stdout: 'Instincts: 0\n', stderr: '' };
+      } }), 0);
+      assert.ok(!fs.existsSync(root));
+    }],
+    ...['timeout', 'nonzero', 'spawn error'].map(kind => [`${kind} cleans its private fixture`, () => {
+      let root;
+      const failure = Object.assign(new Error(kind), { code: kind === 'timeout' ? 'ETIMEDOUT' : 'EIO' });
+      assert.throws(() => runStatus([], { run: (_command, _args, options) => {
+        root = options.cwd;
+        return kind === 'nonzero' ? { status: 7, stdout: '', stderr: 'fixture rejected' } : { error: failure };
+      } }), error => kind === 'nonzero' ? /fixture rejected/.test(error.message) : error === failure);
+      assert.ok(!fs.existsSync(root));
+    }]),
+    ['cleanup preserves frozen and falsy primary failures', () => {
+      for (const primary of [Object.freeze(new Error('primary')), null, false, 0, undefined]) {
+        let root; let caught = false;
+        try {
+          withFixture(value => { root = value.root; throw primary; }, (value, options) => {
+            fs.rmSync(value, options); throw new Error('cleanup');
+          });
+        } catch (error) { caught = true; assert.strictEqual(error, primary); }
+        assert.ok(caught);
+        assert.ok(!fs.existsSync(root));
+      }
+    }],
+    ['cleanup failure is reported when the fixture otherwise succeeds', () => {
+      let root;
+      const failure = new Error('cleanup');
+      assert.throws(() => withFixture(value => { root = value.root; }, (value, options) => {
+        fs.rmSync(value, options); throw failure;
+      }), error => error === failure);
+      assert.ok(!fs.existsSync(root));
+    }],
+  ];
 }
 
 function buildTests() {
-  const tests = [];
-
-  // ── The counter must accept every extension the loader accepts ──
-
-  tests.push(['the loader still declares several instinct extensions', () => {
-    const allowed = readAllowedExtensions();
-    assert.ok(allowed.length >= 3, `expected several extensions, got ${allowed}`);
-  }]);
-
-  for (const ext of readAllowedExtensions()) {
-    tests.push([`status counts ${ext} — the loader accepts it`, () => {
-      const counter = readStatusCounter();
-      assert.ok(
-        counter.includes(`*${ext}"`) || counter.includes(`*${ext}'`),
-        `status count must match ${ext} (ALLOWED_INSTINCT_EXTENSIONS)`
-      );
-    }]);
-  }
-
-  // Depth and case must match the loader: Path.iterdir() is top-level only and
-  // is_file() skips directories; suffix.lower() makes the match case-insensitive.
-  tests.push(['status does not recurse — the loader does not', () => {
-    assert.ok(readStatusCounter().includes('-maxdepth 1'));
-  }]);
-  tests.push(['status skips directories', () => {
-    assert.ok(readStatusCounter().includes('-type f'));
-  }]);
-  tests.push(['status matches case-insensitively', () => {
-    assert.ok(!/-name\s+["']\*/.test(readStatusCounter()),
-      'status count must use -iname, not -name');
-  }]);
-
-  // ── The shipped script, run for real ──
-
-  if (!(bashBinary && pythonCmd)) return tests;
-
-  tests.push(['start-observer.sh parses', () => {
-    const syntax = spawnSync(bashBinary, ['-n', toShellPath(observerScript)], { encoding: 'utf8' });
-    assert.strictEqual(syntax.status, 0, syntax.stderr);
-  }]);
-
-  // The reported shape: every instinct on disk is a .md file.
-  tests.push(['markdown instincts are counted', () => {
-    assert.strictEqual(runStatus(['a.md', 'b.md', 'c.md']), 3);
-  }]);
-
-  // Every accepted extension, mixed case, plus the two things the loader skips:
-  // a non-instinct file and a nested directory.
-  tests.push(['the count matches the loader exactly', () => {
-    assert.strictEqual(
-      runStatus(['a.md', 'b.yaml', 'c.yml', 'd.YAML', 'notes.txt', 'nested/deep.md']),
-      4
-    );
-  }]);
-
-  tests.push(['an empty instincts directory reports 0', () => {
-    assert.strictEqual(runStatus([]), 0);
-  }]);
-
-  return tests;
-}
-
-function runTest(name, fn) {
-  try {
-    fn();
-    console.log(`  ✓ ${name}`);
-    return true;
-  } catch (error) {
-    console.log(`  ✗ ${name}`);
-    console.error(`    ${error.message}`);
-    return false;
-  }
+  const allowed = readAllowedExtensions();
+  return [
+    ['the loader still declares several instinct extensions', () => {
+      assert.ok(allowed.length >= 3, `expected several extensions, got ${allowed}`);
+    }],
+    ...allowed.map(ext => [`status counts ${ext} - the loader accepts it`, shellTest(() => {
+      assert.strictEqual(runStatus([`one${ext}`]), 1);
+    })]),
+    ['status does not recurse - the loader does not', shellTest(() => {
+      assert.strictEqual(runStatus(['a.md', 'nested/deep.yaml']), 1);
+    })],
+    ['status skips directories', shellTest(() => {
+      assert.strictEqual(runStatus([], { setup: value => fs.mkdirSync(path.join(value.instincts, 'directory.md')) }), 0);
+    })],
+    ['status matches case-insensitively', shellTest(() => {
+      assert.strictEqual(runStatus(['a.YAML', 'b.YmL', 'c.MD']), 3);
+    })],
+    ['start-observer.sh parses', shellTest(() => withFixture(fixture => {
+      checkChild(spawnSync(bashBinary, ['--noprofile', '--norc', '-n', toShellPath(observerScript)], {
+        cwd: fixture.root, env: fixture.env, encoding: 'utf8',
+        timeout: childTimeoutMs, maxBuffer: childMaxBuffer, killSignal: 'SIGKILL',
+      }));
+    }))],
+    ['markdown instincts are counted', shellTest(() => {
+      assert.strictEqual(runStatus(['a.md', 'b.md', 'c.md']), 3);
+    })],
+    ['the count matches the loader eligible-file rules', shellTest(() => {
+      assert.strictEqual(runStatus(['a.md', 'b.yaml', 'c.yml', 'd.YAML', 'notes.txt', 'nested/deep.md']), 4);
+    })],
+    ['an empty instincts directory reports 0', shellTest(() => {
+      assert.strictEqual(runStatus([]), 0);
+    })],
+    ['hidden stems count but dot-only extension names have no suffix', shellTest(() => {
+      assert.strictEqual(runStatus(['.note.MD', '.yaml', '.YML', '.md']), 1);
+    })],
+    ['newlines and spaces in one eligible filename count once', shellTest(() => {
+      assert.strictEqual(runStatus(['two\nlines with spaces.MD']), 1);
+    })],
+    ['shell metacharacters in a filename remain inert data', shellTest(() => {
+      assert.strictEqual(runStatus(['$(touch unwanted).md'], { setup: value => {
+        assert.ok(!fs.existsSync(path.join(value.root, 'unwanted')));
+      }, run: (command, args, options) => {
+        const result = spawnSync(command, args, options);
+        assert.ok(!fs.existsSync(path.join(options.cwd, 'unwanted')));
+        return result;
+      } }), 1);
+    })],
+    ['linked regular files count without traversing directory links', shellTest(() => {
+      assert.strictEqual(runStatus(['a.md', 'b.yaml', 'c.yml', 'd.YAML', '.note.MD',
+        '.md', '.yaml', '.YML', 'notes.txt', 'nested/deep.md'], { setup: value => {
+        const outside = path.join(value.root, 'outside');
+        fs.mkdirSync(outside);
+        const target = path.join(outside, 'regular.txt');
+        fs.writeFileSync(target, 'private fixture\n');
+        fs.writeFileSync(path.join(outside, 'deep.md'), 'not top-level\n');
+        fs.mkdirSync(path.join(value.instincts, 'directory.md'));
+        fileLink(target, path.join(value.instincts, 'linked.MD'));
+        fileLink(outside, path.join(value.instincts, 'directory-link.yaml'), 'dir');
+        fileLink(path.join(outside, 'missing'), path.join(value.instincts, 'dangling.yml'));
+      } }), 6);
+    })],
+    ...cleanupTests(),
+  ];
 }
 
 function main() {
   console.log('\n=== Testing observer status instinct count (#2859) ===\n');
-
-  let passed = 0;
-  let failed = 0;
-  let tests;
-
-  // Collecting the cases reads instinct-cli.py and start-observer.sh, so a
-  // missing or renamed file has to be reported as a failure rather than crash
-  // the process — tests/run-all.js totals the "Passed:"/"Failed:" tokens below.
-  try {
-    tests = buildTests();
-  } catch (error) {
-    console.log('  ✗ could not build the test list');
-    console.error(`    ${error.message}`);
-    tests = [];
-    failed += 1;
+  let passed = 0; let failed = 0; let skipped = 0; let tests;
+  try { tests = buildTests(); }
+  catch (error) {
+    console.error(`  FAIL could not build the test list: ${error.message}`);
+    tests = []; failed += 1;
   }
-
   for (const [name, fn] of tests) {
-    if (runTest(name, fn)) passed += 1;
-    else failed += 1;
+    try { fn(); console.log(`  PASS ${name}`); passed += 1; }
+    catch (error) {
+      if (error instanceof SkipTest) {
+        console.log(`  SKIP ${name}: ${error.message}`); skipped += 1;
+      } else {
+        console.error(`  FAIL ${name}: ${error.message}`); failed += 1;
+      }
+    }
   }
-
-  if (!(bashBinary && pythonCmd)) {
-    console.log('  - integration coverage skipped (needs bash + python; set ECC_TEST_BASH/ECC_TEST_PYTHON)');
-  }
-
-  console.log(`\n  Passed: ${passed}`);
-  console.log(`  Failed: ${failed}`);
-  // exitCode, not exit(1): stdout is async when it is a pipe, which is how
-  // tests/run-all.js runs this, and process.exit() does not wait for pending
-  // writes — it could drop the two lines above, which the aggregator totals.
+  console.log(`\n  Passed: ${passed}\n  Failed: ${failed}\n  Skipped: ${skipped}`);
+  // Let piped summary output drain before the aggregate runner reads it.
   if (failed > 0) process.exitCode = 1;
 }
 

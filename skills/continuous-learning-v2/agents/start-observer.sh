@@ -156,14 +156,14 @@ case "$ACTION" in
         echo "Observer is running (PID: $pid)"
         echo "Log: $LOG_FILE"
         echo "Observations: $(wc -l < "$OBSERVATIONS_FILE" 2>/dev/null || echo 0) lines"
-        # Also show instinct count. Count every extension the loader accepts
-        # (ALLOWED_INSTINCT_EXTENSIONS in scripts/instinct-cli.py) - the
-        # observer prompt tells the analyzer to write "<id>.md", so a
-        # *.yaml-only count reports 0 on a working install. Depth and case
-        # match the loader's iterdir() + suffix.lower(): top level only,
-        # case-insensitive. tr strips the padding BSD wc emits.
+        # Count eligible files, not parsed records: the loader accepts these
+        # suffixes case-insensitively and follows links to regular files.
+        # Stay at the top level, excluding dot-only names with no Path.suffix.
+        # Count NUL records so newlines in filenames cannot inflate the result.
         instinct_find_expr=( \( -iname "*.yaml" -o -iname "*.yml" -o -iname "*.md" \) )
-        instinct_count=$(find "$INSTINCTS_DIR" -maxdepth 1 -type f "${instinct_find_expr[@]}" 2>/dev/null | wc -l | tr -d "[:space:]")
+        instinct_count=$(find -L "$INSTINCTS_DIR" -mindepth 1 -maxdepth 1 -type f \
+          "${instinct_find_expr[@]}" ! -iname ".yaml" ! -iname ".yml" ! -iname ".md" \
+          -print0 2>/dev/null | tr -cd '\000' | wc -c | tr -d '[:space:]')
         echo "Instincts: $instinct_count"
         exit 0
       else
