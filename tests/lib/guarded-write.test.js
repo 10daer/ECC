@@ -113,21 +113,81 @@ test('a directory destination is refused without writes', ({ file, options }) =>
   assert.throws(() => writeFileNoFollow(file, 'off', options));
   assert.ok(fs.statSync(file).isDirectory());
 });
-test('a parent replacement at open is refused', ({ root, options }) => {
+test('a parent replacement before native open is refused even when the file identity is unchanged', ({ root, options }) => {
   const parent = path.join(root, 'plugins');
   fs.mkdirSync(parent);
   const file = path.join(parent, 'entry.js');
   fs.writeFileSync(file, 'old activation bytes');
-  replaceMethod('openSync', original => (...args) => {
-    const fd = original(...args);
+  const fileIdentity = fs.statSync(file, { bigint: true });
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalTruncate = fs.ftruncateSync;
+  let descriptor;
+  let swaps = 0;
+  let closes = 0;
+  let truncates = 0;
+  fs.openSync = (...args) => {
     if (args[0] === file && typeof args[1] === 'number') {
+      // The writer has pinned the parent, but has not opened the file yet.
+      // Moving an open file's parent is not portable to Windows. Keep the
+      // same file inode and bytes so only the parent identity rejects this.
       fs.renameSync(parent, `${parent}.old`);
       fs.mkdirSync(parent);
-      fs.writeFileSync(file, 'replacement');
+      fs.renameSync(path.join(`${parent}.old`, 'entry.js'), file);
+      swaps++;
+      descriptor = originalOpen(...args);
+      return descriptor;
     }
-    return fd;
-  }, () => assert.throws(() => writeFileNoFollow(file, 'off', existing(options)), /changed/));
-  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'replacement');
+    return originalOpen(...args);
+  };
+  fs.closeSync = fd => { if (fd === descriptor) closes++; return originalClose(fd); };
+  fs.ftruncateSync = (...args) => { truncates++; return originalTruncate(...args); };
+  try {
+    assert.throws(() => writeFileNoFollow(file, 'off', existing(options)), error => {
+      assert.match(error.message, /changed after preflight/);
+      assert.strictEqual(error.cause, undefined, 'the parent guard, not an open error, refuses');
+      return true;
+    });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.ftruncateSync = originalTruncate;
+  }
+  assert.strictEqual(swaps, 1);
+  assert.strictEqual(typeof descriptor, 'number');
+  assert.strictEqual(closes, 1);
+  assert.strictEqual(truncates, 0);
+  const replacementIdentity = fs.statSync(file, { bigint: true });
+  assert.strictEqual(replacementIdentity.dev, fileIdentity.dev);
+  assert.strictEqual(replacementIdentity.ino, fileIdentity.ino);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'old activation bytes');
+  assert.ok(fs.statSync(`${parent}.old`).isDirectory());
+});
+test('a denied native open preserves its cause without closing an unallocated descriptor', ({ file, options }) => {
+  fs.writeFileSync(file, 'old activation bytes');
+  const denied = Object.assign(new Error('fixture open denied'), { code: 'EPERM' });
+  const originalClose = fs.closeSync;
+  const originalTruncate = fs.ftruncateSync;
+  let closes = 0;
+  let truncates = 0;
+  fs.closeSync = fd => { closes++; return originalClose(fd); };
+  fs.ftruncateSync = (...args) => { truncates++; return originalTruncate(...args); };
+  try {
+    replaceMethod('openSync', original => (...args) => {
+      if (args[0] === file && typeof args[1] === 'number') throw denied;
+      return original(...args);
+    }, () => assert.throws(() => writeFileNoFollow(file, 'off', existing(options)), error => {
+      assert.strictEqual(error.cause, denied);
+      assert.strictEqual(error.code, 'EPERM');
+      return true;
+    }));
+  } finally {
+    fs.closeSync = originalClose;
+    fs.ftruncateSync = originalTruncate;
+  }
+  assert.strictEqual(closes, 0);
+  assert.strictEqual(truncates, 0);
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), 'old activation bytes');
 });
 test('destination validator is mandatory and must return the same path', ({ file, options }) => {
   assert.throws(() => writeFileNoFollow(file, 'off', {}), /validateDestination/);
