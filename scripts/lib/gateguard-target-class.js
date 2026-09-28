@@ -215,7 +215,7 @@ const CLASS_CONDENSED_HINTS = {
 // first-touch denial. Basename and segment rules are exact, never substrings.
 
 const SENSITIVE_EXTS = new Set(['.pem', '.key', '.p12', '.pfx']);
-const SENSITIVE_BASENAME_PATTERN = /^(\.env($|\.)|id_rsa|id_ed25519|credentials|secrets\.)/;
+const SENSITIVE_BASENAME_PATTERN = /^(\.env($|\.)|id_rsa|id_ed25519|id_ecdsa|id_dsa|\.netrc$|\.pgpass$|credentials|secrets\.)/;
 const SENSITIVE_SEGMENTS = new Set(['auth', 'authn', 'authz', 'security', 'secrets', 'payment', 'payments', 'billing', 'migrations']);
 const SENSITIVE_PREFIX = '.github/workflows/';
 
