@@ -5,26 +5,30 @@
  * ECC Agent IR — Pi emitter.
  *
  * Turns one IR object into a native Pi subagent definition (markdown file with
- * Pi frontmatter). Pi agent files use frontmatter fields `name`, `package`,
+ * Pi frontmatter). The frontmatter contract is verified against
+ * `@tintinweb/pi-subagents@0.19.0`: fields are `name` (the dispatch id),
  * `description`, `tools` (a comma-separated strict child allowlist), and
- * `systemPromptMode`; the body after the frontmatter is the child system
- * prompt. See the `pi-subagents` package `management-authoring-rpc.md` for the
- * authoritative schema.
+ * `prompt_mode` (`replace` keeps the body as the complete system prompt). The
+ * prompt lives in the document body.
  *
  * v1 behavior:
- *   - `package: ecc` namespaces agents as `ecc.<name>` to avoid collisions with
- *     Pi builtin agents (e.g. `reviewer`).
  *   - The source model tier is preserved as a YAML comment
  *     (`# source model tier: opus`) rather than a `model:` field, because
  *     Claude tiers are not valid Pi model ids. Pi's default child model
  *     applies; the tier is lossless in the IR and visible in the emitted file.
- *   - Unmapped tools are never silently dropped; they surface in `warnings`
- *     (per-agent) and in the aggregate `summary`.
+ *   - Unmapped tools (WebSearch, WebFetch, mcp__*) are never silently dropped;
+ *     they surface in per-agent `warnings`.
+ *   - The allowlist is always written. An empty allowlist is emitted as
+ *     `tools: none`, never blank, because the companion's `csvList` treats a
+ *     blank/missing `tools:` as *all* built-ins — which would escalate a
+ *     fully-unmapped agent to every tool.
  */
 
 const { mapToolToPi } = require('./agent-tool-map');
 
-const PACKAGE = 'ecc';
+// Pi core built-in agent names (case-sensitive). ECC agent names are kebab-case
+// and do not collide today; warn if a future one ever does.
+const RESERVED_AGENT_NAMES = new Set(['general-purpose', 'Explore', 'Plan']);
 
 /**
  * Emit a Pi agent definition for one IR object.
@@ -48,14 +52,20 @@ function emitPiAgent(ir) {
     }
   }
 
+  if (RESERVED_AGENT_NAMES.has(ir.name)) {
+    warnings.push(`${ir.id}: name '${ir.name}' collides with a Pi built-in agent; rename to avoid shadowing`);
+  }
+
+  // Never emit a blank allowlist: `none` is the explicit "no tools" sentinel.
+  const toolsValue = tools.length > 0 ? tools.join(', ') : 'none';
+
   const frontmatter = [
     '---',
     ...(ir.model ? [`# source model tier: ${ir.model}`] : []),
     `name: ${yamlScalar(ir.name)}`,
-    `package: ${PACKAGE}`,
     `description: ${yamlScalar(ir.description)}`,
-    `tools: ${tools.join(', ')}`,
-    'systemPromptMode: replace',
+    `tools: ${toolsValue}`,
+    'prompt_mode: replace',
     '---',
   ];
 
@@ -76,18 +86,17 @@ function yamlScalar(value) {
 }
 
 /**
- * Emit the full set of Pi agents, sorted by id for determinism, plus an
- * aggregate summary of the deliberate (documented) lossy conversions.
+ * Emit the full set of Pi agents, sorted by id for determinism, plus notes on
+ * the deliberate (documented) lossy conversions.
  *
  * @param {object[]} irs
- * @returns {{ results: object[], warnings: string[], summary: object }}
+ * @returns {{ results: object[], warnings: string[], notes: string[] }}
  */
 function emitAllPiAgents(irs) {
   const results = [];
   const warnings = [];
   let modelTiers = {};
-  let globApproximated = 0;
-  let mcpDropped = 0;
+  let unsupported = 0;
 
   for (const ir of [...irs].sort((a, b) => a.id.localeCompare(b.id))) {
     const { markdown, warnings: w, tools } = emitPiAgent(ir);
@@ -97,10 +106,7 @@ function emitAllPiAgents(irs) {
     if (ir.model) {
       modelTiers = { ...modelTiers, [ir.model]: (modelTiers[ir.model] || 0) + 1 };
     }
-    if (ir.tools.includes('Glob')) {
-      globApproximated += 1;
-    }
-    mcpDropped += ir.tools.filter(t => t.startsWith('mcp__')).length;
+    unsupported += ir.tools.filter(t => mapToolToPi(t).unsupported).length;
   }
 
   const notes = [];
@@ -108,18 +114,15 @@ function emitAllPiAgents(irs) {
     const tiers = Object.entries(modelTiers).map(([t, n]) => `${t} x${n}`).join(', ');
     notes.push(`model tiers preserved as comments (${tiers}) — Pi uses its default child model`);
   }
-  if (globApproximated) {
-    notes.push(`Glob mapped to anchor_grep (read-only approximation; Pi has no pure file-listing tool) for ${globApproximated} agent(s)`);
-  }
-  if (mcpDropped) {
-    notes.push(`MCP tools not auto-mapped: ${mcpDropped} (configure the server explicitly)`);
+  if (unsupported) {
+    notes.push(`unmapped tools: ${unsupported} (WebSearch/WebFetch/mcp__* are not Pi built-ins) — see warnings`);
   }
 
   return { results, warnings, notes };
 }
 
 module.exports = {
-  PACKAGE,
+  RESERVED_AGENT_NAMES,
   emitPiAgent,
   emitAllPiAgents,
   yamlScalar,

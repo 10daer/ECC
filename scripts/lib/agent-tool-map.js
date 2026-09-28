@@ -9,25 +9,27 @@
  * never silently dropped: they are surfaced as `unsupported` so the emitter
  * can warn and the conformance test can assert the mapping is complete.
  *
+ * Pi tool names are verified against the installed
+ * `@earendil-works/pi-coding-agent` `dist/core/tools/index.d.ts`:
+ *   read | bash | powershell | edit | write | grep | find | ls
+ * (`powershell` is Windows-only and not emitted here.)
+ *
  * Security invariant: a Claude tool must never map to a Pi tool with MORE
  * authority than the source. Read-only Claude tools (Read, Grep, Glob) map to
- * read-only Pi tools, never to `bash`.
+ * read-only Pi tools (read, grep, find), never to `bash`.
  */
 
 /** Claude tool name -> Pi tool name. */
 const CLAUDE_TO_PI_TOOLS = Object.freeze({
   Read: 'read',
-  Grep: 'anchor_grep',
-  // Read-only approximation, documented in the conversion summary: Pi has no
-  // pure file-listing tool. anchor_grep accepts a glob filter (so it can scope
-  // searches), and mapping Glob -> bash would give read-only agents shell
-  // execution, which would weaken the permission boundary.
-  Glob: 'anchor_grep',
+  Grep: 'grep',
+  Glob: 'find',
   Bash: 'bash',
-  Edit: 'replace',
+  Edit: 'edit',
   Write: 'write',
-  WebSearch: 'web_search',
-  WebFetch: 'fetch_content',
+  // WebSearch and WebFetch are intentionally NOT mapped: Pi exposes no
+  // `web_search` or `fetch_content` built-in. They fall through to the
+  // "unmapped tool" warning rather than being guessed.
 });
 
 /**
@@ -36,7 +38,7 @@ const CLAUDE_TO_PI_TOOLS = Object.freeze({
  * @param {string} claudeTool
  * @returns {{ tool: string|null, unsupported: boolean, note?: string }}
  *   `tool` is the Pi tool name, or null when unsupported. `unsupported` is
- *   true only for source tools that have no Pi equivalent in v1.
+ *   true only for source tools that have no Pi built-in equivalent in v1.
  */
 function mapToolToPi(claudeTool) {
   const name = String(claudeTool).trim();
@@ -44,16 +46,13 @@ function mapToolToPi(claudeTool) {
     return { tool: CLAUDE_TO_PI_TOOLS[name], unsupported: false };
   }
   if (name.startsWith('mcp__')) {
-    // Never collapse `mcp__server__operation` onto Pi's single `mcp` gateway:
-    // that would let an agent restricted to one operation invoke every enabled
-    // gateway operation. The operator must wire the server explicitly.
     return {
       tool: null,
       unsupported: true,
-      note: `MCP tool ${name} not auto-mapped (shared gateway would over-grant); configure the MCP server explicitly`,
+      note: `MCP tool ${name} not a Pi built-in (configure the MCP server explicitly)`,
     };
   }
-  return { tool: null, unsupported: true, note: `unmapped tool: ${name}` };
+  return { tool: null, unsupported: true, note: `unmapped tool: ${name} (not a Pi built-in)` };
 }
 
 /**
