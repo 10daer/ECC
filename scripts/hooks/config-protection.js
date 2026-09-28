@@ -67,23 +67,23 @@ const PROTECTED_FILES = new Set([
  * flat config across files: a shared `eslint.config.base.mjs` holding the
  * ignore list and rule severities, imported by per-workspace
  * `eslint.config.mjs` files. That is the common monorepo shape, and matching
- * basenames alone protected the leaves while leaving the trunk — the file that
- * actually carries the rules — freely editable.
+ * basenames alone protected the leaves while leaving the trunk -- the file that
+ * actually carries the rules -- freely editable.
  *
  * These patterns cover `<tool>.config.<qualifier>.<ext>` and
  * `.<tool>rc.<qualifier>.<ext>` for the linters and formatters listed above.
  * They are case-insensitive for the same reason the Set lookup above is.
  *
- * Deliberately NOT matched: build and test tooling — `vite.config.ts`,
+ * Deliberately NOT matched: build and test tooling -- `vite.config.ts`,
  * `vitest.config.ts`, `jest.config.js`, `playwright.config.ts`,
  * `tsconfig.json`. This hook exists to stop a LINTER config being weakened in
  * place of fixing the code; editing a bundler or test-runner config is
  * ordinary work, and sweeping those in would make the hook obstructive.
  */
 const PROTECTED_PATTERNS = [
-  // eslint.config.base.mjs, prettier.config.shared.cjs, stylelint.config.local.js …
+  // eslint.config.base.mjs, prettier.config.shared.cjs, stylelint.config.local.js ...
   /^(eslint|prettier|stylelint|commitlint|oxlint|biome)\.config(\.[A-Za-z0-9_-]+)*\.(js|mjs|cjs|ts|mts|cts)$/i,
-  // .eslintrc.base.json, .prettierrc.shared.yml …
+  // .eslintrc.base.json, .prettierrc.shared.yml ...
   /^\.(eslintrc|prettierrc|stylelintrc|markdownlintrc)(\.[A-Za-z0-9_-]+)*\.(js|cjs|mjs|json|jsonc|yml|yaml|toml)$/i,
   // biome.base.json, biome.shared.jsonc
   /^biome(\.[A-Za-z0-9_-]+)*\.jsonc?$/i,
