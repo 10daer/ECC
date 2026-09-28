@@ -247,7 +247,7 @@ PLR) already routes to Sonnet. JS/TS had no equivalent rule turned on by default
 
 oxlint's `complexity` rule (source: eslint's `complexity` rule, ported) lives in the
 "restriction" category, which oxlint does not enable by default. It must be turned on
-by hand. Verified against https://oxc.rs/docs/guide/usage/linter/rules/eslint/complexity
+by hand. Verified against [Oxlint's complexity rule](https://oxc.rs/docs/guide/usage/linter/rules/eslint/complexity)
 (2026-08-27): default option is `max: 20`. The rule is available in oxlint >= 1.37.0.
 
 The skill's Language-Specific Dependencies table keeps `oxlint` optional for TypeScript/JS
@@ -287,7 +287,7 @@ language does not change the model tier.
 
 ### The ratchet-ceiling technique
 
-Source: https://github.com/modem-dev/hunk/pull/861 (merged 2026-08-26, verified against
+Source: [Hunk PR #861](https://github.com/modem-dev/hunk/pull/861) (merged 2026-08-26, verified against
 the PR's own diff and description via the GitHub API, not paraphrased from memory). Hunk
 turned on oxlint's `complexity` rule with `"error", { "max": 80 }` in `.oxlintrc.json`.
 Their own worst score at the time was 78 (`App`), next was 76
