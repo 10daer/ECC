@@ -2166,8 +2166,26 @@ const TREE_VALUE_FLAGS = new Set(['-L', '-P', '-I', '-o']);
 const FD_VALUE_FLAGS = new Set([...VALUE_FLAGS, '-E']);
 // Only these tools take the search pattern from -e/-f (fd's -e is an extension).
 const PATTERN_FLAG_SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'git grep']);
-const POWERSHELL_VALUE_FLAGS = new Set(['-path', '-literalpath', '-filter', '-include', '-exclude', '-depth', '-pattern']);
+const POWERSHELL_VALUE_FLAGS = new Set(['-path', '-literalpath', '-depth', '-pattern']);
 const POWERSHELL_PATH_FLAGS = new Set(['-path', '-literalpath']);
+// PowerShell binds a parameter by any unambiguous prefix, `-Name:value`, and comma lists across arguments.
+const POWERSHELL_FILTER_PARAMS = new Set(['filter', 'include', 'exclude']);
+const POWERSHELL_COMMON_PARAMS = [
+  'verbose', 'debug', 'erroraction', 'warningaction', 'informationaction', 'progressaction',
+  'errorvariable', 'warningvariable', 'informationvariable', 'outvariable', 'outbuffer', 'pipelinevariable'
+];
+const POWERSHELL_CHILDITEM_PARAMS = [
+  'path', 'literalpath', 'filter', 'include', 'exclude', 'recurse', 'depth', 'force', 'name',
+  'attributes', 'directory', 'file', 'hidden', 'readonly', 'system', 'followsymlink'
+];
+const POWERSHELL_SELECTSTRING_PARAMS = [
+  'pattern', 'path', 'literalpath', 'inputobject', 'simplematch', 'casesensitive', 'quiet', 'list', 'noemphasis',
+  'include', 'exclude', 'notmatch', 'allmatches', 'encoding', 'context', 'raw', 'culture'
+];
+const POWERSHELL_PARAM_ALIASES = new Set([
+  's', 'ad', 'd', 'af', 'ah', 'h', 'ar', 'as', 'lp', 'pspath',
+  'vb', 'db', 'ea', 'wa', 'infa', 'proga', 'ev', 'wv', 'iv', 'ov', 'ob', 'pv'
+]);
 const GENERIC_STEMS = new Set([
   'index',
   'main',
@@ -2434,10 +2452,13 @@ function valueFlagsFor(kind) {
 }
 
 /** Arguments a flag consumes; single-dash clusters (`-rne PAT`) are read letter by letter. */
-function flagEffect(kind, arg) {
+function flagEffect(kind, args, i) {
+  const arg = args[i];
   if (POWERSHELL_SEARCHES.has(kind)) {
     const lower = arg.toLowerCase();
-    return { consumes: POWERSHELL_VALUE_FLAGS.has(lower) ? 1 : 0, patternFlag: lower === '-pattern', pathFlag: POWERSHELL_PATH_FLAGS.has(lower) };
+    const filter = powershellFilterArg(kind, args, i);
+    const consumes = filter ? filter.end - i : POWERSHELL_VALUE_FLAGS.has(lower) ? 1 : 0;
+    return { consumes, patternFlag: lower === '-pattern', pathFlag: POWERSHELL_PATH_FLAGS.has(lower) };
   }
   const values = valueFlagsFor(kind);
   const takesValue = flag => values.has(flag) || (kind === 'rg' && (flag === '-r' || flag === '--replace'));
@@ -2474,7 +2495,7 @@ function parseSearchArgs(kind, args) {
     if (arg.length > 1 && arg.startsWith('-')) {
       expressionStarted = true;
       if (isRecursiveFlag(kind, arg)) recursive = true;
-      const effect = flagEffect(kind, arg);
+      const effect = flagEffect(kind, args, i);
       if (effect.patternFlag) patternGiven = true;
       if (effect.pathFlag && i + 1 < args.length) pathValues.push(args[i + 1]);
       i += effect.consumes;
@@ -2736,7 +2757,7 @@ function grepToolFilters(glob) {
 function shellSearchFilters(kind, args) {
   const filters = { exclusions: [], includes: [], opaque: false, dropped: new Set() };
   if (kind === 'find') return findSearchFilters(args, filters);
-  if (POWERSHELL_SEARCHES.has(kind)) return powershellSearchFilters(args, filters);
+  if (POWERSHELL_SEARCHES.has(kind)) return powershellSearchFilters(kind, args, filters);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (/^\d*[<>]/.test(arg)) break;
@@ -2870,17 +2891,45 @@ function findSearchFilters(args, filters) {
   return filters;
 }
 
-function powershellSearchFilters(args, filters) {
-  for (let i = 0; i < args.length - 1; i++) {
-    const name = args[i].toLowerCase();
-    if (name === '-exclude') {
-      filters.exclusions.push(...splitTopLevelCommas(args[i + 1]));
+function powershellParam(kind, arg) {
+  const colon = arg.indexOf(':');
+  const spelled = (colon === -1 ? arg.slice(1) : arg.slice(1, colon)).toLowerCase();
+  const inline = colon === -1 ? null : arg.slice(colon + 1);
+  const own = kind === 'get-childitem' || kind === 'gci' ? POWERSHELL_CHILDITEM_PARAMS : POWERSHELL_SELECTSTRING_PARAMS;
+  const params = own.concat(POWERSHELL_COMMON_PARAMS);
+  if (!spelled) return { name: null, inline };
+  if (params.includes(spelled) || POWERSHELL_PARAM_ALIASES.has(spelled)) return { name: spelled, inline };
+  const matches = params.filter(param => param.startsWith(spelled));
+  return { name: matches.length === 1 ? matches[0] : null, inline };
+}
+
+function powershellFilterArg(kind, args, i) {
+  if (!/^-[A-Za-z]/.test(args[i])) return null;
+  const { name, inline } = powershellParam(kind, args[i]);
+  if (!POWERSHELL_FILTER_PARAMS.has(name)) return null;
+  const first = inline ? i : i + 1;
+  if (first >= args.length) return { name, globs: [], end: i };
+  let end = first;
+  while (end + 1 < args.length && (args[end].endsWith(',') || args[end + 1].startsWith(','))) end += 1;
+  const parts = [inline || args[first]].concat(args.slice(first + 1, end + 1));
+  return { name, globs: splitTopLevelCommas(parts.join(',')), end };
+}
+
+function powershellSearchFilters(kind, args, filters) {
+  for (let i = 0; i < args.length; i++) {
+    const filter = powershellFilterArg(kind, args, i);
+    if (filter) {
+      if (filter.name === 'exclude') {
+        filters.exclusions.push(...filter.globs);
+        for (let k = i; k <= filter.end; k++) filters.dropped.add(k);
+      } else {
+        filter.globs.filter(isBasenameGlob).forEach(glob => filters.includes.push(glob));
+      }
+      i = filter.end;
+    } else if (/^-[A-Za-z]/.test(args[i]) && powershellParam(kind, args[i]).name === null) {
+      // An unresolvable parameter may be an exclusion in disguise: neither it nor a value it may carry is a stem source.
       filters.dropped.add(i);
-      filters.dropped.add(i + 1);
-      i += 1;
-    } else if (name === '-include' || name === '-filter') {
-      splitTopLevelCommas(args[i + 1]).filter(isBasenameGlob).forEach(glob => filters.includes.push(glob));
-      i += 1;
+      if (!args[i].includes(':') && i + 1 < args.length && !args[i + 1].startsWith('-')) filters.dropped.add(i + 1);
     }
   }
   return filters;

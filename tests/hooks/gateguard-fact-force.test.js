@@ -5049,6 +5049,48 @@ function runTests() {
     });
   }
 
+  // --- Every PowerShell spelling of -Exclude is an exclusion ---
+  const psExcludeDenied = [
+    'Get-ChildItem -Recurse -ex widget.py',
+    'Get-ChildItem -Recurse -EXC widget.py',
+    'gci -Recurse -Excl widget.py',
+    'Get-ChildItem -Recurse -Exclude:widget.py',
+    'Get-ChildItem -Recurse -exclu:widget.py',
+    'Get-ChildItem -Recurse -Exclude: widget.py',
+    'Get-ChildItem -Recurse -Exclude a.py, widget.py',
+    'Get-ChildItem -Recurse -Exclude a.py ,widget.py',
+    'Get-ChildItem -Recurse -Exclude a.py , widget.py',
+    'Get-ChildItem -Recurse -Exclude a.py,widget.py',
+    'Get-ChildItem -Recurse -Exclude:a.py, widget.py',
+    'Select-String -Pattern TODO -Path src/* -ex widget.py',
+    'sls TODO src/* -Exclude a.py, widget.py',
+    'Get-ChildItem -Recurse -e:widget.py',
+    'Get-ChildItem -Recurse -Nonesuch:widget.py',
+    'Get-ChildItem -Recurse -in widget.py'
+  ];
+  for (const command of psExcludeDenied) {
+    c3Case(`PowerShell exclusion never credits the excluded target (${command})`, () => {
+      c3AssertDenied(c3Edit(r2Target, r2Turn('PowerShell', { command })), command);
+      assert.ok(!c3State().fact_force_credited, `${command}: nothing credited`);
+    });
+  }
+  const psCredited = [
+    'Get-ChildItem -Path src -Recurse -Filter widget.py',
+    'Get-ChildItem -Recurse -Filt:widget.py',
+    'Get-ChildItem -Recurse -Include a.md, widget.py',
+    'Get-ChildItem -Recurse -Exclude a.md, b.md -Filter widget.py',
+    'Select-String -Pattern widget -Path src/* -Exclude a.md'
+  ];
+  for (const command of psCredited) {
+    c3Case(`PowerShell control still credits (${command})`, () => {
+      c3AssertCredited(c3Edit(r2Target, r2Turn('PowerShell', { command })), command);
+    });
+  }
+  c3Case('PowerShell include lists spread across tokens still filter the target', () => {
+    const command = 'Get-ChildItem -Recurse -Include a.md, widget.md';
+    c3AssertDenied(c3Edit(r2Target, r2Turn('PowerShell', { command })), command);
+  });
+
   // --- Same-turn sibling creations and counters ---
   const c4Root = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, 'gateguard-c4-proj-')));
   const c4Env = { CLAUDE_PROJECT_DIR: c4Root, CLAUDE_TRANSCRIPT_PATH: '' };
