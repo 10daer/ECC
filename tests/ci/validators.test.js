@@ -446,6 +446,110 @@ function runTests() {
   })) passed++; else failed++;
 
   // ==========================================
+  // check-hooks-schema-keys.js
+  // ==========================================
+  console.log('\ncheck-hooks-schema-keys.js:');
+
+  if (test('passes on real project hooks configs', () => {
+    const result = runValidator('check-hooks-schema-keys');
+    assert.strictEqual(result.code, 0, `Should pass, got stderr: ${result.stderr}`);
+    assert.ok(result.stdout.includes('Checked 2 hooks config(s)'), 'Should report both configs checked');
+  })) passed++; else failed++;
+
+  if (test('exits 0 when hooks.json does not exist', () => {
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', '/nonexistent/hooks.json');
+    assert.strictEqual(result.code, 0, 'Should skip when no hooks.json');
+    assert.ok(result.stdout.includes('skipping'), 'Should say skipping');
+  })) passed++; else failed++;
+
+  if (test('fails on root $schema key', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      $schema: '../schemas/hooks.schema.json',
+      hooks: {}
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on root $schema');
+    assert.ok(result.stderr.includes('"$schema"'), 'Should name the offending key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('fails on group id and description keys', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          id: 'test:group',
+          description: 'metadata that belongs in the sidecar',
+          matcher: 'Bash',
+          hooks: [{ type: 'command', command: 'echo hi' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on group id/description');
+    assert.ok(result.stderr.includes('"id"'), 'Should name id');
+    assert.ok(result.stderr.includes('"description"'), 'Should name description');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('fails on unknown handler key', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: 'echo hi', label: 'not a loader key' }] }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on unknown handler key');
+    assert.ok(result.stderr.includes('"label"'), 'Should name the offending handler key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('fails on codex-hooks.json root $schema key', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'codex-hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      $schema: '../schemas/hooks.schema.json',
+      description: 'codex projection',
+      hooks: {
+        SessionStart: [{ id: 'session:start', matcher: '.*', hooks: [{ type: 'command', command: 'echo hi' }] }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'CODEX_HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should fail on codex root $schema');
+    assert.ok(result.stderr.includes('"$schema"'), 'Should name the offending key');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('accepts codex documented keys including group id and root description', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'codex-hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      description: 'codex projection',
+      hooks: {
+        SessionStart: [{
+          id: 'session:start',
+          description: 'pinned by plugin-manifest test',
+          matcher: '.*',
+          hooks: [{ type: 'command', command: 'echo hi', timeout: 5 }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('check-hooks-schema-keys', 'CODEX_HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 0, `Should pass, got stderr: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  // ==========================================
   // catalog.js
   // ==========================================
   console.log('\ncatalog.js:');
@@ -699,7 +803,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        InvalidEventType: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo hi' }] }]
+        InvalidEventType: [{ id: 'test:invalid-event', matcher: 'test', hooks: [{ type: 'command', command: 'echo hi' }] }]
       }
     }));
 
@@ -714,7 +818,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ command: 'echo hi' }] }]
+        PreToolUse: [{ id: 'test:missing-type', matcher: 'test', hooks: [{ command: 'echo hi' }] }]
       }
     }));
 
@@ -729,7 +833,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command' }] }]
+        PreToolUse: [{ id: 'test:missing-command', matcher: 'test', hooks: [{ type: 'command' }] }]
       }
     }));
 
@@ -744,7 +848,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', async: 'yes' }] }]
+        PreToolUse: [{ id: 'test:invalid-async', matcher: 'test', hooks: [{ type: 'command', command: 'echo', async: 'yes' }] }]
       }
     }));
 
@@ -759,7 +863,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: -5 }] }]
+        PreToolUse: [{ id: 'test:negative-timeout', matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: -5 }] }]
       }
     }));
 
@@ -774,7 +878,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'node -e "function {"' }] }]
+        PreToolUse: [{ id: 'test:invalid-inline-js', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "function {"' }] }]
       }
     }));
 
@@ -789,7 +893,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'node -e "console.log(1+2)"' }] }]
+        PreToolUse: [{ id: 'test:valid-inline-js', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "console.log(1+2)"' }] }]
       }
     }));
 
@@ -803,7 +907,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: ['node', '-e', 'console.log(1)'] }] }]
+        PreToolUse: [{ id: 'test:array-command', matcher: 'test', hooks: [{ type: 'command', command: ['node', '-e', 'console.log(1)'] }] }]
       }
     }));
 
@@ -829,7 +933,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test' }]
+        PreToolUse: [{ id: 'test:missing-hooks', matcher: 'test' }]
       }
     }));
 
@@ -1396,7 +1500,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: '   \t  ' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: '   \t  ' }] }]
       }
     }));
 
@@ -1411,7 +1515,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: null }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: null }] }]
       }
     }));
 
@@ -1426,7 +1530,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 42 }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 42 }] }]
       }
     }));
 
@@ -1605,7 +1709,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: '' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: '' }] }]
       }
     }));
 
@@ -1620,7 +1724,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: [] }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: [] }] }]
       }
     }));
 
@@ -1635,7 +1739,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: ['node', 123, null] }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: ['node', 123, null] }] }]
       }
     }));
 
@@ -1650,7 +1754,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 42, command: 'echo hi' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 42, command: 'echo hi' }] }]
       }
     }));
 
@@ -1665,7 +1769,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 'fast' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 'fast' }] }]
       }
     }));
 
@@ -1680,7 +1784,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 0 }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo', timeout: 0 }] }]
       }
     }));
 
@@ -1694,7 +1798,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     // data.hooks is undefined, so fallback to data itself
     fs.writeFileSync(hooksFile, JSON.stringify({
-      PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo ok' }] }]
+      PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo ok' }] }]
     }));
 
     const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
@@ -1796,7 +1900,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: ['node', '', 'script.js'] }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: ['node', '', 'script.js'] }] }]
       }
     }));
 
@@ -1811,7 +1915,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo hi', timeout: -5 }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo hi', timeout: -5 }] }]
       }
     }));
 
@@ -1826,7 +1930,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PostToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo ok', async: 'yes' }] }]
+        PostToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'echo ok', async: 'yes' }] }]
       }
     }));
 
@@ -1847,7 +1951,7 @@ function runTests() {
     manyHooks.push({ type: 'command', command: '' });
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: manyHooks }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: manyHooks }]
       }
     }));
 
@@ -1862,7 +1966,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'node -e "const x = 1 + 2; process.exit(0)"' }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: 'node -e "const x = 1 + 2; process.exit(0)"' }] }]
       }
     }));
 
@@ -1876,9 +1980,9 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo pre' }] }],
-        PostToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo post' }] }],
-        Stop: [{ matcher: 'test', hooks: [{ type: 'command', command: 'echo stop' }] }]
+        PreToolUse: [{ id: 'test:multi-event-pre', matcher: 'test', hooks: [{ type: 'command', command: 'echo pre' }] }],
+        PostToolUse: [{ id: 'test:multi-event-post', matcher: 'test', hooks: [{ type: 'command', command: 'echo post' }] }],
+        Stop: [{ id: 'test:multi-event-stop', matcher: 'test', hooks: [{ type: 'command', command: 'echo stop' }] }]
       }
     }));
 
@@ -2227,7 +2331,7 @@ function runTests() {
     // After unescape chain: var a = "ok"\nconsole.log(a) (real newline) — valid JS
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command',
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command',
           command: 'node -e "var a = \\"ok\\"\\nconsole.log(a)"' }] }]
       }
     }));
@@ -2243,7 +2347,7 @@ function runTests() {
     // After unescape this becomes: var x = { — missing closing brace
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command',
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command',
           command: 'node -e "var x = {"' }] }]
       }
     }));
@@ -2427,7 +2531,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: 'test', hooks: [{ type: 'command', command: { run: 'echo hi' } }] }]
+        PreToolUse: [{ id: 'test:fixture', matcher: 'test', hooks: [{ type: 'command', command: { run: 'echo hi' } }] }]
       }
     }));
 
@@ -2446,7 +2550,7 @@ function runTests() {
     // Object format: matcher entry has hooks array but NO matcher field
     fs.writeFileSync(hooksFile, JSON.stringify({
       hooks: {
-        PreToolUse: [{ hooks: [{ type: 'command', command: 'echo ok' }] }]
+        PreToolUse: [{ id: 'test:missing-matcher', hooks: [{ type: 'command', command: 'echo ok' }] }]
       }
     }));
 
@@ -2554,6 +2658,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       PreToolUse: [{
+        id: 'test:round72-async',
         matcher: 'Write',
         hooks: [{
           type: 'command',
@@ -2574,6 +2679,7 @@ function runTests() {
     const hooksFile = path.join(testDir, 'hooks.json');
     fs.writeFileSync(hooksFile, JSON.stringify({
       PostToolUse: [{
+        id: 'test:round72-timeout',
         matcher: 'Edit',
         hooks: [{
           type: 'command',
@@ -2661,8 +2767,8 @@ function runTests() {
     fs.writeFileSync(hooksFile, JSON.stringify({
       "$schema": "https://json.schemastore.org/claude-code-settings.json",
       hooks: {
-        PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'echo ok' }] }],
-        PostToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: 'echo done' }] }]
+        PreToolUse: [{ id: 'test:wrapped-pre', matcher: 'Write', hooks: [{ type: 'command', command: 'echo ok' }] }],
+        PostToolUse: [{ id: 'test:wrapped-post', matcher: 'Read', hooks: [{ type: 'command', command: 'echo done' }] }]
       }
     }));
 
@@ -2671,6 +2777,105 @@ function runTests() {
       `Should pass wrapped hooks format, got exit ${result.code}. stderr: ${result.stderr}`);
     assert.ok(result.stdout.includes('Validated 2'),
       `Should validate 2 matchers, got: ${result.stdout}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry missing id', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo missing id' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should reject wrapped matcher entries without an id');
+    assert.ok(result.stderr.includes('id'), `Should report missing id, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry missing a required matcher', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        SessionStart: [{
+          id: 'test:missing-matcher',
+          hooks: [{ type: 'command', command: 'echo start' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1);
+    assert.ok(result.stderr.includes('matcher'), result.stderr);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry with an empty handlers array', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: { Stop: [{ id: 'test:empty-handlers', hooks: [] }] }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1);
+    assert.ok(result.stderr.includes('hooks'), result.stderr);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects wrapped matcher entry with whitespace-only id', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          id: '   \t',
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo blank id' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should reject whitespace-only matcher ids');
+    assert.ok(result.stderr.includes('id'), `Should report invalid id, got: ${result.stderr}`);
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('rejects duplicate wrapped matcher ids across events', () => {
+    const testDir = createTestDir();
+    const hooksFile = path.join(testDir, 'hooks.json');
+    fs.writeFileSync(hooksFile, JSON.stringify({
+      hooks: {
+        PreToolUse: [{
+          id: 'shared:matcher',
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo pre' }]
+        }],
+        PostToolUse: [{
+          id: 'shared:matcher',
+          matcher: 'Write',
+          hooks: [{ type: 'command', command: 'echo post' }]
+        }]
+      }
+    }));
+
+    const result = runValidatorWithDir('validate-hooks', 'HOOKS_FILE', hooksFile);
+    assert.strictEqual(result.code, 1, 'Should reject matcher ids reused by another event');
+    assert.ok(
+      result.stderr.includes("duplicate id 'shared:matcher'"),
+      `Should report the duplicate id, got: ${result.stderr}`
+    );
+    assert.ok(
+      result.stderr.includes('PreToolUse[0]') && result.stderr.includes('PostToolUse[0]'),
+      `Should report both matcher locations, got: ${result.stderr}`
+    );
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -2756,6 +2961,7 @@ function runTests() {
       hooks: {
         UserPromptSubmit: [
           {
+            id: 'test:user-prompt-submit',
             hooks: [
               { type: 'prompt', prompt: 'Summarize the request.' },
               { type: 'agent', prompt: 'Review for security issues.', model: 'gpt-5.4' },
