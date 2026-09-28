@@ -701,6 +701,520 @@ for (const shell of ['sh', 'dash', 'ksh']) {
   }
 }
 
+
+// Review-followup witnesses remain inert strings passed only to the classifier.
+const reviewFollowupCases = [
+  [
+    "transformed executable pipeline",
+    2,
+    "printf '%s' x | sed 's/x/git push --no-verify/' | bash"
+  ],
+  [
+    "transformed executable pipeline",
+    2,
+    "printf '%s' x | sed 's/x/git commit -n/' | sh"
+  ],
+  [
+    "transformed executable pipeline",
+    2,
+    "printf '%s' x | sed 's|x|GIT push --no-verify|' | env bash -s"
+  ],
+  [
+    "transformed executable pipeline",
+    2,
+    "printf '%s' x | sed 's/x/git push --no-verify/' | tee file | bash"
+  ],
+  [
+    "transformed executable pipeline",
+    2,
+    "echo \"$(printf '%s' x | sed 's/x/git push --no-verify/' | bash)\""
+  ],
+  [
+    "transformed executable pipeline",
+    0,
+    "printf '%s' x | sed 's/x/git push --no-verify/'"
+  ],
+  [
+    "transformed executable pipeline",
+    0,
+    "printf '%s' x | sed 's/x/git push --no-verify/' | tee file"
+  ],
+  [
+    "transformed executable pipeline",
+    0,
+    "printf '%s' x | sed 's/x/echo safe/' | bash"
+  ],
+  [
+    "transformed executable pipeline",
+    0,
+    "printf '%s' x | sed 's/x/git status/' | bash"
+  ],
+  [
+    "transformed executable pipeline",
+    0,
+    "printf '%s' x | sed 's/x/git push --no-verify/' | bash script.sh"
+  ],
+  [
+    "transformed executable pipeline",
+    0,
+    "printf '%s' x | sed 's/x/git push --no-verify/' | bash -c 'echo safe'"
+  ],
+  [
+    "tee data versus executable sink",
+    0,
+    "tee file <<'EOF'\ngit push --no-verify\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    0,
+    "tee -a file <<EOF\ngit push --no-verify\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    0,
+    "tee file <<'EOF'\n$(git push --no-verify)\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    2,
+    "tee file <<EOF\n$(git push --no-verify)\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    2,
+    "tee file <<'EOF' | bash\ngit push --no-verify\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    2,
+    "tee file <<'EOF' | cat | sh -s\ngit push --no-verify\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    0,
+    "tee file <<'EOF' | cat\ngit push --no-verify\nEOF"
+  ],
+  [
+    "tee data versus executable sink",
+    0,
+    "tee file <<'EOF' | bash -c 'echo safe'\ngit push --no-verify\nEOF"
+  ],
+  [
+    "Git basename case",
+    2,
+    "GIT commit -n -m x"
+  ],
+  [
+    "Git basename case",
+    2,
+    "GIT push --no-verify"
+  ],
+  [
+    "Git basename case",
+    0,
+    "GIT status"
+  ],
+  [
+    "Git basename case",
+    0,
+    "GIT commit -m \"git push --no-verify\""
+  ],
+  [
+    "Git basename case",
+    2,
+    "Git commit -n -m x"
+  ],
+  [
+    "Git basename case",
+    2,
+    "Git push --no-verify"
+  ],
+  [
+    "Git basename case",
+    0,
+    "Git status"
+  ],
+  [
+    "Git basename case",
+    0,
+    "Git commit -m \"git push --no-verify\""
+  ],
+  [
+    "Git basename case",
+    2,
+    "git.EXE commit -n -m x"
+  ],
+  [
+    "Git basename case",
+    2,
+    "git.EXE push --no-verify"
+  ],
+  [
+    "Git basename case",
+    0,
+    "git.EXE status"
+  ],
+  [
+    "Git basename case",
+    0,
+    "git.EXE commit -m \"git push --no-verify\""
+  ],
+  [
+    "Git basename case",
+    2,
+    "/opt/bin/GiT commit -n -m x"
+  ],
+  [
+    "Git basename case",
+    2,
+    "/opt/bin/GiT push --no-verify"
+  ],
+  [
+    "Git basename case",
+    0,
+    "/opt/bin/GiT status"
+  ],
+  [
+    "Git basename case",
+    0,
+    "/opt/bin/GiT commit -m \"git push --no-verify\""
+  ],
+  [
+    "Git basename case",
+    2,
+    "\"C:\\\\tools\\\\git.EXE\" commit -n -m x"
+  ],
+  [
+    "Git basename case",
+    2,
+    "\"C:\\\\tools\\\\git.EXE\" push --no-verify"
+  ],
+  [
+    "Git basename case",
+    0,
+    "\"C:\\\\tools\\\\git.EXE\" status"
+  ],
+  [
+    "Git basename case",
+    0,
+    "\"C:\\\\tools\\\\git.EXE\" commit -m \"git push --no-verify\""
+  ],
+  [
+    "opaque Git basename case",
+    2,
+    "unknown 'GIT push --no-verify'"
+  ],
+  [
+    "passive Git basename case",
+    0,
+    "echo 'GIT push --no-verify'"
+  ],
+  [
+    "Git config-env",
+    2,
+    "HP=/dev/null git --config-env=core.hooksPath=HP commit -m x"
+  ],
+  [
+    "Git config-env",
+    2,
+    "git --config-env=CORE.HOOKSPATH=HP push origin main"
+  ],
+  [
+    "Git config-env",
+    2,
+    "git --config-env core.hooksPath=HP commit -m x"
+  ],
+  [
+    "Git config-env",
+    0,
+    "git --config-env=color.ui=COLOR commit -m x"
+  ],
+  [
+    "Git config-env",
+    0,
+    "git --config-env=core.hooksPath=HP status"
+  ],
+  [
+    "Git config-env",
+    0,
+    "git commit -m \"--config-env=core.hooksPath=HP\""
+  ],
+  [
+    "Git config-env",
+    0,
+    "echo 'HP=/dev/null git --config-env=core.hooksPath=HP commit'"
+  ],
+  [
+    "Git config-env",
+    2,
+    "env HP=/dev/null git --config-env=core.hooksPath=HP merge branch"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git push"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "env -i GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null command git rebase main"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null bash -c 'git commit -m x'"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git -c core.hooksPath=safe-hooks commit -m x"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git status"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null echo 'git push --no-verify'"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=0 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT= GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=core.hooksPath=/dev/null git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null env -i git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null env -u GIT_CONFIG_COUNT git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null env --unset=GIT_CONFIG_KEY_0 git commit"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null bash -c 'env -i git commit'"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=color.ui GIT_CONFIG_VALUE_0=auto GIT_CONFIG_KEY_1=CORE.HOOKSPATH GIT_CONFIG_VALUE_1= git am patches"
+  ],
+  [
+    "explicit Git environment",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0= git merge branch"
+  ],
+  [
+    "explicit Git environment",
+    0,
+    "git commit -m \"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath\""
+  ],
+  [
+    "Git parameter environment",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" git commit -m x"
+  ],
+  [
+    "Git parameter environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" git status"
+  ],
+  [
+    "Git parameter environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" echo safe"
+  ],
+  [
+    "Git parameter environment",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git commit -m x"
+  ],
+  [
+    "Git parameter environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git status"
+  ],
+  [
+    "Git parameter environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" echo safe"
+  ],
+  [
+    "Git parameter environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'color.ui=core.hooksPath=/dev/null'\" git commit"
+  ],
+  [
+    "Git parameter environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" env -i git commit"
+  ],
+  [
+    "ANSI-C quote boundary",
+    2,
+    "echo $'x\\'' ; git push --no-verify #'"
+  ],
+  [
+    "ANSI-C quote boundary",
+    2,
+    "echo \"$(echo $'x\\'' ; git push --no-verify #')\n)\""
+  ],
+  [
+    "ANSI-C quote boundary",
+    2,
+    "echo \"$(echo $'x\\' )'; git push --no-verify)\""
+  ],
+  [
+    "ANSI-C quote boundary",
+    0,
+    "echo $'x\\'; git push --no-verify'"
+  ],
+  [
+    "ANSI-C quote boundary",
+    0,
+    "echo $'$(git push --no-verify)'"
+  ],
+  [
+    "ANSI-C quote boundary",
+    0,
+    "echo \"$(echo $'x\\'; git push --no-verify')\""
+  ],
+  [
+    "ANSI-C quote boundary",
+    2,
+    "echo $'x\\\\'; git push --no-verify"
+  ],
+  [
+    "ANSI-C quote boundary",
+    0,
+    "echo $'x\\\\; git push --no-verify'"
+  ],
+  [
+    "ANSI-C quote boundary",
+    2,
+    "$'git' push --no-verify"
+  ],
+  [
+    "ANSI-C quote boundary",
+    0,
+    "$'git' commit -m $'document git push --no-verify'"
+  ],
+  [
+    "ANSI-C quote boundary",
+    2,
+    "echo $'x\\''; git commit -n # ignored'"
+  ],
+  [
+    "ANSI-C quote boundary",
+    0,
+    "printf '%s' $'x\\'; git commit -n'"
+  ]
+];
+reviewFollowupCases.push(...[
+  [
+    "exec environment reset",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null exec -c git commit"
+  ],
+  [
+    "exec environment reset",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null exec -cl git commit"
+  ],
+  [
+    "exec environment reset",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null exec -acustom git commit"
+  ],
+  [
+    "exec environment reset",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null exec -a c git commit"
+  ],
+  [
+    "exec environment reset",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null exec -ca custom git commit"
+  ],
+  [
+    "Git count grammar",
+    2,
+    "GIT_CONFIG_COUNT='+1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "Git count grammar",
+    2,
+    "GIT_CONFIG_COUNT=' 1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "Git count grammar",
+    2,
+    "GIT_CONFIG_COUNT='\t+1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "Git count grammar",
+    2,
+    "GIT_CONFIG_COUNT='0001' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "Git count grammar",
+    0,
+    "GIT_CONFIG_COUNT='1 ' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "Git count grammar",
+    0,
+    "GIT_CONFIG_COUNT='-1' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ],
+  [
+    "Git count grammar",
+    0,
+    "GIT_CONFIG_COUNT='2147483648' GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit"
+  ]
+]);
+for (const [family, expected, command] of reviewFollowupCases) {
+  if (test(`${family} ${expected}: ${JSON.stringify(command)}`, () => {
+    const result = runHook(command);
+    assert.strictEqual(result.code, expected, result.stderr);
+    if (expected === 2) assert.match(result.stderr, /BLOCKED/);
+  })) passed++; else failed++;
+}
+
 const pureOnly = process.argv.includes('--pure-only');
 if (pureOnly) console.log('Pure classifier mode: 3 bounded Node routing checks omitted.');
 else {

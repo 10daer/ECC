@@ -151,7 +151,8 @@ function executionRegion(input, start, budget) {
     budget.spend();
     const state = stack[stack.length - 1];
     const c = input[i];
-    if (state.quote === "'") {
+    if (state.quote === "'" || state.quote === "$'") {
+      if (state.quote === "$'" && c === '\\' && i + 1 < input.length) { i++; continue; }
       if (c === "'") state.quote = null;
       continue;
     }
@@ -166,6 +167,9 @@ function executionRegion(input, start, budget) {
     if (state.quote === '"') {
       if (c === '"') state.quote = null;
       continue;
+    }
+    if (c === '$' && input[i + 1] === "'") {
+      state.quote = "$'"; state.word += "$'"; state.quotedWord = true; i++; continue;
     }
     if (c === '"' || c === "'") { state.quote = c; state.word += c; state.quotedWord = true; continue; }
     if (c === '#' && /[\s;|&()]/.test(input[i - 1] || ' ')) {
@@ -282,7 +286,13 @@ function scanShell(input, budget) {
   while (i < input.length) {
     budget.spend();
     const c = input[i];
-    if (quote === "'") {
+    if (quote === "'" || quote === "$'") {
+      if (quote === "$'" && c === '\\' && i + 1 < input.length) {
+        const next = input[i + 1];
+        // Preserve boundaries without claiming general ANSI-C escape expansion.
+        word.value += next === "'" || next === '\\' ? next : c + next;
+        i += 2; continue;
+      }
       if (c === "'") quote = null;
       else word.value += c;
       i++; continue;
@@ -307,9 +317,9 @@ function scanShell(input, budget) {
       i++; continue;
     }
     if (c === '$' && input[i + 1] === "'") {
-      // Literal ANSI-C words without escape interpretation; escaped/generated
-      // names are not claimed to be a complete expansion implementation.
-      begin(); word.quoted = true; quote = "'"; i += 2; continue;
+      // ANSI-C escaped quotes do not close the word; its contents never expand.
+      // Numeric/control escapes and generated names remain outside this grammar.
+      begin(); word.quoted = true; quote = "$'"; i += 2; continue;
     }
     if (c === '"' || c === "'") { begin(); word.quoted = true; quote = c; i++; continue; }
     if (c === '#' && !word) {
