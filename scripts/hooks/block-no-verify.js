@@ -173,8 +173,8 @@ function isGitExecutable(value) {
   return name === 'git' || name === 'git.exe';
 }
 
-// Only explicit command-scoped assignments are tracked. No host environment,
-// exported shell state, arbitrary expansion or external configuration is read.
+// Only literal values from this supplied shell task are tracked. No host
+// environment, arbitrary expansion or external configuration is read.
 function gitEnvironmentOverride(environment, budget) {
   const count = environment.get('GIT_CONFIG_COUNT') || '';
   budget.spend(count.length + environment.size + 1);
@@ -246,17 +246,50 @@ function checkGitWords(words, budget, start = 0, environmentOverride = false) {
 
 // Only explicit option grammars remove wrapper operands. Unknown launchers are
 // opaque/conservative, never guessed from a name found among data arguments.
-function executableWords(words, budget, inherited = new Map()) {
+function executableWords(words, budget, inherited = new Map(), callerValues = inherited) {
   budget.spend(inherited.size + 1);
-  const environment = new Map(inherited);
+  const environments = [new Map(inherited)];
+  const prefixAssignments = new Map();
+  let local = true;
+  let assignmentOnly = true;
+  const dynamicAssignments = new Set();
+  function result(values) { return { words: values, environments, prefixAssignments, local, assignmentOnly, dynamicAssignments }; }
   function suffix(start) {
     budget.spend(words.length - start);
-    return { words: words.slice(start), environment };
+    assignmentOnly = false;
+    return result(words.slice(start));
   }
-  function assignment(value) {
+  function assignment(token) {
+    const { value, dynamic } = token;
     const equals = value.indexOf('=');
     const key = value.slice(0, equals);
-    if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)$/.test(key)) environment.set(key, value.slice(equals + 1));
+    if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)$/.test(key)) {
+      const assigned = value.slice(equals + 1);
+      const count = environments.length;
+      budget.spend(count + 1);
+      for (let n = 0; n < count; n++) {
+        const environment = environments[n];
+        // Expansion precedes env's reset. Caller values remain separate from
+        // the child environment; keep both that possible value and the new
+        // literal spelling without interpreting expansion syntax.
+        if (dynamic && callerValues.has(key)) {
+          budget.spend(environment.size + 1);
+          const prior = new Map(environment);
+          prior.set(key, callerValues.get(key));
+          environments.push(prior);
+        }
+        environment.set(key, assigned);
+      }
+      prefixAssignments.set(key, assigned);
+      if (dynamic) dynamicAssignments.add(key);
+    }
+  }
+  function resetEnvironment(name) {
+    budget.spend(environments.length + 1);
+    for (const environment of environments) {
+      if (name === undefined) environment.clear();
+      else environment.delete(name);
+    }
   }
   let i = 0;
   let assignments = true;
@@ -264,21 +297,25 @@ function executableWords(words, budget, inherited = new Map()) {
   while (i < words.length) {
     const token = words[i];
     budget.spend(token.value.length + token.raw.length + 1);
-    if (assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(environmentAssignments ? token.value : token.raw)) { assignment(token.value); i++; continue; }
+    if (assignments && /^[A-Za-z_][A-Za-z0-9_]*=/.test(environmentAssignments ? token.value : token.raw)) { assignment(token); i++; continue; }
     if (!token.quoted && CONTROL_WORDS.has(token.value)) { i++; continue; }
     const name = basename(token.value);
     if (name === 'command') {
+      assignmentOnly = false;
+      local &&= token.value === 'command';
       i++;
       while (words[i]?.value.startsWith('-')) {
         const flag = words[i++].value;
         budget.spend(flag.length + 1);
         if (flag === '--') break;
-        if (/^-[pvV]+$/.test(flag) && /[vV]/.test(flag)) return { words: [], environment };
+        if (/^-[pvV]+$/.test(flag) && /[vV]/.test(flag)) return result([]);
         if (!/^-p+$/.test(flag)) return suffix(i - 1);
       }
       assignments = false; continue;
     }
     if (name === 'exec') {
+      assignmentOnly = false;
+      local = false;
       i++;
       while (words[i]?.value.startsWith('-')) {
         const flag = words[i++].value;
@@ -286,11 +323,13 @@ function executableWords(words, budget, inherited = new Map()) {
         if (flag === '--') break;
         if (/^-[cl]*a$/.test(flag)) i++;
         else if (!/^-([cl]*a.+|[cl]+)$/.test(flag)) return suffix(i - 1);
-        if (flag.slice(1).split('a', 1)[0].includes('c')) environment.clear();
+        if (flag.slice(1).split('a', 1)[0].includes('c')) resetEnvironment();
       }
       assignments = false; continue;
     }
     if (name === 'env' || name === 'sudo' || name === 'doas') {
+      assignmentOnly = false;
+      local = false;
       const env = name === 'env';
       const values = env
         ? new Set(['-u', '--unset', '-C', '--chdir'])
@@ -301,10 +340,10 @@ function executableWords(words, budget, inherited = new Map()) {
         const flag = words[i].value;
         budget.spend(flag.length + 1);
         if (flag === '--') { i++; break; }
-        if (env && (flag === '-i' || flag === '--ignore-environment')) environment.clear();
-        if (env && (flag === '-u' || flag === '--unset')) environment.delete(words[i + 1]?.value);
-        else if (env && flag.startsWith('--unset=')) environment.delete(flag.slice('--unset='.length));
-        else if (env && flag.startsWith('-u')) environment.delete(flag.slice(2));
+        if (env && (flag === '-i' || flag === '--ignore-environment')) resetEnvironment();
+        if (env && (flag === '-u' || flag === '--unset')) resetEnvironment(words[i + 1]?.value || '');
+        else if (env && flag.startsWith('--unset=')) resetEnvironment(flag.slice('--unset='.length));
+        else if (env && flag.startsWith('-u')) resetEnvironment(flag.slice(2));
         if (values.has(flag)) i += 2;
         else if (flags.has(flag) || [...values].some(value => value.startsWith('--') ? flag.startsWith(`${value}=`) : flag.startsWith(value) && flag.length > value.length)) i++;
         else return suffix(i - 1); // Includes opaque env -S / sudo shell modes.
@@ -313,7 +352,7 @@ function executableWords(words, budget, inherited = new Map()) {
     }
     return suffix(i);
   }
-  return { words: [], environment };
+  return result([]);
 }
 
 function shellRole(words, budget, shell) {
@@ -405,13 +444,119 @@ function pipelineSources(command, budget) {
   return sources;
 }
 
+const GIT_ENV_NAME = /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_[0-9]+)$/;
+const DECLARATIONS = new Set(['export', 'declare', 'typeset', 'readonly', 'unset']);
+
+function shellState(environment, budget) {
+  budget.spend(2 * environment.size + 1);
+  return { variables: new Map(environment), exported: new Set(environment.keys()), readonly: new Set() };
+}
+
+function copyShellState(state, budget) {
+  budget.spend(state.variables.size + state.exported.size + state.readonly.size + 1);
+  return { variables: new Map(state.variables), exported: new Set(state.exported), readonly: new Set(state.readonly) };
+}
+
+function copyShellContext(context, budget) {
+  budget.spend(context.states.length + 1);
+  return { states: context.states.map(state => copyShellState(state, budget)) };
+}
+
+function exportedEnvironment(state, budget) {
+  const environment = new Map();
+  budget.spend(state.exported.size + 1);
+  for (const name of state.exported) {
+    if (state.variables.has(name)) environment.set(name, state.variables.get(name));
+  }
+  return environment;
+}
+
+// Literal declaration operands are data, not executable source. A value and
+// its export attribute are separate: an assignment-only command does not start
+// exporting a previously local variable. No host shell state is consulted.
+function updateShellState(state, normalized, budget) {
+  const { words, prefixAssignments, local, assignmentOnly, dynamicAssignments } = normalized;
+  const states = [state];
+  const result = (handled, changed, uncertain = false) => ({ handled, changed, uncertain, states });
+  if (!local) return result(false, false);
+  function assign(name, value, dynamic = false) {
+    const count = states.length;
+    budget.spend(count + 1);
+    for (let n = 0; n < count; n++) {
+      const current = states[n];
+      if (current.readonly.has(name)) continue;
+      // Preserve the known possible value AND the new literal spelling.
+      // Both alternatives subsequently receive the declaration attributes.
+      if (dynamic && current.variables.has(name)) states.push(copyShellState(current, budget));
+      current.variables.set(name, value);
+    }
+  }
+  if (assignmentOnly) {
+    budget.spend(prefixAssignments.size + 1);
+    for (const [name, value] of prefixAssignments) assign(name, value, dynamicAssignments.has(name));
+    return result(true, prefixAssignments.size > 0, dynamicAssignments.size > 0);
+  }
+  // Exact builtin names only: /some/path/export is an external executable.
+  const name = words[0]?.value;
+  if (!DECLARATIONS.has(name)) return result(false, false);
+  let exported = name === 'export' ? true : null;
+  let readonly = name === 'readonly';
+  let passive = false;
+  let uncertain = dynamicAssignments.size > 0;
+  let i = 1;
+  for (; i < words.length; i++) {
+    const flag = words[i].value;
+    budget.spend(flag.length + 1);
+    if (flag === '--') { i++; break; }
+    if (!/^[+-]/.test(flag)) break;
+    if (name === 'export' && /^-[npf]+$/.test(flag)) {
+      if (flag.includes('n')) exported = false;
+      passive ||= flag.includes('f');
+    } else if ((name === 'declare' || name === 'typeset') && /^[+-][xrgpf]+$/.test(flag)) {
+      if (flag.includes('x')) exported = flag[0] === '-';
+      if (flag[0] === '-' && flag.includes('r')) readonly = true;
+      passive ||= /[pf]/.test(flag);
+    } else if (name === 'readonly' && /^-[pf]+$/.test(flag)) passive ||= flag.includes('f');
+    else if (name === 'unset' && /^-[vf]+$/.test(flag)) passive ||= flag.includes('f');
+    else uncertain = true;
+  }
+  if (passive && !uncertain) return result(true, false);
+  let changed = false;
+  budget.spend(prefixAssignments.size + 1);
+  for (const [key, value] of prefixAssignments) { assign(key, value, dynamicAssignments.has(key)); changed = true; }
+  for (; i < words.length; i++) {
+    const value = words[i].value;
+    budget.spend(2 * value.length + 1);
+    const equals = value.indexOf('=');
+    const key = equals < 0 ? value : value.slice(0, equals);
+    if (!GIT_ENV_NAME.test(key)) continue;
+    changed = true;
+    if (name !== 'unset' && equals >= 0) assign(key, value.slice(equals + 1), words[i].dynamic);
+    budget.spend(states.length + 1);
+    for (const current of states) {
+      if (name === 'unset') {
+        if (equals < 0 && !current.readonly.has(key)) {
+          current.variables.delete(key); current.exported.delete(key);
+        }
+      } else {
+        if (exported === true || uncertain) current.exported.add(key);
+        else if (exported === false) current.exported.delete(key);
+        if (readonly || uncertain) current.readonly.add(key);
+      }
+    }
+  }
+  // Unsupported attributes may transform values or reject the declaration.
+  // Retain old and conservative literal states; never use them to prove reset.
+  return result(true, changed, uncertain);
+}
+
 function checkCommand(input) {
   const budget = createBudget(input.length);
-  const pending = [{ text: input, opaque: false, environment: new Map() }];
-  function enqueue(text, opaque = false, environment = new Map()) {
+  const pending = [{ text: input, opaque: false, context: { states: [shellState(new Map(), budget)] } }];
+  function enqueue(text, opaque = false, context = { states: [shellState(new Map(), budget)] }) {
     if (!text) return;
     budget.spend(text.length + 1);
-    pending.push({ text, opaque, environment });
+    pending.push({ text, opaque, context });
   }
   function inspectOpaque(words, text, environment) {
     for (let index = 0; index < words.length; index++) {
@@ -421,32 +566,111 @@ function checkCommand(input) {
         const reason = checkGitWords(words, budget, index, gitEnvironmentOverride(environment, budget));
         if (reason) return reason;
       }
-      if (word.value !== text && /git/i.test(word.value) && /[\s'"()]/.test(word.value)) enqueue(word.value, true, environment);
+      if (word.value !== text && /git/i.test(word.value) && /[\s'"()]/.test(word.value)) enqueue(word.value, true, { states: [shellState(environment, budget)] });
     }
     return null;
   }
   try {
     while (pending.length) {
       const task = pending.pop();
-      const scan = scanShell(task.text, budget);
-      for (const text of scan.nested) enqueue(text, false, task.environment);
-      for (const command of scan.commands) {
-        const { words, environment } = executableWords(command.words, budget, task.environment);
+      if (task.mergeInto) {
+        budget.spend(task.context.states.length + 1);
+        task.mergeInto.states.push(...task.context.states);
+        continue;
+      }
+      if (!task.command) {
+        const scan = scanShell(task.text, budget);
+        const contexts = new Map([[scan.rootScope, task.context]]);
+        budget.spend(scan.commands.length + 1);
+        for (let i = scan.commands.length - 1; i >= 0; i--) pending.push({ ...task, command: scan.commands[i], contexts });
+        continue;
+      }
+      const { command, contexts } = task;
+      if (command.scopeExit) {
+        const closing = command.scopeExit;
+        const exited = contexts.get(closing);
+        const enclosing = contexts.get(closing.parent);
+        if (closing.pipelineLast && exited && enclosing) {
+          budget.spend(exited.states.length + 1);
+          enclosing.states.push(...exited.states);
+        }
+        continue;
+      }
+      const missing = [];
+      for (let scope = command.scope; !contexts.has(scope); scope = scope.parent) { budget.spend(); missing.push(scope); }
+      while (missing.length) {
+        const scope = missing.pop();
+        const parent = contexts.get(scope.parent);
+        contexts.set(scope, scope.isolated ? copyShellContext(parent, budget) : parent);
+      }
+      const parent = contexts.get(command.scope);
+      const isolated = command.pipeFrom || command.pipeTo || command.background;
+      const context = task.commandContext || (isolated ? copyShellContext(parent, budget) : parent);
+      if (!task.nestedDone && command.nested.length) {
+        pending.push({ ...task, nestedDone: true, commandContext: context });
+        budget.spend(command.nested.length + 1);
+        for (let i = command.nested.length - 1; i >= 0; i--) enqueue(command.nested[i], false, copyShellContext(context, budget));
+        continue;
+      }
+      let conditional = false;
+      for (let scope = command.scope; scope; scope = scope.parent) { budget.spend(); conditional ||= scope.conditional; }
+      const alternatives = [];
+      const childEnvironments = [];
+      let sameShellCode = null;
+      let changed = false;
+      budget.spend(context.states.length + 1);
+      for (const state of context.states) {
+        const normalized = executableWords(command.words, budget, exportedEnvironment(state, budget), state.variables);
+        const { words, environments } = normalized;
+        const next = copyShellState(state, budget);
+        const evalPrefix = normalized.local && words[0]?.value === 'eval' && normalized.prefixAssignments.size > 0;
+        const mutation = updateShellState(next, evalPrefix ? { ...normalized, assignmentOnly: true } : normalized, budget);
+        if (evalPrefix) {
+          alternatives.push(state);
+          budget.spend(mutation.states.length * (normalized.prefixAssignments.size + 1));
+          for (const variant of mutation.states) for (const name of normalized.prefixAssignments.keys()) variant.exported.add(name);
+        }
+        budget.spend(mutation.states.length + 1);
+        alternatives.push(...mutation.states);
+        if (mutation.changed && (conditional || mutation.uncertain)) alternatives.push(state);
+        changed ||= mutation.changed;
+        if (mutation.handled && !evalPrefix) continue;
         const role = commandRole(words, budget);
-        const reason = task.opaque || role.kind === 'opaque'
-          ? inspectOpaque(command.words, task.text, environment)
-          : role.kind === 'git' ? checkGitWords(words, budget, 0, gitEnvironmentOverride(environment, budget)) : null;
-        if (reason) return { blocked: true, reason };
-        if (role.code) enqueue(role.code, false, environment);
-        if (role.stdin) {
-          for (const redirect of command.redirects) {
-            if (redirect.operator === '<<<') enqueue(redirect.word.value, role.kind === 'opaque', environment);
-            else if (redirect.operator === '<<' || redirect.operator === '<<-') enqueue(redirect.body, role.kind === 'opaque', environment);
+        budget.spend(environments.length + 1);
+        for (const environment of environments) {
+          const reason = task.opaque || role.kind === 'opaque'
+            ? inspectOpaque(command.words, task.text, environment)
+            : role.kind === 'git' ? checkGitWords(words, budget, 0, gitEnvironmentOverride(environment, budget)) : null;
+          if (reason) return { blocked: true, reason };
+          if (role.code) {
+            if (normalized.local && words[0]?.value === 'eval') {
+              sameShellCode = role.code;
+            }
+            else childEnvironments.push({ code: role.code, opaque: false, environment });
           }
-          if (command.pipeFrom) {
-            for (const source of pipelineSources(command.pipeFrom, budget)) enqueue(source.text, source.opaque || role.kind === 'opaque', environment);
+          if (role.stdin) {
+            for (const redirect of command.redirects) {
+              if (redirect.operator === '<<<') childEnvironments.push({ code: redirect.word.value, opaque: role.kind === 'opaque', environment });
+              else if (redirect.operator === '<<' || redirect.operator === '<<-') childEnvironments.push({ code: redirect.body, opaque: role.kind === 'opaque', environment });
+            }
+            if (command.pipeFrom) {
+              for (const source of pipelineSources(command.pipeFrom, budget)) childEnvironments.push({ code: source.text, opaque: source.opaque || role.kind === 'opaque', environment });
+            }
           }
         }
+      }
+      context.states = alternatives;
+      // Bash lastpipe and zsh can execute a final pipeline builtin in the
+      // parent shell. Preserve that possible state as well as isolation; this
+      // is deliberately conservative when the host shell/options are unknown.
+      if (command.pipeFrom && !command.pipeTo && !command.background && (changed || sameShellCode)) pending.push({ mergeInto: parent, context });
+      for (const child of childEnvironments) enqueue(child.code, child.opaque, { states: [shellState(child.environment, budget)] });
+      if (sameShellCode) {
+        // A conditional eval may not run. Its nested scans have fresh lexical
+        // roots, so preserve the skipped branch across all delayed updates.
+        const evaluated = conditional ? copyShellContext(context, budget) : context;
+        if (conditional) pending.push({ mergeInto: context, context: evaluated });
+        enqueue(sameShellCode, false, evaluated);
       }
     }
   } catch (error) {

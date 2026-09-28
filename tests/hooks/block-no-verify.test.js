@@ -545,6 +545,21 @@ function countedClassification(command, quota) {
   const context = vm.createContext({});
   vm.runInContext(`
     globalThis.copiedElements = 0;
+    globalThis.copiedStateEntries = 0;
+    const NativeMap = Map;
+    const NativeSet = Set;
+    globalThis.Map = class extends NativeMap {
+      constructor(entries) {
+        super();
+        if (entries) for (const [key, value] of entries) { globalThis.copiedStateEntries++; super.set(key, value); }
+      }
+    };
+    globalThis.Set = class extends NativeSet {
+      constructor(entries) {
+        super();
+        if (entries) for (const value of entries) { globalThis.copiedStateEntries++; super.add(value); }
+      }
+    };
     const originalSlice = Array.prototype.slice;
     Array.prototype.slice = function(start = 0, end = this.length) {
       const a = start < 0 ? Math.max(0, this.length + start) : Math.min(this.length, start);
@@ -586,7 +601,8 @@ function countedClassification(command, quota) {
     assert.strictEqual(name, './lib/shell-scan');
     return instrumentedLexer;
   });
-  return { result: hookModule.exports.run(command), copiedElements: context.copiedElements, spent, valueReads };
+  const result = hookModule.exports.run(command);
+  return { result, copiedElements: context.copiedElements, copiedStateEntries: context.copiedStateEntries, spent, valueReads };
 }
 for (const n of [64, 128]) {
   if (test(`opaque Git candidates avoid quadratic suffix copies at ${n}`, () => {
@@ -1212,6 +1228,607 @@ for (const [family, expected, command] of reviewFollowupCases) {
     const result = runHook(command);
     assert.strictEqual(result.code, expected, result.stderr);
     if (expected === 2) assert.match(result.stderr, /BLOCKED/);
+  })) passed++; else failed++;
+}
+
+
+// Literal shell-state propagation; witness text is never executed. Pipeline-last
+// and conditional state changes are conservative alternatives, not flow proofs.
+const stickyEnvironmentCases = Object.freeze([
+  [
+    "literal exported parameter",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit -m x"
+  ],
+  [
+    "exported ordinary Git control",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "literal exported parameter",
+    2,
+    "declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit -m x"
+  ],
+  [
+    "exported ordinary Git control",
+    0,
+    "declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "literal exported parameter",
+    2,
+    "typeset -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit -m x"
+  ],
+  [
+    "exported ordinary Git control",
+    0,
+    "typeset -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "literal exported parameter",
+    2,
+    "declare -gx GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit -m x"
+  ],
+  [
+    "exported ordinary Git control",
+    0,
+    "declare -gx GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "literal exported parameter",
+    2,
+    "typeset -gx GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit -m x"
+  ],
+  [
+    "exported ordinary Git control",
+    0,
+    "typeset -gx GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "literal exported parameter",
+    2,
+    "export -- GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit -m x"
+  ],
+  [
+    "exported ordinary Git control",
+    0,
+    "export -- GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"
+  ],
+  [
+    "sticky export order",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS; GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"\ngit push"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=''; GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git am patches"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly GIT_CONFIG_PARAMETERS; git merge main"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; command git rebase main"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i git status; git commit"
+  ],
+  [
+    "sticky export order",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS git status; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "declare GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "typeset GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "readonly GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" echo safe; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "env GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" echo safe; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "command -v export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export -p; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "declare -xp GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; unset GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; unset -v GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export -n GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; declare +x GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS git commit"
+  ],
+  [
+    "literal variable/export boundary",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; exec -c git commit"
+  ],
+  [
+    "sticky count/key/value",
+    2,
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; git commit"
+  ],
+  [
+    "sticky count/key/value",
+    2,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; git push"
+  ],
+  [
+    "sticky count/key/value",
+    2,
+    "export GIT_CONFIG_COUNT=1; export GIT_CONFIG_KEY_0=core.hooksPath; export GIT_CONFIG_VALUE_0=/dev/null; git commit"
+  ],
+  [
+    "sticky count/key/value",
+    2,
+    "export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0; GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; git commit"
+  ],
+  [
+    "count export controls",
+    0,
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; git commit"
+  ],
+  [
+    "count export controls",
+    0,
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; GIT_CONFIG_COUNT=0; git commit"
+  ],
+  [
+    "count export controls",
+    0,
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; unset GIT_CONFIG_COUNT; git commit"
+  ],
+  [
+    "count export controls",
+    0,
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; export -n GIT_CONFIG_VALUE_0; git commit"
+  ],
+  [
+    "count export controls",
+    0,
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; git status"
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "(export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit)"
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; (git commit)"
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "{ export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; }; git commit"
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "{ export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit; } | cat"
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "(export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit) | cat"
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; printf \"%s\" \"$(git commit)\""
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; printf \"%s\" \"$(export GIT_CONFIG_PARAMETERS; git commit)\""
+  ],
+  [
+    "nested scope inherits shell state",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; cat <<EOF\n$(git commit)\nEOF"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "(export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"); git commit"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" | cat; git commit"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "{ export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; } | cat; git commit"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "printf x | { export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; }; git status"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" & git commit"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "{ export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; } & git commit"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "printf \"%s\" \"$(export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\")\"; git commit"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; cat <<'EOF'\ngit commit\nEOF"
+  ],
+  [
+    "isolated/data scope control",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; printf \"%s\" \"$(git commit)\""
+  ],
+  [
+    "eval keeps same shell variables",
+    2,
+    "eval \"export GIT_CONFIG_PARAMETERS=\\\"'core.hooksPath=/dev/null'\\\"\"; git commit"
+  ],
+  [
+    "eval keeps same shell variables",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; eval \"export GIT_CONFIG_PARAMETERS\"; git commit"
+  ],
+  [
+    "eval keeps same shell variables",
+    2,
+    "eval \"GIT_CONFIG_PARAMETERS=\\\"'core.hooksPath=/dev/null'\\\"\"; export GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "child shell exported state",
+    2,
+    "bash -c \"export GIT_CONFIG_PARAMETERS=\\\"'core.hooksPath=/dev/null'\\\"; git commit\""
+  ],
+  [
+    "child shell exported state",
+    2,
+    "bash -c \"GIT_CONFIG_PARAMETERS=\\\"'core.hooksPath=/dev/null'\\\"; export GIT_CONFIG_PARAMETERS; git push\""
+  ],
+  [
+    "child shell state never leaks",
+    0,
+    "bash -c \"export GIT_CONFIG_PARAMETERS=\\\"'core.hooksPath=/dev/null'\\\"\"; git commit"
+  ],
+  [
+    "unexported shell values not child environment",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; bash -c \"git commit\""
+  ],
+  [
+    "exported values reach child environment",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; bash -c \"git commit\""
+  ],
+  [
+    "conditional reset may not execute",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; false && unset GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "conditional export may execute",
+    2,
+    "true && export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "last pipeline builtin may run in parent",
+    2,
+    "printf x | export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "assignment-only malformed quoted name remains data",
+    0,
+    "\"GIT_CONFIG_PARAMETERS=\\\"'core.hooksPath=/dev/null'\\\"\"; git commit"
+  ],
+  [
+    "readonly value cannot be cleared",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly GIT_CONFIG_PARAMETERS; GIT_CONFIG_PARAMETERS=; git commit"
+  ],
+  [
+    "readonly value cannot be unset",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly GIT_CONFIG_PARAMETERS; unset GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "readonly exported declaration",
+    2,
+    "declare -rx GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=; git commit"
+  ],
+  [
+    "readonly exported value updates refused",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly GIT_CONFIG_PARAMETERS; export GIT_CONFIG_PARAMETERS=; git commit"
+  ],
+  [
+    "readonly unexported variable stays local",
+    0,
+    "readonly GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "readonly does not freeze export attribute",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly GIT_CONFIG_PARAMETERS; export -n GIT_CONFIG_PARAMETERS; git commit"
+  ],
+  [
+    "external export basename is not builtin",
+    0,
+    "/tmp/export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "external declare basename is not builtin",
+    0,
+    "/tmp/declare -x GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "external command basename is not builtin",
+    0,
+    "/tmp/command export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "external env cannot change parent attributes",
+    0,
+    "env export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "command builtin retains export semantics",
+    2,
+    "command export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "last pipeline brace may affect parent",
+    2,
+    "printf x | { export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; }; git commit"
+  ],
+  [
+    "last pipeline subshell stays isolated",
+    0,
+    "printf x | (export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"); git commit"
+  ],
+  [
+    "nonfinal pipeline brace stays isolated",
+    0,
+    "printf x | { export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; } | cat; git commit"
+  ],
+  [
+    "background pipeline brace stays isolated",
+    0,
+    "printf x | { export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; } & git commit"
+  ],
+  [
+    "same-shell brace can clear variable",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; { unset GIT_CONFIG_PARAMETERS; }; git commit"
+  ],
+  [
+    "subshell reset does not clear parent",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; (unset GIT_CONFIG_PARAMETERS); git commit"
+  ],
+  [
+    "substitution reset does not clear parent",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; printf \"%s\" \"$(unset GIT_CONFIG_PARAMETERS)\"; git commit"
+  ],
+  [
+    "prefixed eval receives literal environment",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" eval \"git commit\""
+  ],
+  [
+    "prefixed eval persistence is host-mode uncertain",
+    2,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" eval true; git commit"
+  ],
+  [
+    "prefixed eval with safe Git control",
+    0,
+    "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\" eval \"git status\""
+  ],
+  [
+    "exported environment applies to Git executable case",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; /usr/bin/GIT.exe commit"
+  ],
+  [
+    "exported non-hook setting is safe",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'color.ui=core.hooksPath=/dev/null'\"; git commit"
+  ],
+  [
+    "unsupported declaration attributes cannot prove reset",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; declare -i GIT_CONFIG_PARAMETERS=0; git commit"
+  ],
+  [
+    "conditional local clear cannot prove export reset",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; false && GIT_CONFIG_PARAMETERS=; git commit"
+  ],
+  [
+    "conditional readonly does not permit unsafe clear proof",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; true && readonly GIT_CONFIG_PARAMETERS; GIT_CONFIG_PARAMETERS=; git commit"
+  ],
+  [
+    "conditional eval reset may not execute",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; false && eval 'unset GIT_CONFIG_PARAMETERS'; git commit"
+  ],
+  [
+    "unconditional eval reset does execute",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; eval 'unset GIT_CONFIG_PARAMETERS'; git commit"
+  ],
+  [
+    "nested conditional eval reset may not execute",
+    2,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; false && eval \"eval \\\"unset GIT_CONFIG_PARAMETERS\\\"\"; git commit"
+  ],
+  [
+    "conditional eval safe Git control",
+    0,
+    "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; false && eval 'unset GIT_CONFIG_PARAMETERS'; git status"
+  ],
+  ["uninvoked function reset is not proof", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; f() { unset GIT_CONFIG_PARAMETERS; }; git commit"],
+  ["uninvoked function safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; f() { unset GIT_CONFIG_PARAMETERS; }; git status"],
+  ["uninvoked function reset is not proof", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; function f { unset GIT_CONFIG_PARAMETERS; }; git commit"],
+  ["uninvoked function safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; function f { unset GIT_CONFIG_PARAMETERS; }; git status"],
+  ["uninvoked function reset is not proof", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; function f() { unset GIT_CONFIG_PARAMETERS; }; git commit"],
+  ["uninvoked function safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; function f() { unset GIT_CONFIG_PARAMETERS; }; git status"],
+  ["unresolved assignment retains prior unsafe alternative", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["unresolved assignment safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git status"],
+  ["unresolved assignment retains prior unsafe alternative", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=${GIT_CONFIG_PARAMETERS}; git commit"],
+  ["unresolved assignment safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=${GIT_CONFIG_PARAMETERS}; git status"],
+  ["unresolved assignment retains prior unsafe alternative", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["unresolved assignment safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git status"],
+  ["unresolved assignment retains prior unsafe alternative", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; declare -x GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["unresolved assignment safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; declare -x GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git status"],
+  ["unresolved assignment retains prior unsafe alternative", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=$(printf x); git commit"],
+  ["unresolved assignment safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=$(printf x); git status"],
+  ["unresolved assignment retains prior unsafe alternative", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=`printf x`; git commit"],
+  ["unresolved assignment safe Git control", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=`printf x`; git status"],
+  ["literal dollar reset remains data", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS='$GIT_CONFIG_PARAMETERS'; git commit"],
+  ["literal dollar reset remains data", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=\\$GIT_CONFIG_PARAMETERS; git commit"],
+  ["literal dollar reset remains data", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=\"\\$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["literal dollar reset remains data", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=$'$GIT_CONFIG_PARAMETERS'; git commit"],
+  ["unresolved exported count assignment retains bypass", 2, "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; GIT_CONFIG_COUNT=$GIT_CONFIG_COUNT; git commit"],
+  ["unresolved command-prefix count cannot prove reset", 2, "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null; GIT_CONFIG_COUNT=$GIT_CONFIG_COUNT git commit"],
+  ["unresolved command-prefix parameters cannot prove reset", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\" git commit"],
+  ["literal prefix dollar is data", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; GIT_CONFIG_PARAMETERS='$GIT_CONFIG_PARAMETERS' git commit"],
+  ["unresolved export retains known local value and export attribute", 2, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["unresolved export safe Git control", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git status"],
+  ["unresolved export retains known local value and export attribute", 2, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; declare -x GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["unresolved export safe Git control", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; declare -x GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git status"],
+  ["unresolved export retains known local value and export attribute", 2, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; typeset -xr GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["unresolved export safe Git control", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; typeset -xr GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\"; git status"],
+  ["new literal bypass is retained alongside old dynamic value", 2, "export GIT_CONFIG_PARAMETERS=''; export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["new literal bypass is retained alongside old dynamic value", 2, "export GIT_CONFIG_PARAMETERS=''; GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'$GIT_CONFIG_PARAMETERS\"; git commit"],
+  ["new literal prefix bypass is retained", 2, "export GIT_CONFIG_PARAMETERS=''; GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'$GIT_CONFIG_PARAMETERS\" git commit"],
+  ["dynamic env operand expands in caller before child reset", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\" git commit"],
+  ["quoted env operand is data after child reset", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i GIT_CONFIG_PARAMETERS='$GIT_CONFIG_PARAMETERS' git commit"],
+  ["plain child reset remains effective", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i git commit"],
+  ["dynamic env operand expands in caller before child reset", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\" git commit"],
+  ["quoted env operand is data after child reset", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS GIT_CONFIG_PARAMETERS='$GIT_CONFIG_PARAMETERS' git commit"],
+  ["plain child reset remains effective", 0, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS git commit"],
+  ["dynamic env operand expands in caller before child reset", 2, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\" git commit"],
+  ["quoted env operand is data after child reset", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i GIT_CONFIG_PARAMETERS='$GIT_CONFIG_PARAMETERS' git commit"],
+  ["plain child reset remains effective", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -i git commit"],
+  ["dynamic env operand expands in caller before child reset", 2, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS GIT_CONFIG_PARAMETERS=\"$GIT_CONFIG_PARAMETERS\" git commit"],
+  ["quoted env operand is data after child reset", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS GIT_CONFIG_PARAMETERS='$GIT_CONFIG_PARAMETERS' git commit"],
+  ["plain child reset remains effective", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; env -u GIT_CONFIG_PARAMETERS git commit"],
+  ["export print flag with assignment still exports", 2, "export -p GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git commit"],
+  ["export print-only keeps local variable unexported", 0, "GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; export -p; git commit"],
+  ["readonly print flag assignment prevents later reset", 2, "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; readonly -p GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; unset GIT_CONFIG_PARAMETERS; git commit"],
+  ["readonly print flag safe Git control", 0, "readonly -p GIT_CONFIG_PARAMETERS=\"'core.hooksPath=/dev/null'\"; git status"]
+]);
+for (const [family, expected, command] of stickyEnvironmentCases) {
+  if (test(`${family} ${expected}: ${JSON.stringify(command)}`, () => {
+    const result = runHook(command);
+    assert.strictEqual(result.code, expected, result.stderr);
+    if (expected === 2) assert.match(result.stderr, /core\.hooksPath/, 'Must identify the literal override, not exhaust the budget');
+  })) passed++; else failed++;
+}
+
+for (const n of [8, 12]) {
+  if (test(`conditional environment alternatives charge copies within a shared quota at ${n}`, () => {
+    const command = 'export GIT_CONFIG_COUNT=0; ' + 'true && GIT_CONFIG_COUNT=0; '.repeat(n) + 'git status';
+    const result = countedClassification(command, 3000);
+    assert.strictEqual(result.result.exitCode, 2, JSON.stringify(result));
+    assert.match(result.result.stderr, /work budget/);
+    assert.ok(result.spent >= 3000 && result.spent < 3100, JSON.stringify(result));
+    // Include fixed module-level Set construction as a constant allowance.
+    assert.ok(result.copiedStateEntries <= result.spent + 128, JSON.stringify(result));
   })) passed++; else failed++;
 }
 
