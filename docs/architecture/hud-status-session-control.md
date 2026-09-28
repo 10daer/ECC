@@ -94,3 +94,10 @@ a paused process may still be writing. After an abnormal exit, stop all ECC
 processes using that database, inspect the PID and hostname in the lock file,
 and remove only the leftover `.ecc-state.lock` file before retrying. Do not
 remove the database itself. In-memory stores do not create lock files.
+
+The control-pane HTTP server runs board claims and moves in one-shot workers,
+so waiting for another writer does not stall health checks or snapshots. A
+timed-out mutation returns HTTP 503 with `code: STATE_STORE_BUSY` and
+`Retry-After: 1`; invalid mutations continue to return HTTP 400. Each worker
+closes its store before reporting the result and exits naturally, including
+when the requesting browser disconnects, to avoid interrupting a write.

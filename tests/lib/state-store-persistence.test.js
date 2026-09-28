@@ -50,6 +50,71 @@ async function run() {
     assert.deepStrictEqual(fs.readFileSync(dbPath), before);
   });
 
+  await test('persistent PRAGMA changes survive snapshot reload and reopening', async dbPath => {
+    const store = await createStateStore({ dbPath });
+    try {
+      assert.strictEqual(store._database.pragma('user_version = 3252'), undefined);
+      assert.strictEqual(store._database.prepare('PRAGMA user_version').get().user_version, 3252);
+      store._database.pragma('application_id(2468)');
+    } finally { store.close(); }
+    const reopened = await createStateStore({ dbPath });
+    try {
+      assert.strictEqual(reopened._database.prepare('PRAGMA user_version').get().user_version, 3252);
+      assert.strictEqual(reopened._database.prepare('PRAGMA application_id').get().application_id, 2468);
+    } finally { reopened.close(); }
+  });
+
+  await test('read-only and connection-local PRAGMAs never rewrite database bytes', async dbPath => {
+    const store = await createStateStore({ dbPath });
+    const before = fs.readFileSync(dbPath);
+    const rename = fs.renameSync;
+    let writes = 0;
+    fs.renameSync = (from, to) => {
+      if (to === dbPath) writes += 1;
+      return rename(from, to);
+    };
+    try {
+      store._database.pragma('user_version');
+      store._database.pragma('table_info(work_items)');
+      store._database.pragma('integrity_check');
+      store._database.transaction(() => {
+        store._database.pragma('user_version');
+        store._database.pragma('table_info(work_items)');
+      })();
+      store._database.withSnapshot(() => {
+        store._database.pragma('cache_size = 256');
+        assert.strictEqual(store._database.prepare('PRAGMA cache_size').get().cache_size, 256);
+      });
+      assert.strictEqual(writes, 0);
+      assert.deepStrictEqual(fs.readFileSync(dbPath), before);
+    } finally {
+      fs.renameSync = rename;
+      store.close();
+    }
+  });
+
+  await test('PRAGMA persistence waits for commit and never commits a rolled-back transaction', async dbPath => {
+    const store = await createStateStore({ dbPath });
+    try {
+      store._database.transaction(() => {
+        store.upsertWorkItem(item('committed-pragma'));
+        store._database.pragma('table_info(work_items)');
+        store._database.pragma('user_version = 3252');
+      })();
+      store._database.transaction(() => store._database.pragma('application_id(2468)'))();
+      assert.strictEqual(store._database.prepare('PRAGMA application_id').get().application_id, 2468);
+      const before = fs.readFileSync(dbPath);
+      assert.throws(() => store._database.transaction(() => {
+        store.upsertWorkItem(item('rolled-back-pragma'));
+        store._database.pragma('user_version = 9999');
+        throw new Error('abort PRAGMA transaction');
+      })(), /abort PRAGMA transaction/);
+      assert.deepStrictEqual(fs.readFileSync(dbPath), before);
+      assert.strictEqual(store._database.prepare('PRAGMA user_version').get().user_version, 3252);
+      assert.deepStrictEqual(store.listWorkItems().items.map(row => row.id), ['committed-pragma']);
+    } finally { store.close(); }
+  });
+
   await test('failed persistence is discarded, releases the lock and cannot overwrite a later writer', async dbPath => {
     const first = await createStateStore({ dbPath });
     const second = await createStateStore({ dbPath });

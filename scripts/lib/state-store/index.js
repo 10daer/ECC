@@ -208,15 +208,20 @@ function wrapSqlJsDatabase(SQL, dbPath) {
   let inSnapshot = false;
   let dirty = false;
   let inTransaction = false;
+  let pragmaExecuted = false;
+  let snapshotBytes = null;
 
   function reload() {
     if (dbPath === ':memory:' && rawDb) return;
     const bytes = dbPath !== ':memory:' && assertSafeDatabaseFile(dbPath)
       ? readDatabaseFile(dbPath) : undefined;
+    // sql.js can use its input buffer as writable backing storage.
+    const originalBytes = bytes ? Buffer.from(bytes) : null;
     const latest = new SQL.Database(bytes);
     latest.run('PRAGMA foreign_keys = ON');
     if (rawDb) rawDb.close();
     rawDb = latest;
+    snapshotBytes = originalBytes;
   }
 
   // Hold one lock from reload through commit. Nested statements and public
@@ -228,18 +233,27 @@ function wrapSqlJsDatabase(SQL, dbPath) {
       reload();
       inSnapshot = true;
       dirty = false;
+      pragmaExecuted = false;
       try {
         const result = callback();
         if (result && typeof result.then === 'function') {
           throw new Error('State-store operations must be synchronous');
         }
-        if (dirty && dbPath !== ':memory:') {
-          writeDatabaseFileAtomic(dbPath, Buffer.from(rawDb.export()));
+        if ((dirty || pragmaExecuted) && dbPath !== ':memory:') {
+          // SQLite PRAGMAs include reads, connection settings and persisted
+          // changes. Compare the resulting database instead of parsing their
+          // SQL syntax. Export only here: exporting inside a transaction would
+          // implicitly end it before our commit/rollback boundary.
+          const data = Buffer.from(rawDb.export());
+          if (dirty || !snapshotBytes || !data.equals(snapshotBytes)) {
+            writeDatabaseFileAtomic(dbPath, data);
+          }
         }
         return result;
       } finally {
         inSnapshot = false;
         dirty = false;
+        pragmaExecuted = false;
       }
     };
     return dbPath === ':memory:' ? execute() : withStateStoreLock(dbPath, execute);
@@ -319,7 +333,10 @@ function wrapSqlJsDatabase(SQL, dbPath) {
     },
 
     pragma(pragmaStr) {
-      return withSnapshot(() => rawDb.run(`PRAGMA ${pragmaStr}`));
+      return withSnapshot(() => {
+        rawDb.run(`PRAGMA ${pragmaStr}`);
+        pragmaExecuted = true;
+      });
     },
 
     prepare(sql) {
