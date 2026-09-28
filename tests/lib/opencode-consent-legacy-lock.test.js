@@ -455,12 +455,15 @@ function runTests() {
   }
   for (const defect of ['identity', 'bytes', 'path snapshot']) {
     test(`descriptor postimage assertion refuses different ${defect}`, value => {
-      const fd = fs.openSync(value.legacyFile, 'r');
+      const flags = defect === 'bytes' ? fs.constants.O_RDWR : fs.constants.O_RDONLY;
+      const fd = fs.openSync(value.legacyFile, flags | (fs.constants.O_NOFOLLOW || 0), 0o600);
       let identity;
-      try { identity = fs.fstatSync(fd, { bigint: true }); }
+      try {
+        identity = fs.fstatSync(fd, { bigint: true });
+        if (defect === 'bytes') fs.writeFileSync(fd, 'changed private fixture bytes');
+      }
       finally { fs.closeSync(fd); }
       if (defect === 'identity') identity = { ...identity, ino: identity.ino + 1n };
-      if (defect === 'bytes') fs.writeFileSync(value.legacyFile, 'changed private fixture bytes');
       const opened = [];
       const closed = [];
       const facade = { ...fs,
