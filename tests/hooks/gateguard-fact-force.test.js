@@ -145,6 +145,12 @@ function parseOutput(stdout) {
   }
 }
 
+// Canonical state keys fold separators and case on Windows-style paths, so lookups go through this.
+const WINDOWS_STYLE_PATH = /^[a-z]:[\\/]|^\\\\/i;
+function stateKey(p) {
+  return WINDOWS_STYLE_PATH.test(p) ? p.replace(/\\/g, '/').toLowerCase() : p;
+}
+
 function loadDirectHook(env = {}) {
   delete require.cache[require.resolve(hookScript)];
   Object.assign(process.env, {
@@ -1808,7 +1814,11 @@ function runTests() {
 
       const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       assert.ok(persisted.checked.includes('/src/concurrent.js'), 'concurrent disk entry should be preserved');
-      assert.ok(persisted.checked.includes('/src/new-edit.js'), 'new in-memory entry should be persisted');
+      // Canonical key: '/src/new-edit.js' on POSIX, '<drive>:/src/new-edit.js' when cwd is a Windows path.
+      assert.ok(
+        persisted.checked.some(k => k === '/src/new-edit.js' || /^[a-z]:\/src\/new-edit\.js$/.test(k)),
+        'new in-memory entry should be persisted'
+      );
     })
   )
     passed++;
@@ -3435,7 +3445,8 @@ function runTests() {
     test('consecutive condensed denials are textually different (ordinal advances)', () => {
       writeState({ checked: [], last_active: Date.now(), fact_force_denials: 5 });
       const first = parseOutput(runHook({ tool_name: 'Write', tool_input: { file_path: '/src/damp-a.js', content: 'x' } }).stdout);
-      const second = parseOutput(runHook({ tool_name: 'Write', tool_input: { file_path: '/src/damp-b.js', content: 'x' } }).stdout);
+      // Different directory: a same-dir new-file Write would be a sibling allow, not a denial.
+      const second = parseOutput(runHook({ tool_name: 'Write', tool_input: { file_path: '/lib/damp-b.js', content: 'x' } }).stdout);
       const firstReason = first.hookSpecificOutput.permissionDecisionReason;
       const secondReason = second.hookSpecificOutput.permissionDecisionReason;
       assert.ok(firstReason.includes('denial #6'), `expected ordinal 6, got: ${firstReason}`);
@@ -3475,6 +3486,133 @@ function runTests() {
       writeState({ checked: [], last_active: Date.now(), fact_force_denials: 7 });
       const big = parseOutput(runHook({ tool_name: 'Edit', tool_input: { file_path: '/src/damp-big.js' } }, { GATEGUARD_FACT_FORCE_FULL_DENIALS: '20' }).stdout);
       assert.ok(big.hookSpecificOutput.permissionDecisionReason.includes('present these facts'), 'budget of 20 keeps the full block at denial 8');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('allows new paths after the session-wide denial budget', () => {
+      writeState({ checked: [], last_active: Date.now(), fact_force_denials: 3 });
+      const result = runHook(
+        { tool_name: 'Edit', tool_input: { file_path: '/src/after-budget.js' } },
+        { GATEGUARD_FACT_FORCE_MAX_DENIALS: '3' }
+      );
+      assert.strictEqual(result.code, 0);
+      const output = parseOutput(result.stdout);
+      assert.ok(output, 'should produce valid JSON output');
+      assert.ok(!output.hookSpecificOutput, 'paths after the budget should pass through');
+      assert.strictEqual(output.tool_name, 'Edit', 'pass-through should preserve input');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('MultiEdit allows new paths after the session-wide denial budget', () => {
+      writeState({ checked: [], last_active: Date.now(), fact_force_denials: 3 });
+      const result = runHook(
+        { tool_name: 'MultiEdit', tool_input: { edits: [{ file_path: '/src/after-multi-budget.js', old_string: 'a', new_string: 'b' }] } },
+        { GATEGUARD_FACT_FORCE_MAX_DENIALS: '3' }
+      );
+      assert.strictEqual(result.code, 0);
+      const output = parseOutput(result.stdout);
+      assert.ok(output, 'should produce valid JSON output');
+      assert.ok(!output.hookSpecificOutput, 'MultiEdit paths after the budget should pass through');
+      assert.strictEqual(output.tool_name, 'MultiEdit', 'pass-through should preserve input');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('Write allows new paths after the session-wide denial budget', () => {
+      writeState({ checked: [], last_active: Date.now(), fact_force_denials: 3 });
+      const result = runHook(
+        { tool_name: 'Write', tool_input: { file_path: '/src/after-write-budget.js', content: 'x' } },
+        { GATEGUARD_FACT_FORCE_MAX_DENIALS: '3' }
+      );
+      assert.strictEqual(result.code, 0);
+      const output = parseOutput(result.stdout);
+      assert.ok(output, 'should produce valid JSON output');
+      assert.ok(!output.hookSpecificOutput, 'Write paths after the budget should pass through');
+      assert.strictEqual(output.tool_name, 'Write', 'pass-through should preserve input');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('denies at the exact budget and passes through on the next path', () => {
+      // Budget 3: the 3rd denial is still a denial; the 4th path is allowed.
+      writeState({ checked: [], last_active: Date.now(), fact_force_denials: 2 });
+      const atLimit = runHook(
+        { tool_name: 'Edit', tool_input: { file_path: '/src/at-budget.js' } },
+        { GATEGUARD_FACT_FORCE_MAX_DENIALS: '3' }
+      );
+      const atLimitOutput = parseOutput(atLimit.stdout);
+      assert.ok(atLimitOutput, 'should produce valid JSON output at the limit');
+      assert.strictEqual(
+        atLimitOutput.hookSpecificOutput.permissionDecision,
+        'deny',
+        'the denial that reaches the budget should still deny'
+      );
+
+      const pastLimit = runHook(
+        { tool_name: 'Edit', tool_input: { file_path: '/src/past-budget.js' } },
+        { GATEGUARD_FACT_FORCE_MAX_DENIALS: '3' }
+      );
+      const pastLimitOutput = parseOutput(pastLimit.stdout);
+      assert.ok(pastLimitOutput, 'should produce valid JSON output past the limit');
+      assert.ok(!pastLimitOutput.hookSpecificOutput, 'the next path should pass through');
+    })
+  )
+    passed++;
+  else failed++;
+
+  for (const malformed of ['3.5', '3oops', '0x3', ' 3 oops', '-1', '']) {
+    clearState();
+    if (
+      test(`leaves the gate uncapped for malformed budget ${JSON.stringify(malformed)}`, () => {
+        writeState({ checked: [], last_active: Date.now(), fact_force_denials: 9 });
+        const result = runHook(
+          { tool_name: 'Edit', tool_input: { file_path: '/src/malformed-budget.js' } },
+          { GATEGUARD_FACT_FORCE_MAX_DENIALS: malformed }
+        );
+        const output = parseOutput(result.stdout);
+        assert.ok(output, 'should produce valid JSON output');
+        assert.strictEqual(
+          output.hookSpecificOutput.permissionDecision,
+          'deny',
+          'a malformed budget must not silently become a finite cap'
+        );
+      })
+    )
+      passed++;
+    else failed++;
+  }
+
+  clearState();
+  if (
+    test('condensed denial names the session-wide denial cap', () => {
+      // Budget above the full-block budget so a condensed denial is still reached.
+      writeState({ checked: [], last_active: Date.now(), fact_force_denials: 5 });
+      const result = runHook(
+        { tool_name: 'Edit', tool_input: { file_path: '/src/condensed-budget.js' } },
+        { GATEGUARD_FACT_FORCE_MAX_DENIALS: '10' }
+      );
+      const output = parseOutput(result.stdout);
+      assert.ok(output, 'should produce valid JSON output');
+      const reason = output.hookSpecificOutput.permissionDecisionReason;
+      assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny');
+      assert.ok(
+        reason.includes('GATEGUARD_FACT_FORCE_MAX_DENIALS'),
+        'condensed denial should name the session-wide denial cap'
+      );
     })
   )
     passed++;
@@ -4015,6 +4153,2112 @@ function runTests() {
   )
     passed++;
   else failed++;
+
+  // --- Canonical checked-path keys ---
+  const c1Decision = result => {
+    const output = parseOutput(result.stdout);
+    return output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+  };
+  const c1Denials = () => JSON.parse(fs.readFileSync(stateFile, 'utf8')).fact_force_denials;
+
+  clearState();
+  if (
+    test('a.py, ./a.py and <root>/a.py share one checked key (one denial)', () => {
+      const env = { CLAUDE_PROJECT_DIR: '/proj-c1' };
+      const edit = file_path => runHook({ tool_name: 'Edit', tool_input: { file_path, old_string: 'a', new_string: 'b' } }, env);
+      assert.strictEqual(c1Decision(edit('a.py')), 'deny', 'first touch of a.py is denied');
+      assert.notStrictEqual(c1Decision(edit('./a.py')), 'deny', './a.py is the same file');
+      assert.notStrictEqual(c1Decision(edit('/proj-c1/a.py')), 'deny', 'absolute spelling is the same file');
+      assert.strictEqual(c1Denials(), 1, 'exactly one denial counted');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('raw key from an older state file still counts as checked', () => {
+      writeState({ checked: ['a.py'], last_active: Date.now(), fact_force_denials: 1 });
+      const result = runHook(
+        { tool_name: 'Edit', tool_input: { file_path: 'a.py', old_string: 'a', new_string: 'b' } },
+        { CLAUDE_PROJECT_DIR: '/proj-c1' }
+      );
+      assert.notStrictEqual(c1Decision(result), 'deny', 'raw legacy key must not be re-denied');
+      assert.strictEqual(c1Denials(), 1, 'no new denial counted');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('Windows root folds separators and case into one key', () => {
+      const env = { CLAUDE_PROJECT_DIR: 'C:\\proj' };
+      const write = file_path => runHook({ tool_name: 'Write', tool_input: { file_path, content: 'x' } }, env);
+      assert.strictEqual(c1Decision(write('src\\a.py')), 'deny', 'first touch is denied');
+      assert.notStrictEqual(c1Decision(write('c:/proj/src/a.py')), 'deny', 'forward-slash lowercase spelling is the same file');
+      assert.notStrictEqual(c1Decision(write('C:\\PROJ\\src\\A.py')), 'deny', 'case differs only on win32');
+      assert.strictEqual(c1Denials(), 1, 'exactly one denial counted');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('MultiEdit entries use the canonical key', () => {
+      const env = { CLAUDE_PROJECT_DIR: '/proj-c1' };
+      assert.strictEqual(
+        c1Decision(runHook({ tool_name: 'Edit', tool_input: { file_path: 'b.py', old_string: 'a', new_string: 'b' } }, env)),
+        'deny'
+      );
+      const multi = runHook(
+        { tool_name: 'MultiEdit', tool_input: { edits: [{ file_path: './b.py', old_string: 'a', new_string: 'b' }] } },
+        env
+      );
+      assert.notStrictEqual(c1Decision(multi), 'deny', 'MultiEdit on ./b.py matches the checked b.py');
+      assert.strictEqual(c1Denials(), 1, 'exactly one denial counted');
+    })
+  )
+    passed++;
+  else failed++;
+
+  // --- Relative targets resolve against the tool cwd, not the project root ---
+  clearState();
+  if (
+    test('relative target resolves against data.cwd before CLAUDE_PROJECT_DIR', () => {
+      const env = { CLAUDE_PROJECT_DIR: '/proj-f1' };
+      const edit = file_path =>
+        runHook({ tool_name: 'Edit', cwd: '/proj-f1/sub', tool_input: { file_path, old_string: 'a', new_string: 'b' } }, env);
+      assert.strictEqual(c1Decision(edit('src/a.py')), 'deny', 'first touch of src/a.py (cwd sub) is denied');
+      assert.notStrictEqual(c1Decision(edit('/proj-f1/sub/src/a.py')), 'deny', 'absolute spelling of the same file is checked');
+      assert.strictEqual(c1Decision(edit('/proj-f1/src/a.py')), 'deny', 'a different file under the project root is gated');
+      assert.strictEqual(c1Denials(), 2, 'two distinct files, two denials');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('without data.cwd a relative target still resolves against CLAUDE_PROJECT_DIR', () => {
+      const env = { CLAUDE_PROJECT_DIR: '/proj-f1' };
+      const edit = file_path => runHook({ tool_name: 'Edit', tool_input: { file_path, old_string: 'a', new_string: 'b' } }, env);
+      assert.strictEqual(c1Decision(edit('src/a.py')), 'deny');
+      assert.notStrictEqual(c1Decision(edit('/proj-f1/src/a.py')), 'deny', 'project-root fallback unchanged');
+    })
+  )
+    passed++;
+  else failed++;
+
+  // --- Questions by target class ---
+  const C2_ENV = { CLAUDE_PROJECT_DIR: '/proj-c2' };
+  const QUOTE_LINE = "Quote the user's current instruction verbatim";
+  const RETRY_LINE = 'Present the facts, then retry the same operation.';
+  const c2Reason = (toolName, file_path, env = {}) => {
+    const tool_input = toolName === 'MultiEdit'
+      ? { edits: [{ file_path, old_string: 'a', new_string: 'b' }] }
+      : { file_path, old_string: 'a', new_string: 'b', content: 'x' };
+    const output = parseOutput(runHook({ tool_name: toolName, tool_input }, { ...C2_ENV, ...env }).stdout);
+    assert.ok(output && output.hookSpecificOutput, `${toolName} ${file_path} should be denied`);
+    assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny');
+    return output.hookSpecificOutput.permissionDecisionReason;
+  };
+  const assertNoCodeQuestions = reason => {
+    assert.ok(!reason.includes('call this new file'), 'must not ask the code Write questions');
+    assert.ok(!reason.includes('import/require'), 'must not ask the code Edit questions');
+    assert.ok(!reason.includes('public functions/classes'), 'must not ask the code Edit questions');
+  };
+  const assertFrame = (reason, verb, file) => {
+    assert.ok(reason.startsWith('[Fact-Forcing Gate]\n\n'), 'keeps the gate header');
+    assert.ok(reason.includes(`Before ${verb} ${file}, present these facts:`), `header names ${verb} ${file}`);
+    assert.ok(reason.includes(QUOTE_LINE), 'list ends with the verbatim-instruction line');
+    assert.ok(reason.includes(`If this call was sent in a parallel batch, other edits to ${file}`), 'keeps batch-sibling warning');
+    assert.ok(reason.includes(RETRY_LINE), 'keeps the closing retry line');
+    assert.ok(reason.includes('GATEGUARD_EXEMPT_GLOBS'), 'keeps the path-scoped recovery hint');
+  };
+
+  clearState();
+  if (
+    test('first-touch Write of docs/guide.md asks prose questions, not code questions', () => {
+      const reason = c2Reason('Write', 'docs/guide.md');
+      assertFrame(reason, 'creating', 'docs/guide.md');
+      assert.ok(reason.includes('supersedes or duplicates'), 'asks what it supersedes');
+      assert.ok(reason.includes('linked or referenced from'), 'asks where it is linked from');
+      assert.ok(reason.includes('why a new file rather than editing an existing one'), 'asks why a new file');
+      assert.ok(reason.includes(`4. ${QUOTE_LINE}`), 'quote is item 4');
+      assertNoCodeQuestions(reason);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('first-touch Edit of docs/guide.md asks prose Edit questions', () => {
+      const reason = c2Reason('Edit', 'docs/guide.md');
+      assertFrame(reason, 'editing', 'docs/guide.md');
+      assert.ok(reason.includes('reference the section being changed'), 'asks what references the section');
+      assert.ok(reason.includes('corrects or adds'), 'asks what the change corrects or adds');
+      assert.ok(reason.includes(`3. ${QUOTE_LINE}`), 'quote is item 3');
+      assert.ok(!reason.includes('supersedes'), 'Write-only prose question absent');
+      assertNoCodeQuestions(reason);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('skills/x/SKILL.md and .claude/agents/a.md get instruction questions', () => {
+      for (const file of ['skills/x/SKILL.md', '.claude/agents/a.md', 'CLAUDE.md']) {
+        const reason = c2Reason('Write', file);
+        assertFrame(reason, 'creating', file);
+        assert.ok(reason.includes('harness/loader'), `${file}: asks which harness reads it`);
+        assert.ok(reason.includes('agent behaviour changes'), `${file}: asks what behaviour changes`);
+        assert.ok(reason.includes('instruction, skill, or agent file already covers'), `${file}: asks for existing coverage`);
+        assert.ok(reason.includes(`4. ${QUOTE_LINE}`), `${file}: quote is item 4`);
+        assertNoCodeQuestions(reason);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('src/a.py Write and Edit keep the code text byte-identical', () => {
+      const writeReason = c2Reason('Write', 'src/a.py');
+      const expectedWrite = [
+        '[Fact-Forcing Gate]',
+        '',
+        'Before creating src/a.py, present these facts:',
+        '',
+        '1. Name the file(s) and line(s) that will call this new file',
+        '2. Confirm no existing file serves the same purpose (search the tree — Glob/Grep, or find/grep via Bash)',
+        '3. If this file reads/writes data files, show field names, structure, and date format (use redacted or synthetic values, not raw production data)',
+        "4. Quote the user's current instruction verbatim",
+        '',
+        'If this call was sent in a parallel batch, other edits to src/a.py from that batch may already have been applied. Re-read the file before building on them.',
+        '',
+        'Present the facts, then retry the same operation.',
+        ''
+      ].join('\n');
+      assert.ok(writeReason.startsWith(expectedWrite), 'code Write block unchanged');
+      const editReason = c2Reason('Edit', 'src/b.py');
+      const expectedEdit = [
+        '[Fact-Forcing Gate]',
+        '',
+        'Before editing src/b.py, present these facts:',
+        '',
+        '1. List ALL files that import/require this file (search the tree — Glob/Grep, or find/grep via Bash)',
+        '2. List the public functions/classes affected by this change',
+        '3. If this file reads/writes data files, show field names, structure, and date format (use redacted or synthetic values, not raw production data)',
+        "4. Quote the user's current instruction verbatim",
+        '',
+        'If this call was sent in a parallel batch, other edits to src/b.py from that batch may already have been applied. Re-read the file before building on them.',
+        '',
+        'Present the facts, then retry the same operation.',
+        ''
+      ].join('\n');
+      assert.ok(editReason.startsWith(expectedEdit), 'code Edit block unchanged');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('src/a.test.ts and tests/helpers.js get test questions', () => {
+      for (const file of ['src/a.test.ts', 'tests/helpers.js']) {
+        const reason = c2Reason('Write', file);
+        assertFrame(reason, 'creating', file);
+        assert.ok(reason.includes('behaviour is under test'), `${file}: asks what is under test`);
+        assert.ok(reason.includes('existing test file(s)'), `${file}: asks for existing test files`);
+        assert.ok(reason.includes(`3. ${QUOTE_LINE}`), `${file}: quote is item 3`);
+        assertNoCodeQuestions(reason);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('config/app.yaml and .env.local get config questions', () => {
+      for (const file of ['config/app.yaml', '.env.local']) {
+        const reason = c2Reason('Write', file);
+        assertFrame(reason, 'creating', file);
+        assert.ok(reason.includes('process/tool reads this file'), `${file}: asks what reads it`);
+        assert.ok(reason.includes('effect of the change'), `${file}: asks for the effect`);
+        assert.ok(reason.includes('no secrets or credentials'), `${file}: asks about secrets`);
+        assert.ok(reason.includes(`4. ${QUOTE_LINE}`), `${file}: quote is item 4`);
+        assertNoCodeQuestions(reason);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('scripts/hooks/x.js is code, not instruction', () => {
+      const reason = c2Reason('Write', 'scripts/hooks/x.js');
+      assert.ok(reason.includes('call this new file'), 'code Write questions');
+      assert.ok(!reason.includes('harness/loader'), 'not instruction questions');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('MultiEdit on a .md entry uses the prose Edit variant', () => {
+      const reason = c2Reason('MultiEdit', 'docs/multi.md');
+      assertFrame(reason, 'editing', 'docs/multi.md');
+      assert.ok(reason.includes('reference the section being changed'), 'prose Edit questions');
+      assertNoCodeQuestions(reason);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('condensed denial for .md after the budget carries the prose hint and ordinal', () => {
+      const env = { GATEGUARD_FACT_FORCE_FULL_DENIALS: '0' };
+      const writeReason = c2Reason('Write', 'docs/late.md', env);
+      assert.ok(!writeReason.includes('\n'), 'condensed denial is one line');
+      assert.ok(writeReason.includes('(denial #1 this session) First creation of docs/late.md: '), 'keeps ordinal and target');
+      assert.ok(writeReason.includes('briefly state what this supersedes, where it is linked from'), 'prose Write hint');
+      assert.ok(!writeReason.includes('importers/callers'), 'no code hint');
+      assert.ok(writeReason.includes('parallel batch'), 'keeps batch-sibling warning');
+      assert.ok(writeReason.includes('GATEGUARD_EXEMPT_GLOBS') && writeReason.includes('ECC_GATEGUARD=off'), 'keeps exemption hint');
+      const editReason = c2Reason('Edit', 'docs/late-edit.md', env);
+      assert.ok(editReason.includes('(denial #2 this session) First edit of docs/late-edit.md: '), 'ordinal advances');
+      assert.ok(editReason.includes('what references the changed section'), 'prose Edit hint');
+      const codeReason = c2Reason('Edit', 'src/late.js', env);
+      assert.ok(codeReason.includes('briefly state importers/callers, affected API, data schemas if any'), 'code hint unchanged');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('class denials still sanitize the path', () => {
+      const reason = c2Reason('Write', 'docs/hid\u200bden.md');
+      assert.ok(!reason.includes('\u200b'), 'zero-width space stripped');
+      assert.ok(reason.includes('supersedes or duplicates'), 'still prose questions');
+    })
+  )
+    passed++;
+  else failed++;
+
+  // --- Prior-search credit in the current human turn ---
+  const c3Root = '/proj-c3';
+  // An ambient CLAUDE_TRANSCRIPT_PATH must not leak into cases that pass no transcript.
+  const c3Env = { CLAUDE_PROJECT_DIR: c3Root, CLAUDE_TRANSCRIPT_PATH: '' };
+  const c3TranscriptDir = fs.mkdtempSync(path.join(tmpRoot, 'gateguard-c3-transcripts-'));
+  const c3Outputs = [];
+  let c3Seq = 0;
+  let c3Uuid = 0;
+  const c3NextUuid = () => `uuid-${++c3Uuid}`;
+  const c3Human = (text, extra = {}) =>
+    ({ type: 'user', uuid: c3NextUuid(), message: { role: 'user', content: text }, ...extra });
+  // Real assistant records carry message.id; a search without one is never credited.
+  const c3ToolUse = (id, name, input, extra = {}) => ({
+    type: 'assistant',
+    uuid: c3NextUuid(),
+    message: { id: `msg_${id}`, role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    ...extra
+  });
+  const c3ToolResult = (id, isError = false, extra = {}) => ({
+    type: 'user',
+    uuid: c3NextUuid(),
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: 'ok' }] },
+    ...extra
+  });
+  const c3Search = (id, name, input) => [c3ToolUse(id, name, input), c3ToolResult(id)];
+  // Like Claude Code, a fixture ends with the pending call's own assistant record and runners pass its id.
+  const c3PendingIds = new Map();
+  const c3WriteTranscript = (records, { pending = true } = {}) => {
+    c3Seq += 1;
+    const file = path.join(c3TranscriptDir, `t-${c3Seq}.jsonl`);
+    const all = records.slice();
+    if (pending) {
+      const id = `toolu_pending_${c3Seq}`;
+      all.push({
+        type: 'assistant',
+        uuid: c3NextUuid(),
+        message: { id: `msg_pending_${c3Seq}`, role: 'assistant', content: [{ type: 'tool_use', id, name: 'Edit', input: {} }] }
+      });
+      c3PendingIds.set(file, id);
+    }
+    const lines = all.map(r => (typeof r === 'string' ? r : JSON.stringify(r)));
+    fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+    return file;
+  };
+  const c3Run = (toolName, toolInput, transcriptPath, env = {}) => {
+    const payload = { tool_name: toolName, tool_input: toolInput, cwd: c3Root };
+    if (transcriptPath !== undefined) payload.transcript_path = transcriptPath;
+    if (c3PendingIds.has(transcriptPath)) payload.tool_use_id = c3PendingIds.get(transcriptPath);
+    const result = runHook(payload, { ...c3Env, ...env });
+    c3Outputs.push(result.stdout);
+    const output = parseOutput(result.stdout);
+    const hso = output && output.hookSpecificOutput ? output.hookSpecificOutput : {};
+    return { result, decision: hso.permissionDecision, context: hso.additionalContext || '', reason: hso.permissionDecisionReason || '' };
+  };
+  const c3Edit = (file_path, transcriptPath, env) =>
+    c3Run('Edit', { file_path, old_string: 'a', new_string: 'b' }, transcriptPath, env);
+  const c3Write = (file_path, transcriptPath, env) => c3Run('Write', { file_path, content: 'x' }, transcriptPath, env);
+  const c3State = () => (fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {});
+  const c3Case = (name, fn) => {
+    clearState();
+    if (test(name, fn)) passed++;
+    else failed++;
+  };
+  const c3AssertDenied = (out, label) => {
+    assert.strictEqual(out.decision, 'deny', `${label}: expected deny`);
+    assert.ok(!out.context.includes('Prior search seen'), `${label}: no credit note`);
+  };
+  const c3AssertCredited = (out, label) => {
+    assert.notStrictEqual(out.decision, 'deny', `${label}: must not deny`);
+    assert.ok(out.context.includes('Prior search seen in this turn'), `${label}: credit note expected, got ${out.result.stdout}`);
+  };
+
+  c3Case('Grep stem in this turn credits the first Edit (note, no denial counted)', () => {
+    const t = c3WriteTranscript([
+      c3Human('please fix the widget factory'),
+      ...c3Search('toolu_g1', 'Grep', { pattern: 'widget_factory', path: c3Root })
+    ]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertCredited(out, 'Grep stem');
+    assert.ok(out.context.includes('(Grep widget_factory, 1 tool call ago)'), out.context);
+    assert.ok(out.context.includes(`first-touch check satisfied for ${c3Root}/src/widget_factory.py`), out.context);
+    const state = c3State();
+    assert.ok(!state.fact_force_denials, 'denial count unchanged');
+    assert.strictEqual(state.fact_force_credited, 1, 'credit counted');
+    assert.ok(state.checked.includes(stateKey(`${c3Root}/src/widget_factory.py`)), 'canonical key marked checked');
+    const again = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    assert.notStrictEqual(again.decision, 'deny');
+    assert.strictEqual(again.context, '', 'already checked: plain allow, no second note');
+    assert.strictEqual(c3State().fact_force_credited, 1, 'no double credit');
+  });
+
+  c3Case('Glob directory credits a Write of a new file there', () => {
+    const t = c3WriteTranscript([
+      c3Human('add a component'),
+      ...c3Search('toolu_gl', 'Glob', { pattern: 'src/components/*.tsx', path: c3Root })
+    ]);
+    c3AssertCredited(c3Write(`${c3Root}/src/components/NewThing.tsx`, t), 'Glob dir');
+    assert.ok(!c3State().fact_force_denials);
+  });
+
+  c3Case('LS directory credits a Write there', () => {
+    const t = c3WriteTranscript([c3Human('add a page'), ...c3Search('toolu_ls', 'LS', { path: `${c3Root}/docs` })]);
+    c3AssertCredited(c3Write(`${c3Root}/docs/brand-new-page.md`, t), 'LS dir');
+  });
+
+  c3Case('Bash rg stem credits an Edit', () => {
+    const t = c3WriteTranscript([c3Human('fix it'), ...c3Search('toolu_b1', 'Bash', { command: 'cd /proj-c3 && rg foo_bar src' })]);
+    const out = c3Edit(`${c3Root}/src/foo_bar.js`, t);
+    c3AssertCredited(out, 'Bash rg');
+    assert.ok(out.context.includes('(Bash rg foo_bar src,'), out.context);
+  });
+
+  c3Case('PowerShell Get-ChildItem stem credits an Edit', () => {
+    const t = c3WriteTranscript([
+      c3Human('fix it'),
+      ...c3Search('toolu_p1', 'PowerShell', { command: 'Get-ChildItem -Recurse -Filter *foo_bar*' })
+    ]);
+    c3AssertCredited(c3Edit(`${c3Root}/src/foo_bar.ps1`, t), 'PowerShell gci');
+  });
+
+  c3Case('git grep qualifies, git log does not', () => {
+    const ok = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_gg', 'Bash', { command: 'git grep -n foo_bar' })]);
+    c3AssertCredited(c3Edit(`${c3Root}/src/foo_bar.js`, ok), 'git grep');
+    const no = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_gl2', 'Bash', { command: 'git log -- src/baz_qux.js' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/baz_qux.js`, no), 'git log');
+  });
+
+  c3Case('stem only in a non-search shell segment does not credit', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_b2', 'Bash', { command: 'echo foo_bar | grep something; ls' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/foo_bar.js`, t), 'stem in echo segment');
+  });
+
+  c3Case('command substitution in a search command is ambiguous (no credit)', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_b3', 'Bash', { command: 'rg $(echo foo_bar) src' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/foo_bar.js`, t), 'substitution');
+  });
+
+  c3Case('cd before a search disables directory credit (stem still counts)', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_cd', 'Bash', { command: 'cd /elsewhere && ls docs' })]);
+    c3AssertDenied(c3Write(`${c3Root}/docs/brand-new-page.md`, t), 'cd then ls dir');
+  });
+
+  c3Case('a search in the same assistant batch as the pending call never credits', () => {
+    const batch = (id, name, input) => ({
+      type: 'assistant',
+      uuid: c3NextUuid(),
+      message: { id: 'msg_batch', role: 'assistant', content: [{ type: 'tool_use', id, name, input }] }
+    });
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      batch('toolu_bg', 'Grep', { pattern: 'widget_factory' }),
+      batch('toolu_be', 'Edit', { file_path: `${c3Root}/src/widget_factory.py` }),
+      c3ToolResult('toolu_bg')
+    ]);
+    const input = { file_path: `${c3Root}/src/widget_factory.py`, old_string: 'a', new_string: 'b' };
+    const same = runHook({ tool_name: 'Edit', tool_use_id: 'toolu_be', cwd: c3Root, transcript_path: t, tool_input: input }, c3Env);
+    c3Outputs.push(same.stdout);
+    assert.strictEqual(parseOutput(same.stdout).hookSpecificOutput.permissionDecision, 'deny', 'same batch denied');
+    clearState();
+    const later = c3WriteTranscript([
+      c3Human('x'),
+      batch('toolu_bg2', 'Grep', { pattern: 'widget_factory' }),
+      c3ToolResult('toolu_bg2'),
+      { type: 'assistant', uuid: c3NextUuid(), message: { id: 'msg_next', role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_be2', name: 'Edit', input }] } }
+    ]);
+    const next = runHook({ tool_name: 'Edit', tool_use_id: 'toolu_be2', cwd: c3Root, transcript_path: later, tool_input: input }, c3Env);
+    c3Outputs.push(next.stdout);
+    assert.ok(next.stdout.includes('Prior search seen'), 'search from an earlier message credits');
+  });
+
+  c3Case('no search in the turn -> deny', () => {
+    const t = c3WriteTranscript([c3Human('edit it'), ...c3Search('toolu_r0', 'Read', { file_path: `${c3Root}/other.js` })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertDenied(out, 'no search');
+    assert.strictEqual(c3State().fact_force_denials, 1);
+    assert.ok(!c3State().fact_force_credited, 'no credit counted on deny');
+  });
+
+  c3Case('search tool_use without a tool_result (same batch) -> deny', () => {
+    const t = c3WriteTranscript([c3Human('x'), c3ToolUse('toolu_pending', 'Grep', { pattern: 'widget_factory' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'pending search');
+  });
+
+  c3Case('search whose tool_result is_error -> deny', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      c3ToolUse('toolu_err', 'Grep', { pattern: 'widget_factory' }),
+      c3ToolResult('toolu_err', true)
+    ]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'errored search');
+  });
+
+  c3Case('search before the latest human message -> deny', () => {
+    const t = c3WriteTranscript([
+      c3Human('first request'),
+      ...c3Search('toolu_old', 'Grep', { pattern: 'widget_factory' }),
+      c3Human('second request')
+    ]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'previous turn search');
+  });
+
+  c3Case('tool_result user records do not reset the turn', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      ...c3Search('toolu_s1', 'Grep', { pattern: 'widget_factory' }),
+      ...c3Search('toolu_s2', 'Read', { file_path: `${c3Root}/a.js` }),
+      ...c3Search('toolu_s3', 'Bash', { command: 'npm test' })
+    ]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertCredited(out, 'tool_results between');
+    assert.ok(out.context.includes('3 tool calls ago'), out.context);
+  });
+
+  c3Case('isMeta and sidechain user records are not turn boundaries', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      ...c3Search('toolu_m1', 'Grep', { pattern: 'widget_factory' }),
+      c3Human('<system-reminder>meta</system-reminder>', { isMeta: true }),
+      c3Human('subagent prompt', { isSidechain: true })
+    ]);
+    c3AssertCredited(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'meta/sidechain boundary');
+  });
+
+  c3Case('sidechain search records are ignored', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      c3ToolUse('toolu_sc', 'Grep', { pattern: 'widget_factory' }, { isSidechain: true }),
+      c3ToolResult('toolu_sc', false, { isSidechain: true })
+    ]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'sidechain search');
+  });
+
+  c3Case('Read of the target never credits an Edit', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      ...c3Search('toolu_rd', 'Read', { file_path: `${c3Root}/src/widget_factory.py` })
+    ]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'Read target');
+  });
+
+  c3Case('directory match does not credit an Edit (stem only)', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_ls2', 'LS', { path: `${c3Root}/src` })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'LS dir for Edit');
+  });
+
+  c3Case('generic stems (index.js) are not credited', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_ix', 'Grep', { pattern: 'index' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/index.js`, t), 'generic stem');
+  });
+
+  c3Case('stems shorter than 4 characters are not credited', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_ab', 'Grep', { pattern: 'abc' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/abc.js`, t), 'short stem');
+  });
+
+  c3Case('missing or non-file transcript -> deny', () => {
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, path.join(c3TranscriptDir, 'nope.jsonl')), 'missing file');
+    c3AssertDenied(c3Edit(`${c3Root}/src/other_widget.py`, c3TranscriptDir), 'directory path');
+    c3AssertDenied(c3Edit(`${c3Root}/src/third_widget.py`), 'no transcript_path');
+  });
+
+  c3Case('garbage lines -> deny; garbage around a valid turn is skipped', () => {
+    const junk = c3WriteTranscript(['not json', '{"type":', '{"type":"assistant","message":null}', '[1,2]', 'null']);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, junk), 'garbage only');
+    const mixed = c3WriteTranscript([
+      'garbage {',
+      c3Human('x'),
+      '{"broken":',
+      ...c3Search('toolu_gm', 'Grep', { pattern: 'other_widget' }),
+      '\u0000\u0001'
+    ]);
+    c3AssertCredited(c3Edit(`${c3Root}/src/other_widget.py`, mixed), 'garbage around valid turn');
+  });
+
+  // A clipped window with no human record in it is entirely the current turn.
+  const c3Filler = prefix => {
+    const filler = [];
+    for (let i = 0; i < 40; i++) {
+      const id = `toolu_${prefix}${i}`;
+      filler.push(c3ToolUse(id, 'Bash', { command: 'npm test' }));
+      filler.push({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'y'.repeat(10 * 1024) }] }
+      });
+    }
+    return filler;
+  };
+
+  c3Case('tail truncated, no boundary in window, search + result inside -> credited (turn id null)', () => {
+    const t = c3WriteTranscript([
+      c3Human('long ago'),
+      ...c3Filler('fill'),
+      ...c3Search('toolu_late', 'Grep', { pattern: 'widget_factory' })
+    ]);
+    assert.ok(fs.statSync(t).size > 300 * 1024, 'fixture exceeds the tail window');
+    const { scanCurrentTurn } = loadDirectHook();
+    const scan = scanCurrentTurn(t);
+    assert.strictEqual(scan.turnId, null, 'no boundary: no turn id');
+    assert.ok(scan.searches.some(s => s.name === 'Grep'), 'search inside the window is collected');
+    c3AssertCredited(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'clipped window is the current turn');
+  });
+
+  c3Case('tail truncated, search tool_use before the window, result inside -> not credited', () => {
+    const t = c3WriteTranscript([
+      c3Human('long ago'),
+      c3ToolUse('toolu_early', 'Grep', { pattern: 'widget_factory' }),
+      ...c3Filler('fill2'),
+      c3ToolResult('toolu_early')
+    ]);
+    assert.ok(fs.statSync(t).size > 300 * 1024, 'fixture exceeds the tail window');
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'tool_use outside the window');
+  });
+
+  c3Case('whole file scanned with no boundary -> no credit', () => {
+    const t = c3WriteTranscript([...c3Search('toolu_nob', 'Grep', { pattern: 'widget_factory' })]);
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`, t), 'no human record at all');
+  });
+
+  c3Case('MultiEdit credits per entry; first uncredited entry is denied', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_me', 'Grep', { pattern: 'alpha_mod' })]);
+    const out = c3Run(
+      'MultiEdit',
+      {
+        edits: [
+          { file_path: `${c3Root}/src/alpha_mod.js`, old_string: 'a', new_string: 'b' },
+          { file_path: `${c3Root}/src/beta_mod.js`, old_string: 'a', new_string: 'b' }
+        ]
+      },
+      t
+    );
+    assert.strictEqual(out.decision, 'deny');
+    assert.ok(out.reason.includes('beta_mod.js'), 'uncredited entry is the one denied');
+    const state = c3State();
+    assert.ok(state.checked.includes(stateKey(`${c3Root}/src/alpha_mod.js`)), 'credited entry marked checked');
+    assert.strictEqual(state.fact_force_credited, 1);
+    assert.strictEqual(state.fact_force_denials, 1);
+  });
+
+  c3Case('MultiEdit with every entry credited returns one combined note', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      ...c3Search('toolu_me2', 'Grep', { pattern: 'alpha_mod|beta_mod' })
+    ]);
+    const out = c3Run(
+      'MultiEdit',
+      {
+        edits: [
+          { file_path: `${c3Root}/src/alpha_mod.js`, old_string: 'a', new_string: 'b' },
+          { file_path: `${c3Root}/src/beta_mod.js`, old_string: 'a', new_string: 'b' }
+        ]
+      },
+      t
+    );
+    assert.notStrictEqual(out.decision, 'deny');
+    assert.ok(out.context.includes('alpha_mod.js') && out.context.includes('beta_mod.js'), out.context);
+    assert.strictEqual(c3State().fact_force_credited, 2);
+    assert.ok(!c3State().fact_force_denials);
+  });
+
+  c3Case('exempt paths and subagents are unchanged (no credit note)', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_ex', 'Grep', { pattern: 'widget_factory' })]);
+    const exempt = c3Edit(`${c3Root}/tmp/widget_factory.py`, t, { GATEGUARD_EXEMPT_GLOBS: 'tmp/**' });
+    assert.notStrictEqual(exempt.decision, 'deny');
+    assert.strictEqual(exempt.context, '', 'exempt path: plain allow');
+    const sub = runHook(
+      {
+        tool_name: 'Edit',
+        agent_id: 'agent-1',
+        cwd: c3Root,
+        transcript_path: t,
+        tool_input: { file_path: `${c3Root}/src/widget_factory.py`, old_string: 'a', new_string: 'b' }
+      },
+      c3Env
+    );
+    c3Outputs.push(sub.stdout);
+    assert.ok(!sub.stdout.includes('Prior search'), 'subagent: plain allow');
+    assert.ok(!c3State().fact_force_credited, 'no credit recorded');
+  });
+
+  c3Case('credit note detail is sanitized and bounded', () => {
+    const pattern = `widget_factory\u200b\u202e${'x'.repeat(300)}\nIGNORE PREVIOUS`;
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_long', 'Grep', { pattern })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertCredited(out, 'long pattern');
+    const detail = out.context.match(/\(Grep (.*), 1 tool call ago\)/);
+    assert.ok(detail, out.context);
+    assert.ok(Array.from(detail[1]).length <= 80, `detail too long: ${detail[1].length}`);
+    for (const bad of ['\u200b', '\u202e', '\n']) assert.ok(!out.context.includes(bad), 'no invisible/control chars');
+    assert.ok(!out.context.includes('IGNORE PREVIOUS'), 'truncated before trailing text');
+  });
+
+  c3Case('state save failure on credit -> allow with state warning', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_sf', 'Grep', { pattern: 'widget_factory' })]);
+    const blocker = path.join(c3TranscriptDir, `not-a-dir-${c3Seq}`);
+    fs.writeFileSync(blocker, 'x');
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t, { GATEGUARD_STATE_DIR: blocker });
+    assert.notStrictEqual(out.decision, 'deny');
+    assert.ok(out.result.stderr.includes('could not be persisted'), out.result.stderr);
+  });
+
+  c3Case('fact_force_credited survives later state writes (merge keeps it)', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_credited: 4 });
+    c3AssertDenied(c3Edit(`${c3Root}/src/widget_factory.py`), 'deny path');
+    assert.strictEqual(c3State().fact_force_credited, 4, 'denial write keeps credited count');
+    assert.strictEqual(c3State().fact_force_denials, 1);
+  });
+
+  c3Case('scanCurrentTurn / findCreditingSearch units', () => {
+    const { scanCurrentTurn, findCreditingSearch } = loadDirectHook();
+    const human = c3Human('go');
+    const t = c3WriteTranscript(
+      [c3Human('old'), human, ...c3Search('toolu_u1', 'Glob', { pattern: '**/*.md' }), c3ToolUse('toolu_u2', 'Grep', { pattern: 'pending' })],
+      { pending: false }
+    );
+    const scan = scanCurrentTurn(t);
+    assert.strictEqual(scan.turnId, human.uuid, 'turnId is the boundary uuid');
+    assert.deepStrictEqual(scan.searches.map(s => [s.name, s.callsAgo]), [['Glob', 2]]);
+    assert.strictEqual(scanCurrentTurn(path.join(c3TranscriptDir, 'missing.jsonl')), null);
+    const data = { cwd: c3Root };
+    // A Glob with no literal prefix and no explicit path names no directory.
+    assert.strictEqual(findCreditingSearch(scan, `${c3Root}/new-notes.md`, true, data), null, 'Glob **/*.md gives no dir credit');
+    const docsScan = scanCurrentTurn(
+      c3WriteTranscript([c3Human('go'), ...c3Search('toolu_u3', 'Glob', { pattern: 'docs/*.md' }), c3ToolUse('toolu_u4', 'Grep', { pattern: 'x' })], {
+        pending: false
+      })
+    );
+    assert.ok(findCreditingSearch(docsScan, `${c3Root}/docs/new-notes.md`, true, data), 'Glob literal prefix names the dir');
+    assert.strictEqual(findCreditingSearch(docsScan, `${c3Root}/docs/sub/new-notes.md`, true, data), null, 'not a subdirectory');
+    assert.strictEqual(findCreditingSearch(scan, `${c3Root}/new-notes.md`, false, data), null, 'Edit needs a stem match');
+    assert.strictEqual(findCreditingSearch(null, `${c3Root}/x.md`, true, data), null);
+    const winScan = { turnId: null, searches: [{ name: 'LS', input: { path: 'C:\\Proj\\Src' }, callsAgo: 1, messageId: 'msg_w' }] };
+    assert.ok(findCreditingSearch(winScan, 'c:/proj/src/new_file.js', true, { cwd: 'C:\\proj' }), 'win32 dir match folds case');
+    const posixScan = { turnId: null, searches: [{ name: 'LS', input: { path: '/Proj/Src' }, callsAgo: 1, messageId: 'msg_p' }] };
+    assert.strictEqual(findCreditingSearch(posixScan, '/proj/src/new_file.js', true, { cwd: '/proj' }), null, 'posix is case-sensitive');
+  });
+
+  c3Case('50 MB transcript is scanned from the tail only (<= 256 KiB read)', () => {
+    const big = path.join(c3TranscriptDir, 'big.jsonl');
+    const bigSize = 50 * 1024 * 1024;
+    const tail = [c3Human('now'), ...c3Search('toolu_big', 'Grep', { pattern: 'widget_factory' })];
+    for (let i = 0; i < 50; i++) tail.push(...c3Search(`toolu_t${i}`, 'Read', { file_path: `${c3Root}/f${i}.js` }));
+    // Sparse 50 MB body (ftruncate) + the real tail: cheap to build, same shape for the hook.
+    const fd = fs.openSync(big, 'w');
+    try {
+      fs.writeSync(fd, JSON.stringify(c3Human('ancient')) + '\n');
+      fs.ftruncateSync(fd, bigSize);
+      fs.writeSync(fd, '\n' + tail.map(r => JSON.stringify(r)).join('\n') + '\n', bigSize);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const savedRoot = process.env.CLAUDE_PROJECT_DIR;
+    const savedTranscript = process.env.CLAUDE_TRANSCRIPT_PATH;
+    const originalOpenSync = fs.openSync;
+    const originalReadSync = fs.readSync;
+    const bigFds = new Set();
+    let bytesRead = 0;
+    let result;
+    let ms;
+    try {
+      assert.ok(fs.statSync(big).size > bigSize, 'fixture is > 50 MB');
+      const hook = loadDirectHook({ CLAUDE_PROJECT_DIR: c3Root, CLAUDE_TRANSCRIPT_PATH: '' });
+      const payload = {
+        tool_name: 'Edit',
+        cwd: c3Root,
+        transcript_path: big,
+        tool_input: { file_path: `${c3Root}/src/widget_factory.py`, old_string: 'a', new_string: 'b' }
+      };
+      fs.openSync = function countingOpenSync(target) {
+        const opened = originalOpenSync.apply(fs, arguments);
+        if (String(target) === big) bigFds.add(opened);
+        return opened;
+      };
+      fs.readSync = function countingReadSync(readFd) {
+        const n = originalReadSync.apply(fs, arguments);
+        if (bigFds.has(readFd)) bytesRead += n;
+        return n;
+      };
+      const start = process.hrtime.bigint();
+      result = hook.run(payload);
+      ms = Number(process.hrtime.bigint() - start) / 1e6;
+    } finally {
+      fs.openSync = originalOpenSync;
+      fs.readSync = originalReadSync;
+      if (savedRoot === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = savedRoot;
+      if (savedTranscript === undefined) delete process.env.CLAUDE_TRANSCRIPT_PATH;
+      else process.env.CLAUDE_TRANSCRIPT_PATH = savedTranscript;
+      fs.rmSync(big, { force: true });
+    }
+    console.log(`    (run() on 50 MB transcript: ${bytesRead} bytes read, ${ms.toFixed(1)} ms)`);
+    assert.ok(result && String(result.additionalContext || '').includes('Prior search seen'), 'credited from the tail');
+    assert.ok(bigFds.size >= 1 && bytesRead > 0, 'transcript was read through fs.readSync');
+    assert.ok(bytesRead <= 256 * 1024, `read ${bytesRead} bytes; must stay within the 256 KiB tail`);
+    assert.ok(ms < 1000, `wall-clock backstop: run() took ${ms.toFixed(1)} ms`);
+  });
+
+  c3Case('no prior-search credit output carries permissionDecision "allow"', () => {
+    assert.ok(c3Outputs.length > 20, 'collected outputs');
+    for (const stdout of c3Outputs) {
+      const output = parseOutput(stdout);
+      const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+      assert.notStrictEqual(decision, 'allow', stdout);
+    }
+  });
+
+  // --- Exclusion globs never earn search credit ---
+  const r2Target = `${c3Root}/src/widget.py`;
+  let r2Seq = 0;
+  const r2Turn = (name, input) => {
+    r2Seq += 1;
+    return c3WriteTranscript([c3Human('fix the widget'), ...c3Search(`toolu_r2_${r2Seq}`, name, input)]);
+  };
+  const r2Denied = [
+    ['Grep glob !widget.py', 'Grep', { pattern: 'TODO', glob: '!widget.py', path: c3Root }],
+    ['Grep glob list with an exclusion', 'Grep', { pattern: 'widget', glob: '*.js,!widget.py', path: c3Root }],
+    ['Grep path-style exclusion covering the target', 'Grep', { pattern: 'widget', glob: '!src/**', path: c3Root }],
+    ['Grep positive basename glob that misses the target', 'Grep', { pattern: 'widget', glob: '*.md', path: c3Root }],
+    ["rg -g '!widget.py'", 'Bash', { command: "rg -g '!widget.py' TODO ." }],
+    ['rg --glob=!widget.py', 'Bash', { command: 'rg --glob=!widget.py TODO .' }],
+    ['rg --iglob exclusion, other case', 'Bash', { command: "rg --iglob '!WIDGET.py' TODO ." }],
+    ['rg -g exclusion of the directory', 'Bash', { command: "rg -g '!src/' widget ." }],
+    ['rg -g positive glob that misses the target', 'Bash', { command: "rg -g '*.md' widget ." }],
+    ['grep --exclude=widget.py', 'Bash', { command: 'grep -r --exclude=widget.py TODO .' }],
+    ['grep --exclude-dir of the target dir', 'Bash', { command: 'grep -rn --exclude-dir=src widget .' }],
+    ['grep --exclude-from (unknown exclusions)', 'Bash', { command: 'grep -r --exclude-from=skip.txt widget .' }],
+    ['grep --include that misses the target', 'Bash', { command: 'grep -r --include=*.md widget .' }],
+    ['find -not -name', 'Bash', { command: 'find . -not -name widget.py' }],
+    ['find ! -name', 'Bash', { command: 'find . ! -name widget.py -type f' }],
+    ['find -path ... -prune', 'Bash', { command: 'find . -path ./src/widget.py -prune -o -print' }],
+    ['find -name that misses the target', 'Bash', { command: 'find . -name widget.md' }],
+    ['fd -E widget.py', 'Bash', { command: 'fd -E widget.py py src' }],
+    ['fd --exclude widget.py', 'Bash', { command: 'fd --exclude widget.py py .' }],
+    ['ls -I widget.py', 'Bash', { command: 'ls -I widget.py src' }],
+    ["tree -I 'widget*'", 'Bash', { command: "tree -I 'widget*' src" }],
+    ['Get-ChildItem -Exclude', 'PowerShell', { command: 'Get-ChildItem -Recurse -Exclude widget.py' }],
+    ['rg brace exclusion', 'Bash', { command: "rg -g '!*.{py,js}' widget ." }],
+    ['rg deep directory exclusion', 'Bash', { command: "rg -g '!**/src/**' widget ." }],
+    ['rg character-class exclusion', 'Bash', { command: "rg -g '!w[i]dget.py' TODO ." }],
+    ['rg exclusion in a short-flag cluster', 'Bash', { command: "rg -ig'!widget.py' TODO ." }],
+    ['find negated group', 'Bash', { command: 'find . ! ( -name widget.py -o -name x.py ) -print' }],
+    ['git ls-files -x', 'Bash', { command: 'git ls-files -x widget.py src' }]
+  ];
+  for (const [label, name, input] of r2Denied) {
+    c3Case(`an exclusion never credits the excluded target (${label})`, () => {
+      c3AssertDenied(c3Edit(r2Target, r2Turn(name, input)), label);
+      assert.ok(!c3State().fact_force_credited, `${label}: nothing credited`);
+    });
+  }
+  const r2Credited = [
+    ["rg -g '*.py' widget", 'Bash', { command: "rg -g '*.py' widget ." }],
+    ['Grep widget glob *.py', 'Grep', { pattern: 'widget', glob: '*.py', path: c3Root }],
+    ["rg -g '!*.md' widget (exclusion does not cover the target)", 'Bash', { command: "rg -g '!*.md' widget ." }],
+    ['Grep widget glob *.{py,js} (braces are one glob)', 'Grep', { pattern: 'widget', glob: '*.{py,js}', path: c3Root }],
+    ['Grep widget glob !node_modules/**', 'Grep', { pattern: 'widget', glob: '!node_modules/**', path: c3Root }],
+    ['grep --exclude-dir=node_modules widget', 'Bash', { command: 'grep -r --exclude-dir=node_modules widget .' }],
+    ['find -name widget.py', 'Bash', { command: 'find . -name widget.py' }],
+    ['Grep TODO glob widget.py (positive glob names the stem)', 'Grep', { pattern: 'TODO', glob: 'widget.py', path: c3Root }]
+  ];
+  for (const [label, name, input] of r2Credited) {
+    c3Case(`control still credits (${label})`, () => {
+      c3AssertCredited(c3Edit(r2Target, r2Turn(name, input)), label);
+    });
+  }
+
+  // --- Same-turn sibling creations and counters ---
+  const c4Root = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, 'gateguard-c4-proj-')));
+  const c4Env = { CLAUDE_PROJECT_DIR: c4Root, CLAUDE_TRANSCRIPT_PATH: '' };
+  const c4Outputs = [];
+  const c4Run = (toolName, toolInput, transcriptPath, env = {}) => {
+    const payload = { tool_name: toolName, tool_input: toolInput, cwd: c4Root };
+    if (transcriptPath !== undefined) payload.transcript_path = transcriptPath;
+    if (c3PendingIds.has(transcriptPath)) payload.tool_use_id = c3PendingIds.get(transcriptPath);
+    const result = runHook(payload, { ...c4Env, ...env });
+    c4Outputs.push(result.stdout);
+    const output = parseOutput(result.stdout);
+    const hso = output && output.hookSpecificOutput ? output.hookSpecificOutput : {};
+    return { result, decision: hso.permissionDecision, context: hso.additionalContext || '', reason: hso.permissionDecisionReason || '' };
+  };
+  const c4Write = (file_path, transcriptPath, env) => c4Run('Write', { file_path, content: 'x' }, transcriptPath, env);
+  const c4Edit = (file_path, transcriptPath, env) =>
+    c4Run('Edit', { file_path, old_string: 'a', new_string: 'b' }, transcriptPath, env);
+  const c4AssertSibling = (out, label) => {
+    assert.notStrictEqual(out.decision, 'deny', `${label}: must not deny (${out.result.stdout})`);
+    assert.notStrictEqual(out.decision, 'allow', `${label}: never permissionDecision allow`);
+    assert.ok(out.context.includes('[Fact-Forcing Gate] Sibling of '), `${label}: sibling note expected, got ${out.result.stdout}`);
+  };
+  const c4AssertDenied = (out, label) => {
+    assert.strictEqual(out.decision, 'deny', `${label}: expected deny, got ${out.result.stdout}`);
+    assert.ok(!out.context.includes('Sibling of'), `${label}: no sibling note`);
+  };
+  // dir_gates keys are `<class>\u0000<canonicalDir>`.
+  const c4GateKey = (dir, cls = 'code') => `${cls}\u0000${stateKey(dir)}`;
+  const c4Turn = text => {
+    const human = c3Human(text);
+    return { human, transcript: c3WriteTranscript([human]) };
+  };
+
+  c3Case('checked lookups under a simulated Windows root (both spellings share one key)', () => {
+    const winRoot = 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\gateguard-c4-proj-abc';
+    const savedRoot = process.env.CLAUDE_PROJECT_DIR;
+    const savedTranscript = process.env.CLAUDE_TRANSCRIPT_PATH;
+    let first;
+    let second;
+    try {
+      // Fixed synthetic paths: keys need no real disk, and the target is absent on any host.
+      const hook = loadDirectHook({ CLAUDE_PROJECT_DIR: winRoot, CLAUDE_TRANSCRIPT_PATH: '' });
+      const write = file_path => hook.run({ tool_name: 'Write', cwd: winRoot, tool_input: { file_path, content: 'x' } });
+      first = write(`${winRoot}/src/widgets/w0.js`);
+      second = write(`${winRoot}\\src\\widgets\\w1.js`);
+    } finally {
+      if (savedRoot === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = savedRoot;
+      if (savedTranscript === undefined) delete process.env.CLAUDE_TRANSCRIPT_PATH;
+      else process.env.CLAUDE_TRANSCRIPT_PATH = savedTranscript;
+    }
+    assert.strictEqual(parseOutput(first.stdout).hookSpecificOutput.permissionDecision, 'deny');
+    const state = c3State();
+    if (process.platform === 'win32') {
+      // On Windows the synthetic root resolves through C:\Users, so the second new file collapses.
+      assert.ok(second && /Sibling of/.test(String(second.additionalContext || '')), JSON.stringify(second));
+      assert.strictEqual(Object.keys(state.dir_gates || {}).length, 1, 'one dir gate for both spellings');
+    } else {
+      // A Windows path on a POSIX host has no real directory, so both spellings are denied.
+      assert.strictEqual(parseOutput(second.stdout).hookSpecificOutput.permissionDecision, 'deny', JSON.stringify(second));
+      assert.deepStrictEqual(Object.keys(state.dir_gates || {}), [], 'no dir gate for an unresolvable directory');
+    }
+    assert.ok(state.checked.includes(stateKey(`${winRoot}/src/widgets/w0.js`)), `w0 checked: ${JSON.stringify(state.checked)}`);
+    assert.ok(state.checked.includes(stateKey(`${winRoot}\\src\\widgets\\w1.js`)), 'w1 checked (backslash spelling)');
+  });
+
+  c3Case('8 new files in one dir in the same turn -> 1 deny + 7 sibling notes', () => {
+    const { human, transcript } = c4Turn('scaffold the widgets');
+    const first = c4Write(`${c4Root}/src/widgets/w0.js`, transcript);
+    c4AssertDenied(first, 'first file');
+    for (let i = 1; i < 8; i++) {
+      const out = c4Write(`${c4Root}/src/widgets/w${i}.js`, transcript);
+      c4AssertSibling(out, `file ${i}`);
+      assert.strictEqual(
+        out.context,
+        `[Fact-Forcing Gate] Sibling of ${c4Root}/src/widgets/w0.js (gated earlier at denial #1 this session); proceeding without a repeat denial.`
+      );
+    }
+    const state = c3State();
+    assert.strictEqual(state.fact_force_denials, 1, 'one denial');
+    assert.strictEqual(state.sibling_allows, 7, 'seven sibling allows');
+    assert.ok(state.checked.includes(stateKey(`${c4Root}/src/widgets/w7.js`)), 'sibling marked checked (canonical key)');
+    const gate = state.dir_gates[c4GateKey(`${c4Root}/src/widgets`)];
+    assert.ok(gate, 'dir gate keyed by canonical dir');
+    assert.strictEqual(gate.turn, human.uuid);
+    assert.strictEqual(gate.first, `${c4Root}/src/widgets/w0.js`);
+    assert.strictEqual(gate.ordinal, 1);
+    assert.ok(typeof gate.at === 'number' && gate.at > 0);
+    const retry = c4Write(`${c4Root}/src/widgets/w3.js`, transcript);
+    assert.strictEqual(retry.decision, undefined);
+    assert.strictEqual(retry.context, '', 'already checked: plain allow');
+  });
+
+  c3Case('a different directory gets its own denial', () => {
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/a/one.js`, transcript), 'dir a');
+    c4AssertDenied(c4Write(`${c4Root}/src/b/two.js`, transcript), 'dir b');
+    c4AssertDenied(c4Write(`${c4Root}/src/a/nested/three.js`, transcript), 'subdirectory is not a sibling');
+    c4AssertSibling(c4Write(`${c4Root}/src/b/four.js`, transcript), 'dir b sibling');
+  });
+
+  c3Case('the next human turn in the same dir is denied again', () => {
+    const turn1 = c3Human('first');
+    const t1 = c3WriteTranscript([turn1]);
+    c4AssertDenied(c4Write(`${c4Root}/src/w/one.js`, t1), 'turn 1');
+    const t2 = c3WriteTranscript([turn1, c3Human('second')]);
+    c4AssertDenied(c4Write(`${c4Root}/src/w/two.js`, t2), 'turn 2');
+    c4AssertSibling(c4Write(`${c4Root}/src/w/three.js`, t2), 'turn 2 sibling');
+    assert.ok(c4Write(`${c4Root}/src/w/three.js`, t2).context === '', 'checked');
+    assert.strictEqual(c3State().dir_gates[c4GateKey(`${c4Root}/src/w`)].ordinal, 2, 'latest denial ordinal recorded');
+  });
+
+  c3Case('a Write over an existing file in the gated dir is still denied (per-file)', () => {
+    fs.mkdirSync(path.join(c4Root, 'src', 'e'), { recursive: true });
+    fs.writeFileSync(path.join(c4Root, 'src', 'e', 'existing.js'), 'old');
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/e/new.js`, transcript), 'new file');
+    c4AssertDenied(c4Write(`${c4Root}/src/e/existing.js`, transcript), 'existing file');
+    assert.ok(!c3State().sibling_allows, 'no sibling allow');
+  });
+
+  c3Case('an existing-file Write denial does not open a dir gate', () => {
+    fs.mkdirSync(path.join(c4Root, 'src', 'f'), { recursive: true });
+    fs.writeFileSync(path.join(c4Root, 'src', 'f', 'present.js'), 'old');
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/f/present.js`, transcript), 'existing file');
+    c4AssertDenied(c4Write(`${c4Root}/src/f/brand_new.js`, transcript), 'new file after existing');
+  });
+
+  c3Case('fs error resolving the target -> treated as existing (no collapse)', () => {
+    fs.mkdirSync(path.join(c4Root, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(c4Root, 'src', 'blocker'), 'not a dir');
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/blocker/one.js`, transcript), 'ENOTDIR first');
+    // Windows reports ENOENT (not ENOTDIR) under a file, so the target reads as new there.
+    if (process.platform === 'win32') return;
+    c4AssertDenied(c4Write(`${c4Root}/src/blocker/two.js`, transcript), 'ENOTDIR second');
+    assert.ok(!Object.keys(c3State().dir_gates || {}).some(k => k.endsWith(`${c4Root}/src/blocker`)), 'no dir gate recorded');
+  });
+
+  c3Case('Edit and MultiEdit in a gated dir are never collapsed', () => {
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/m/one.js`, transcript), 'write');
+    c4AssertDenied(c4Edit(`${c4Root}/src/m/two.js`, transcript), 'edit sibling');
+    const multi = c4Run(
+      'MultiEdit',
+      { edits: [{ file_path: `${c4Root}/src/m/three.js`, old_string: 'a', new_string: 'b' }] },
+      transcript
+    );
+    c4AssertDenied(multi, 'multiedit sibling');
+    c4AssertSibling(c4Write(`${c4Root}/src/m/four.js`, transcript), 'write sibling still works');
+  });
+
+  c3Case('an Edit denial does not open a dir gate', () => {
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Edit(`${c4Root}/src/n/one.js`, transcript), 'edit');
+    c4AssertDenied(c4Write(`${c4Root}/src/n/two.js`, transcript), 'write after edit');
+  });
+
+  c3Case('instruction-class siblings are each denied', () => {
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/skills/foo/one.md`, transcript), 'instruction 1');
+    c4AssertDenied(c4Write(`${c4Root}/skills/foo/two.md`, transcript), 'instruction 2');
+    assert.ok(!Object.keys(c3State().dir_gates || {}).some(k => k.endsWith(`${c4Root}/skills/foo`)), 'instruction denial opens no dir gate');
+    c4AssertDenied(c4Write(`${c4Root}/skills/foo/helper.js`, transcript), 'code file after instruction denials');
+    c4AssertDenied(c4Write(`${c4Root}/skills/foo/three.md`, transcript), 'instruction after a code dir gate');
+  });
+
+  c3Case('no transcript -> sibling within 120 s, denied after', () => {
+    c4AssertDenied(c4Write(`${c4Root}/src/nt/one.js`), 'first');
+    c4AssertSibling(c4Write(`${c4Root}/src/nt/two.js`), 'within window');
+    const state = c3State();
+    assert.strictEqual(state.dir_gates[c4GateKey(`${c4Root}/src/nt`)].turn, null, 'turn null without transcript');
+    state.dir_gates[c4GateKey(`${c4Root}/src/nt`)].at = Date.now() - 121000;
+    writeState(state);
+    c4AssertDenied(c4Write(`${c4Root}/src/nt/three.js`), 'after window');
+  });
+
+  c3Case('a turn-scoped gate is not matched without a turn id, and vice versa', () => {
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/tt/one.js`, transcript), 'turn gate');
+    c4AssertDenied(c4Write(`${c4Root}/src/tt/two.js`), 'no-turn call vs turn gate');
+    c4AssertDenied(c4Write(`${c4Root}/src/tt/three.js`, transcript), 'turn call vs null-turn gate');
+  });
+
+  c3Case('a prior search credits before the sibling rule', () => {
+    const human = c3Human('x');
+    const t = c3WriteTranscript([human]);
+    c4AssertDenied(c4Write(`${c4Root}/src/cr/one.js`, t), 'first');
+    const t2 = c3WriteTranscript([human, ...c3Search('toolu_c4g', 'Grep', { pattern: 'widget_factory' })]);
+    const out = c4Write(`${c4Root}/src/cr/widget_factory.js`, t2);
+    assert.ok(out.context.includes('Prior search seen in this turn'), out.result.stdout);
+    assert.ok(!out.context.includes('Sibling of'));
+    assert.ok(!c3State().sibling_allows, 'credit is not a sibling allow');
+  });
+
+  c3Case('counters record class names for denial, credit and sibling events', () => {
+    const human = c3Human('x');
+    const t = c3WriteTranscript([human, ...c3Search('toolu_c4c', 'Grep', { pattern: 'widget_factory' })]);
+    c4AssertDenied(c4Write(`${c4Root}/src/cc/one.js`, t), 'code deny');
+    c4AssertSibling(c4Write(`${c4Root}/src/cc/two.js`, t), 'code sibling');
+    c4AssertDenied(c4Write(`${c4Root}/docs/guide_page.md`, t), 'prose deny');
+    c4AssertDenied(c4Edit(`${c4Root}/tests/a.test.js`, t), 'test deny');
+    c4AssertDenied(c4Write(`${c4Root}/skills/x/SKILL.md`, t), 'instruction deny');
+    c3AssertCredited(c4Edit(`${c4Root}/lib/widget_factory.js`, t), 'code credit');
+    const state = c3State();
+    assert.deepStrictEqual(state.denials_by_class, { code: 1, prose: 1, test: 1, instruction: 1 });
+    assert.deepStrictEqual(state.credited_by_class, { code: 1 });
+    assert.strictEqual(state.sibling_allows, 1);
+    assert.strictEqual(state.fact_force_denials, 4);
+    assert.strictEqual(state.fact_force_credited, 1);
+    const json = JSON.stringify({ d: state.denials_by_class, c: state.credited_by_class });
+    assert.ok(!json.includes('/'), 'counters hold class names only, never paths');
+  });
+
+  c3Case('a state file without the counter fields loads and gains them', () => {
+    writeState({ checked: ['/elsewhere/x.js'], last_active: Date.now(), fact_force_denials: 2 });
+    const { transcript } = c4Turn('x');
+    c4AssertDenied(c4Write(`${c4Root}/src/old/one.js`, transcript), 'deny');
+    c4AssertSibling(c4Write(`${c4Root}/src/old/two.js`, transcript), 'sibling');
+    const state = c3State();
+    assert.ok(state.checked.includes('/elsewhere/x.js'));
+    assert.strictEqual(state.fact_force_denials, 3);
+    assert.strictEqual(state.dir_gates[c4GateKey(`${c4Root}/src/old`)].ordinal, 3);
+    assert.deepStrictEqual(state.denials_by_class, { code: 1 });
+    assert.deepStrictEqual(state.credited_by_class, {});
+    assert.strictEqual(state.sibling_allows, 1);
+    assert.strictEqual(state.fact_force_credited, 0);
+  });
+
+  c3Case('malformed counter fields are tolerated (treated as empty/zero)', () => {
+    writeState({
+      checked: [],
+      last_active: Date.now(),
+      dir_gates: { [c4GateKey(`${c4Root}/src/bad`)]: 'nope', [c4GateKey(`${c4Root}/src/bad2`)]: { at: 'x' }, other: [1, 2] },
+      denials_by_class: [5],
+      credited_by_class: { code: -3, prose: 'x', test: 2 },
+      sibling_allows: 'many'
+    });
+    c4AssertDenied(c4Write(`${c4Root}/src/bad/one.js`), 'malformed gate ignored');
+    c4AssertSibling(c4Write(`${c4Root}/src/bad/two.js`), 'fresh gate works');
+    const state = c3State();
+    assert.deepStrictEqual(Object.keys(state.dir_gates), [c4GateKey(`${c4Root}/src/bad`)]);
+    assert.deepStrictEqual(state.denials_by_class, { code: 1 });
+    assert.deepStrictEqual(state.credited_by_class, { test: 2 });
+    assert.strictEqual(state.sibling_allows, 1);
+    writeState({ checked: [], last_active: Date.now(), dir_gates: 'garbage', denials_by_class: null, sibling_allows: -1 });
+    c4AssertDenied(c4Write(`${c4Root}/src/bad3/one.js`), 'garbage dir_gates');
+    assert.strictEqual(c3State().sibling_allows, 0);
+  });
+
+  c3Case('dir_gates is capped at 50 (oldest evicted)', () => {
+    const now = Date.now();
+    const gates = {};
+    for (let i = 0; i < 50; i++) gates[c4GateKey(`/cap/d${i}`)] = { turn: null, at: now - 100000 + i, first: `/cap/d${i}/f.js`, ordinal: i + 1 };
+    writeState({ checked: [], last_active: now, dir_gates: gates });
+    c4AssertDenied(c4Write(`${c4Root}/src/cap/one.js`), 'new gate');
+    const state = c3State();
+    assert.strictEqual(Object.keys(state.dir_gates).length, 50, 'capped at 50');
+    assert.ok(state.dir_gates[c4GateKey(`${c4Root}/src/cap`)], 'newest kept');
+    assert.ok(!state.dir_gates[c4GateKey('/cap/d0')], 'oldest evicted');
+    assert.ok(state.dir_gates[c4GateKey('/cap/d1')], 'second-oldest kept');
+  });
+
+  c3Case('dir_gate first path is stored sanitized', () => {
+    const file_path = `${c4Root}/src/san/evil\u202ename\u200b.js`;
+    c4AssertDenied(c4Write(file_path), 'deny');
+    const gate = c3State().dir_gates[c4GateKey(`${c4Root}/src/san`)];
+    assert.ok(gate && !gate.first.includes('\u202e') && !gate.first.includes('\u200b'), JSON.stringify(gate));
+    const out = c4Write(`${c4Root}/src/san/ok.js`);
+    c4AssertSibling(out, 'sibling');
+    assert.ok(!out.context.includes('\u202e'));
+  });
+
+  c3Case('merges dir_gates and counters written by another process during save', () => {
+    const hook = loadDirectHook({ CLAUDE_PROJECT_DIR: c4Root, CLAUDE_TRANSCRIPT_PATH: '' });
+    const originalMkdirSync = fs.mkdirSync;
+    const now = Date.now();
+    let injected = false;
+    fs.mkdirSync = function patchedMkdirSync(target) {
+      const result = originalMkdirSync.apply(fs, arguments);
+      if (!injected && path.resolve(String(target)) === path.resolve(stateDir)) {
+        injected = true;
+        fs.writeFileSync(
+          stateFile,
+          JSON.stringify({
+            checked: ['/src/concurrent.js'],
+            last_active: now,
+            fact_force_denials: 7,
+            dir_gates: {
+              [c4GateKey('/other/dir')]: { turn: 'u-other', at: now, first: '/other/dir/a.js', ordinal: 7 },
+              [c4GateKey(`${c4Root}/src/conc`)]: { turn: 'u-old', at: 1, first: 'stale', ordinal: 1 }
+            },
+            denials_by_class: { code: 5, prose: 2 },
+            credited_by_class: { test: 3 },
+            sibling_allows: 9
+          }),
+          'utf8'
+        );
+      }
+      return result;
+    };
+    const savedRoot = process.env.CLAUDE_PROJECT_DIR;
+    const savedTranscript = process.env.CLAUDE_TRANSCRIPT_PATH;
+    try {
+      const result = hook.run({ tool_name: 'Write', cwd: c4Root, tool_input: { file_path: `${c4Root}/src/conc/new.js`, content: 'x' } });
+      assert.strictEqual(parseOutput(result.stdout).hookSpecificOutput.permissionDecision, 'deny');
+    } finally {
+      fs.mkdirSync = originalMkdirSync;
+      if (savedRoot === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = savedRoot;
+      if (savedTranscript === undefined) delete process.env.CLAUDE_TRANSCRIPT_PATH;
+      else process.env.CLAUDE_TRANSCRIPT_PATH = savedTranscript;
+    }
+    const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    assert.ok(persisted.dir_gates[c4GateKey('/other/dir')], 'concurrent dir gate preserved');
+    const mine = persisted.dir_gates[c4GateKey(`${c4Root}/src/conc`)];
+    assert.ok(mine && mine.first === `${c4Root}/src/conc/new.js` && mine.turn === null, 'newer in-memory gate wins');
+    assert.deepStrictEqual(persisted.denials_by_class, { code: 5, prose: 2 }, 'per-key max(disk, mem)');
+    assert.deepStrictEqual(persisted.credited_by_class, { test: 3 });
+    assert.strictEqual(persisted.sibling_allows, 9);
+    assert.ok(persisted.checked.includes('/src/concurrent.js'));
+  });
+
+  c3Case('sibling state save failure -> allow with state warning', () => {
+    c4AssertDenied(c4Write(`${c4Root}/src/sf/one.js`), 'deny');
+    const hook = loadDirectHook({ CLAUDE_PROJECT_DIR: c4Root, CLAUDE_TRANSCRIPT_PATH: '' });
+    const originalWriteFileSync = fs.writeFileSync;
+    fs.writeFileSync = function patchedWriteFileSync(target) {
+      if (String(target).includes('.json.tmp.')) throw Object.assign(new Error('EIO'), { code: 'EIO' });
+      return originalWriteFileSync.apply(fs, arguments);
+    };
+    const savedRoot = process.env.CLAUDE_PROJECT_DIR;
+    const savedTranscript = process.env.CLAUDE_TRANSCRIPT_PATH;
+    let result;
+    try {
+      result = hook.run({ tool_name: 'Write', cwd: c4Root, tool_input: { file_path: `${c4Root}/src/sf/two.js`, content: 'x' } });
+    } finally {
+      fs.writeFileSync = originalWriteFileSync;
+      if (savedRoot === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = savedRoot;
+      if (savedTranscript === undefined) delete process.env.CLAUDE_TRANSCRIPT_PATH;
+      else process.env.CLAUDE_TRANSCRIPT_PATH = savedTranscript;
+    }
+    assert.ok(!result.stdout, 'no deny and no sibling note');
+    assert.ok(String(result.stderr).includes('could not be persisted'), JSON.stringify(result));
+  });
+
+  c3Case('clipped window keeps the promptId turn id; a sibling gate from earlier in the turn still matches', () => {
+    const { scanCurrentTurn } = loadDirectHook();
+    const pid = 'prompt-heavy';
+    const human = c3Human('scaffold', { promptId: pid });
+    const early = c3WriteTranscript([human]);
+    assert.strictEqual(scanCurrentTurn(early).turnId, pid);
+    const gateDir = `${c4Root}/src/heavy`;
+    c4AssertDenied(c4Write(`${gateDir}/one.js`, early), 'first file, boundary in window');
+    assert.strictEqual(c3State().dir_gates[c4GateKey(gateDir)].turn, pid, 'gate recorded under the promptId');
+    const filler = c3Filler('pid').map(r => (r.type === 'user' ? { ...r, promptId: pid } : r));
+    const late = c3WriteTranscript([human, ...filler]);
+    assert.ok(fs.statSync(late).size > 300 * 1024, 'boundary scrolled out of the tail');
+    assert.strictEqual(scanCurrentTurn(late).turnId, pid, 'turn id stable after the turn outgrows the tail');
+    c4AssertSibling(c4Write(`${gateDir}/two.js`, late), 'sibling after the boundary left the window');
+    const next = c3WriteTranscript([c3Human('next', { promptId: 'prompt-next' })]);
+    c4AssertDenied(c4Write(`${gateDir}/three.js`, next), 'next prompt is a new turn');
+  });
+
+  c3Case('a new human turn uses its own promptId even when a late tool_result carries the previous one', () => {
+    const t1Human = c3Human('turn one', { promptId: 'P1' });
+    const t1 = c3WriteTranscript([t1Human]);
+    c4AssertDenied(c4Write(`${c4Root}/src/n3/aaa1.py`, t1), 'turn P1');
+    const late = { ...c3ToolResult('toolu_n3late'), promptId: 'P1' };
+    const t2 = c3WriteTranscript([t1Human, c3Human('turn two', { promptId: 'P2' }), c3ToolUse('toolu_n3late', 'Bash', { command: 'true' }), late]);
+    c4AssertDenied(c4Write(`${c4Root}/src/n3/aaa2.py`, t2), 'turn P2 with a late P1 tool_result');
+    c4AssertSibling(c4Write(`${c4Root}/src/n3/aaa3.py`, t2), 'sibling within turn P2');
+    assert.strictEqual(c3State().dir_gates[c4GateKey(`${c4Root}/src/n3`)].turn, 'P2', 'gate recorded under the boundary promptId');
+  });
+
+  c3Case('a transcript that yields no turn id never falls back to the no-turn 120 s rule', () => {
+    const asDir = fs.mkdtempSync(path.join(tmpRoot, 'gateguard-n4-dir-'));
+    c4AssertDenied(c4Write(`${c4Root}/src/n4a/one.js`, asDir), 'transcript path is a directory (scan null)');
+    c4AssertDenied(c4Write(`${c4Root}/src/n4a/two.js`, asDir), 'no collapse with a null scan');
+    const noBoundary = c3WriteTranscript([c3ToolUse('toolu_n4x', 'Bash', { command: 'true' }), c3ToolResult('toolu_n4x')]);
+    c4AssertDenied(c4Write(`${c4Root}/src/n4b/one.js`, noBoundary), 'whole file without a boundary (turn id null)');
+    c4AssertDenied(c4Write(`${c4Root}/src/n4b/two.js`, noBoundary), 'no collapse without a turn id');
+    const missing = path.join(tmpRoot, 'gateguard-n4-missing.jsonl');
+    c4AssertDenied(c4Write(`${c4Root}/src/n4c/one.js`, missing), 'missing transcript file');
+    c4AssertDenied(c4Write(`${c4Root}/src/n4c/two.js`, missing), 'no collapse with a missing transcript');
+    const malformed = path.join(tmpRoot, `gateguard-n4-mal-${process.pid}.jsonl`);
+    fs.writeFileSync(malformed, [c3Human('t1', { promptId: 'M1' }), c3Human('t2', { promptId: 'M2' })].map(r => JSON.stringify(r)).join('\n') + '\n{"type":"assistant"}\n');
+    c4AssertDenied(c4Write(`${c4Root}/src/n4d/one.js`, malformed), 'malformed assistant record');
+    c4AssertSibling(c4Write(`${c4Root}/src/n4d/two.js`, malformed), 'malformed record skipped: same turn M2 still collapses');
+    assert.strictEqual(c3State().dir_gates[c4GateKey(`${c4Root}/src/n4d`)].turn, 'M2');
+    fs.rmSync(asDir, { recursive: true, force: true });
+    fs.rmSync(malformed, { force: true });
+  });
+
+  c3Case('no sibling-collapse output carries permissionDecision "allow"', () => {
+    assert.ok(c4Outputs.length > 20, 'collected outputs');
+    for (const stdout of c4Outputs) {
+      const output = parseOutput(stdout);
+      const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+      assert.notStrictEqual(decision, 'allow', stdout);
+    }
+  });
+
+  // --- Prior-search credit: scope and matching rules ---
+  const f2Root = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, 'gateguard-f2-proj-')));
+  // Shell fixtures use forward slashes: bash treats unquoted backslashes as escapes.
+  const f2RootSh = f2Root.replace(/\\/g, '/');
+  for (const dir of ['src/handlers', 'handlers', 'f']) fs.mkdirSync(path.join(f2Root, dir), { recursive: true });
+  for (const file of ['src/payment.py', 'src/auth.py', 'src/payment_service.py', 'top.py']) {
+    fs.writeFileSync(path.join(f2Root, file), 'x');
+  }
+  const f2Env = { CLAUDE_PROJECT_DIR: f2Root, CLAUDE_TRANSCRIPT_PATH: '' };
+  const f2Outputs = [];
+  let f2Session = 0;
+  // Each call gets a fresh session unless the case passes session_id explicitly.
+  const f2Run = (toolName, toolInput, transcriptPath, extra = {}) => {
+    f2Session += 1;
+    const payload = { tool_name: toolName, tool_input: toolInput, cwd: f2Root, transcript_path: transcriptPath, session_id: `f2-${f2Session}` };
+    if (c3PendingIds.has(transcriptPath)) payload.tool_use_id = c3PendingIds.get(transcriptPath);
+    Object.assign(payload, extra);
+    if (payload.tool_use_id === null) delete payload.tool_use_id;
+    const result = runHook(payload, f2Env);
+    f2Outputs.push(result.stdout);
+    const output = parseOutput(result.stdout);
+    const hso = output && output.hookSpecificOutput ? output.hookSpecificOutput : {};
+    return { result, decision: hso.permissionDecision, context: hso.additionalContext || '', reason: hso.permissionDecisionReason || '' };
+  };
+  const f2 = rel => `${f2Root}/${rel}`;
+  const f2Edit = (rel, t, extra) => f2Run('Edit', { file_path: f2(rel), old_string: 'a', new_string: 'b' }, t, extra);
+  const f2Write = (rel, t, extra) => f2Run('Write', { file_path: f2(rel), content: 'x' }, t, extra);
+  const f2Turn = (...records) => c3WriteTranscript([c3Human('fix'), ...records]);
+  const f2Bash = (id, command) => c3Search(id, 'Bash', { command });
+  const f2Deny = (out, label) => {
+    assert.strictEqual(out.decision, 'deny', `${label}: expected deny, got ${out.result.stdout}`);
+    assert.ok(!out.context.includes('Prior search seen'), `${label}: no credit note`);
+  };
+  const f2Credit = (out, label) => {
+    assert.notStrictEqual(out.decision, 'deny', `${label}: must not deny (${out.result.stdout})`);
+    assert.ok(out.context.includes('Prior search seen in this turn'), `${label}: credit note expected, got ${out.result.stdout}`);
+  };
+  const f2Msg = (id, messageId, name, input) => ({
+    type: 'assistant',
+    uuid: c3NextUuid(),
+    message: { id: messageId, role: 'assistant', content: [{ type: 'tool_use', id, name, input }] }
+  });
+  const f2Result = (id, extra) => ({
+    type: 'user',
+    uuid: c3NextUuid(),
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok', ...extra }] }
+  });
+
+  c3Case('a directory listing does not credit a Write that overwrites an existing file', () => {
+    f2Deny(f2Write('src/payment.py', f2Turn(...c3Search('toolu_h1a', 'LS', { path: 'src' }))), 'LS src -> overwrite payment.py');
+    f2Deny(f2Write('top.py', f2Turn(...f2Bash('toolu_h1b', 'grep -rn TODO .'))), 'grep -rn TODO . -> overwrite top.py');
+    f2Deny(f2Write('src/handlers/../payment.py', f2Turn(...c3Search('toolu_h1c', 'Glob', { pattern: 'src/*.py' }))), 'Glob src/*.py -> overwrite');
+  });
+
+  c3Case('shell patterns and flag values are not directories', () => {
+    f2Deny(f2Write('handlers/zzzz_new.py', f2Turn(...f2Bash('toolu_h2a', 'grep -r handlers src'))), 'grep pattern as dir');
+    f2Deny(f2Write('f/qqqq_new.py', f2Turn(...f2Bash('toolu_h2b', 'find . -type f -name x'))), 'find -type value as dir');
+    f2Deny(f2Write('handlers/rg_new.py', f2Turn(...f2Bash('toolu_h2c', 'rg -g handlers TODO src'))), 'rg -g value as dir');
+    f2Deny(f2Write('handlers/sls_new.py', f2Turn(...c3Search('toolu_h2d', 'PowerShell', { command: 'Select-String handlers src/*.py' }))), 'sls pattern');
+  });
+
+  c3Case('bare cwd operands and missing directories give no directory credit', () => {
+    f2Deny(f2Write('zzz_new.py', f2Turn(...f2Bash('toolu_h2e', 'grep -rn TODO .'))), 'grep -rn TODO .');
+    f2Deny(f2Write('nothere/new_mod.py', f2Turn(...f2Bash('toolu_h2f', 'ls nothere'))), 'ls of a missing dir');
+    f2Deny(f2Write('top.py/new_mod.py', f2Turn(...f2Bash('toolu_h2g', 'ls top.py'))), 'ls of a file, not a dir');
+  });
+
+  c3Case('Glob with no literal prefix, or no glob characters, names no directory', () => {
+    f2Deny(f2Write('brandnew.py', f2Turn(...c3Search('toolu_h2h', 'Glob', { pattern: '**/*' }))), 'Glob **/*');
+    f2Deny(f2Write('otherzz.py', f2Turn(...c3Search('toolu_h2i', 'Glob', { pattern: 'qqq.txt' }))), 'Glob qqq.txt');
+    f2Deny(f2Write('src/handlers/brand_new.py', f2Turn(...c3Search('toolu_h2j', 'Glob', { pattern: 'src/handlers/x.py' }))), 'Glob file lookup');
+  });
+
+  c3Case('stems match on word boundaries only', () => {
+    f2Deny(f2Edit('src/auth.py', f2Turn(...c3Search('toolu_m1a', 'Grep', { pattern: 'author' }))), 'author vs auth');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1b', 'Grep', { pattern: 'TODO', glob: '**/payments/**' }))), 'payments glob');
+    f2Credit(f2Edit('src/auth.py', f2Turn(...c3Search('toolu_m1c', 'Grep', { pattern: 'def auth(' }))), 'auth( boundary');
+  });
+
+  c3Case('shell segments that only read stdin never credit', () => {
+    f2Deny(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_m1d', 'echo payment | grep payment'))), 'echo | grep');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_m1e', 'cat README | grep -c payment'))), 'cat | grep -c');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_m1f', 'echo payment | rg payment'))), 'piped rg with no path');
+  });
+
+  c3Case('a shell segment that only reads the target is not a search', () => {
+    f2Deny(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_m1g', 'ls src/payment.py'))), 'ls target');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_m1h', 'grep -n . src/payment.py'))), 'grep . target');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_m1i', 'grep -n payment ./src/payment.py'))), 'grep stem in target only');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1j', 'Grep', { pattern: 'payment', path: 'src/payment.py' }))), 'Grep path = target');
+  });
+
+  c3Case('Grep/Glob/LS with an explicit path only credit targets inside it', () => {
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1k', 'Grep', { pattern: 'payment', path: '/nonexistent/elsewhere' }))), 'Grep elsewhere');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1l', 'Glob', { pattern: 'payment.md', path: '/nonexistent-f2' }))), 'Glob elsewhere');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1m', 'Grep', { pattern: 'TODO', path: 'x', glob: 'src/payments/**' }))), 'D3');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1n', 'Glob', { pattern: 'lib/**/payment*' }))), 'Glob prefix elsewhere');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1o', 'Glob', { pattern: 'payment.md', path: f2Root }))), 'file lookup in an ancestor dir');
+    f2Deny(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1p', 'Glob', { pattern: 'src/payment.py' }))), 'lookup of the target itself');
+    f2Credit(f2Edit('src/payment.py', f2Turn(...c3Search('toolu_m1q', 'Glob', { pattern: 'src/payment.md' }))), 'file lookup beside the target');
+  });
+
+  c3Case('same-batch searches are excluded when the pending call cannot be located', () => {
+    const edit = f2(`src/payment.py`);
+    const sameBatch = c3WriteTranscript(
+      [c3Human('fix'), f2Msg('g1', 'msg_B', 'Grep', { pattern: 'payment' }), f2Msg('e1', 'msg_B', 'Edit', { file_path: edit }), f2Result('g1')],
+      { pending: false }
+    );
+    f2Deny(f2Edit('src/payment.py', sameBatch), 'no tool_use_id: newest message excluded');
+    f2Deny(f2Edit('src/payment.py', sameBatch, { tool_use_id: 'e1' }), 'tool_use_id located');
+    const notYet = c3WriteTranscript([c3Human('fix'), f2Msg('g2', 'msg_C', 'Grep', { pattern: 'payment' }), f2Result('g2')], { pending: false });
+    f2Deny(f2Edit('src/payment.py', notYet, { tool_use_id: 'e2' }), 'tool_use_id not in transcript yet');
+    const noMsgId = c3WriteTranscript([
+      c3Human('fix'),
+      { type: 'assistant', uuid: c3NextUuid(), message: { role: 'assistant', content: [{ type: 'tool_use', id: 'g3', name: 'Grep', input: { pattern: 'payment' } }] } },
+      f2Result('g3')
+    ]);
+    f2Deny(f2Edit('src/payment.py', noMsgId), 'search without message.id');
+    const earlier = c3WriteTranscript(
+      [c3Human('fix'), f2Msg('g4', 'msg_D', 'Grep', { pattern: 'payment' }), f2Result('g4'), f2Msg('e4', 'msg_E', 'Edit', { file_path: edit })],
+      { pending: false }
+    );
+    f2Credit(f2Edit('src/payment.py', earlier), 'no tool_use_id: search in an older message still credits');
+  });
+
+  c3Case('a boundary without uuid yields a hashed turn id; siblings do not cross turns', () => {
+    const { scanCurrentTurn } = loadDirectHook();
+    const noUuid = text => ({ type: 'user', message: { role: 'user', content: text } });
+    const t1 = c3WriteTranscript([noUuid('turn one')], { pending: false });
+    const t2 = c3WriteTranscript([noUuid('turn one'), noUuid('turn TWO new request')], { pending: false });
+    const id1 = scanCurrentTurn(t1).turnId;
+    const id2 = scanCurrentTurn(t2).turnId;
+    assert.ok(/^h:[0-9a-f]{16}$/.test(id1), `hashed turn id, got ${id1}`);
+    assert.notStrictEqual(id1, id2, 'different boundary lines, different turn ids');
+    const w1 = f2Write('src/l1/hhh1.py', t1, { tool_use_id: null, session_id: 'f2-l1' });
+    assert.strictEqual(w1.decision, 'deny', w1.result.stdout);
+    const w2 = f2Write('src/l1/hhh2.py', t2, { tool_use_id: null, session_id: 'f2-l1' });
+    assert.strictEqual(w2.decision, 'deny', `turn 2 sibling must be denied: ${w2.result.stdout}`);
+  });
+
+  c3Case('compaction is a turn boundary', () => {
+    const pre = [c3Human('orig task'), ...c3Search('toolu_l2a', 'Grep', { pattern: 'payment' })];
+    const summary = { type: 'user', uuid: c3NextUuid(), isCompactSummary: true, message: { role: 'user', content: 'Summary: ...' } };
+    f2Deny(f2Edit('src/payment.py', c3WriteTranscript([...pre, { type: 'system', subtype: 'compact_boundary' }, summary])), 'summary');
+    f2Deny(f2Edit('src/payment.py', c3WriteTranscript([...pre, { type: 'system', uuid: 'cb-1', subtype: 'compact_boundary' }])), 'boundary only');
+    const { scanCurrentTurn } = loadDirectHook();
+    assert.strictEqual(scanCurrentTurn(c3WriteTranscript([...pre, summary], { pending: false })).turnId, summary.uuid, 'summary uuid is the turn id');
+  });
+
+  c3Case('error results are recognised without a boolean is_error', () => {
+    const errored = extra => f2Turn(c3ToolUse('toolu_l3', 'Grep', { pattern: 'payment' }), f2Result('toolu_l3', extra));
+    f2Deny(f2Edit('src/payment.py', errored({ is_error: 'true', content: 'Error: denied' })), 'is_error "true"');
+    f2Deny(f2Edit('src/payment.py', errored({ content: '<tool_use_error>Permission denied</tool_use_error>' })), 'string content');
+    f2Deny(f2Edit('src/payment.py', errored({ content: [{ type: 'text', text: '  <tool_use_error>x</tool_use_error>' }] })), 'text block');
+  });
+
+  c3Case('a tool_use id seen more than once in the turn never qualifies', () => {
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      f2Msg('g', 'msg_1', 'Grep', { pattern: 'unrelated' }),
+      f2Result('g'),
+      f2Msg('g', 'msg_2', 'Grep', { pattern: 'payment' })
+    ]);
+    f2Deny(f2Edit('src/payment.py', t), 'duplicate id');
+  });
+
+  c3Case('a cd anywhere in the turn disables shell directory credit (stem counts with a known base)', () => {
+    const t = f2Turn(...f2Bash('toolu_l7a', 'cd src'), ...f2Bash('toolu_l7b', 'ls handlers'));
+    f2Deny(f2Write('handlers/new_mod.py', t), 'cd then ls handlers');
+    const control = f2Turn(...f2Bash('toolu_l7c', 'ls handlers'));
+    f2Credit(f2Write('handlers/new_mod2.py', control), 'control without cd');
+    // After a cd in another call, a relative operand's base is unknown, so it scopes nothing.
+    const stem = f2Turn(...f2Bash('toolu_l7d', 'cd src'), ...f2Bash('toolu_l7e', 'rg -n payment ..'));
+    f2Deny(f2Edit('src/payment.py', stem), 'relative operand after a cd in another call');
+    const absolute = f2Turn(...f2Bash('toolu_l7f', 'cd src'), ...f2Bash('toolu_l7g', `rg -n payment ${f2RootSh}/src`));
+    f2Credit(f2Edit('src/payment.py', absolute), 'stem after cd with an absolute operand');
+  });
+
+  c3Case('documented search forms still credit', () => {
+    f2Credit(f2Edit('src/payment.py', f2Turn(...f2Bash('toolu_p1', 'rg -n payment src'))), 'rg -n payment src');
+    f2Credit(f2Edit('src/payment_service.py', f2Turn(...c3Search('toolu_p2', 'Grep', { pattern: 'payment_service', path: 'src' }))), 'Grep path src');
+    f2Credit(f2Write('src/handlers/new_handler.py', f2Turn(...c3Search('toolu_p3', 'Glob', { pattern: 'src/handlers/*.py' }))), 'Glob dir');
+    f2Credit(f2Write('src/handlers/ls_new.py', f2Turn(...c3Search('toolu_p4', 'LS', { path: 'src/handlers' }))), 'LS dir');
+    f2Credit(f2Write('src/handlers/x_new.py', f2Turn(...f2Bash('toolu_p5', 'find src/handlers -name "*.py"'))), 'find dir');
+    f2Credit(f2Edit('src/auth.py', f2Turn(...f2Bash('toolu_p6', 'grep -r . -e auth'))), '-e supplies the pattern');
+    f2Credit(f2Write('src/handlers/grep_new.py', f2Turn(...f2Bash('toolu_p7', 'grep -rn --include "*.py" TODO src/handlers/'))), 'grep dir');
+  });
+
+  c3Case('a shell search only credits targets inside what it searched', () => {
+    const edit = (id, command) => f2Edit('src/payment.py', f2Turn(...f2Bash(id, command)));
+    f2Deny(edit('toolu_n1a', 'grep -rn payment /usr/share/doc'), 'grep -rn outside the project');
+    f2Deny(edit('toolu_n1b', 'rg payment docs'), 'rg in another directory');
+    f2Deny(edit('toolu_n1c', 'find /etc -name payment'), 'find outside the project');
+    f2Deny(edit('toolu_n1d', 'rg payment < /etc/hostname'), 'rg reading stdin via <');
+    f2Deny(edit('toolu_n1e', 'rg payment </etc/hostname'), 'rg reading stdin via <file');
+    f2Deny(edit('toolu_n1f', 'grep -rn payment 0< /etc/hostname'), 'grep with only an input redirection');
+    f2Deny(edit('toolu_n1g', 'rg payment</etc/hostname'), 'redirection glued to the pattern');
+    f2Deny(edit('toolu_n1h', 'fd payment /etc'), 'fd outside the project');
+    f2Deny(edit('toolu_n1i', 'cd /elsewhere && rg payment src'), 'relative operand after an absolute cd');
+    f2Deny(edit('toolu_n1j', 'git grep -n payment -- docs'), 'git grep limited to another directory');
+    f2Deny(
+      f2Edit('src/payment.py', f2Turn(...c3Search('toolu_n1k', 'PowerShell', { command: 'Select-String -Path docs/*.md -Pattern payment' }))),
+      'Select-String -Path in another directory'
+    );
+  });
+
+  c3Case('scoped shell searches still credit (positive controls)', () => {
+    const edit = (id, command) => f2Edit('src/payment.py', f2Turn(...f2Bash(id, command)));
+    f2Credit(edit('toolu_n1p1', 'rg -n payment src'), 'rg -n payment src');
+    f2Credit(edit('toolu_n1p2', 'grep -rn payment .'), 'grep -rn payment . (cwd scope)');
+    f2Credit(edit('toolu_n1p3', 'find src -name "payment*"'), 'find src');
+    f2Credit(edit('toolu_n1p4', 'rg payment'), 'rg with no operand searches the cwd');
+    f2Credit(edit('toolu_n1p5', 'find . -name "payment*"'), 'find .');
+    f2Credit(edit('toolu_n1p6', 'rg payment docs src'), 'one of several operands contains the target');
+    f2Credit(edit('toolu_n1p7', 'rg -n payment src/payment.py src/auth.py'), 'the target itself among other operands');
+    f2Credit(edit('toolu_n1p8', 'rg payment src < /dev/null'), 'operand before an input redirection');
+    f2Credit(edit('toolu_n1p9', `cd ${f2RootSh} && rg payment src`), 'relative operand after an absolute cd into the project');
+    f2Credit(edit('toolu_n1p10', `grep -rn payment ${f2RootSh}/src`), 'absolute operand');
+    f2Credit(edit('toolu_n1p11', 'rg payment src/*.py'), 'glob operand scopes to its literal directory');
+  });
+
+  c3Case('no credit-scoping output carries permissionDecision "allow"', () => {
+    assert.ok(f2Outputs.length > 30, 'collected outputs');
+    for (const stdout of f2Outputs) {
+      const output = parseOutput(stdout);
+      const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+      assert.notStrictEqual(decision, 'allow', stdout);
+    }
+  });
+
+  // --- Sibling collapse keyed by target class ---
+  // The project root sits under an ancestor `tests/` on purpose: `src/a.py` must still be code.
+  const f3Base = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, 'gateguard-f3-')));
+  const f3Root = path.join(f3Base, 'tests', 'proj');
+  fs.mkdirSync(f3Root, { recursive: true });
+  const f3Env = { CLAUDE_PROJECT_DIR: f3Root, CLAUDE_TRANSCRIPT_PATH: '' };
+  const f3Outputs = [];
+  const f3 = rel => `${f3Root}/${rel}`;
+  const f3Run = (toolName, toolInput, transcriptPath) => {
+    const payload = { tool_name: toolName, tool_input: toolInput, cwd: f3Root };
+    if (transcriptPath !== undefined) payload.transcript_path = transcriptPath;
+    if (c3PendingIds.has(transcriptPath)) payload.tool_use_id = c3PendingIds.get(transcriptPath);
+    const result = runHook(payload, f3Env);
+    f3Outputs.push(result.stdout);
+    const output = parseOutput(result.stdout);
+    const hso = output && output.hookSpecificOutput ? output.hookSpecificOutput : {};
+    return { result, decision: hso.permissionDecision, context: hso.additionalContext || '', reason: hso.permissionDecisionReason || '' };
+  };
+  const f3Write = (rel, t) => f3Run('Write', { file_path: f3(rel), content: 'x' }, t);
+  const f3Edit = (rel, t) => f3Run('Edit', { file_path: f3(rel), old_string: 'a', new_string: 'b' }, t);
+  const f3Turn = () => c3WriteTranscript([c3Human('scaffold it')]);
+  const f3GateKey = (cls, relDir) => `${cls}\u0000${stateKey(`${f3Root}/${relDir}`)}`;
+  const f3Deny = (out, label) => {
+    assert.strictEqual(out.decision, 'deny', `${label}: expected deny, got ${out.result.stdout}`);
+    assert.ok(!out.context.includes('Sibling of'), `${label}: no sibling note`);
+  };
+  const f3Sibling = (out, label) => {
+    assert.notStrictEqual(out.decision, 'deny', `${label}: must not deny (${out.result.stdout})`);
+    assert.ok(out.context.includes('[Fact-Forcing Gate] Sibling of '), `${label}: sibling note expected, got ${out.result.stdout}`);
+  };
+
+  c3Case('a code denial does not collapse other classes in the same dir', () => {
+    const t = f3Turn();
+    f3Deny(f3Write('src/newmod.py', t), 'code first');
+    f3Deny(f3Write('src/.env.production', t), 'config sibling of code');
+    f3Deny(f3Write('src/newmod.test.py', t), 'test sibling of code');
+    f3Deny(f3Write('src/README.md', t), 'QA 2c prose sibling of code');
+    f3Deny(f3Write('src/settings.yaml', t), 'QA 2c config sibling of code');
+    f3Deny(f3Write('src/.env.local', t), 'QA 2c .env sibling of code');
+    f3Sibling(f3Write('src/other.py', t), 'code sibling of code still collapses');
+    f3Sibling(f3Write('src/other.test.py', t), 'test sibling of test collapses');
+    f3Sibling(f3Write('src/CHANGES.md', t), 'prose sibling of prose collapses');
+  });
+
+  c3Case('harness, instruction and config paths never collapse', () => {
+    const t = f3Turn();
+    f3Deny(f3Write('.github/notes.md', t), '.github prose');
+    f3Deny(f3Write('.github/more.md', t), '.github prose never collapses');
+    const g5 = f3Write('.github/copilot-instructions.md', t);
+    f3Deny(g5, 'copilot-instructions');
+    assert.ok(g5.reason.includes('harness/loader'), 'copilot-instructions.md is instruction class');
+    f3Deny(f3Write('READMEX.md', t), 'root prose');
+    f3Deny(f3Write('AGENT.md', t), 'AGENT.md');
+    f3Deny(f3Write('.cursorrules', t), '.cursorrules');
+    f3Deny(f3Write('.windsurfrules', t), '.windsurfrules');
+    f3Deny(f3Write('.mcp.json', t), '.mcp.json');
+    f3Sibling(f3Write('NOTES.md', t), 'ordinary prose sibling at root still collapses');
+    f3Deny(f3Write('.claude/hooks/a.sh', t), '.claude/hooks');
+    f3Deny(f3Write('.claude/hooks/evil.sh', t), '.claude/hooks sibling');
+    f3Deny(f3Write('.husky/pre-commit', t), '.husky');
+    f3Deny(f3Write('.husky/pre-push', t), '.husky sibling');
+    f3Deny(f3Write('config/app.yaml', t), 'config');
+    f3Deny(f3Write('config/db.yaml', t), 'config sibling');
+    f3Deny(f3Write('lib/.hidden.js', t), 'dotfile');
+    f3Deny(f3Write('lib/.other.js', t), 'dotfile sibling');
+    const gates = c3State().dir_gates || {};
+    for (const key of Object.keys(gates)) {
+      assert.ok(!/\.github|\.claude|\.husky|^config|^instruction/.test(key), `no gate recorded for ${JSON.stringify(key)}`);
+    }
+  });
+
+  c3Case('classification uses the project-relative path (ancestor tests/ dir, worktrees)', () => {
+    const t = f3Turn();
+    const code = f3Write('src/a.py', t);
+    f3Deny(code, 'code');
+    assert.ok(code.reason.includes('Name the file(s) and line(s) that will call this new file'), 'code questions');
+    const state = c3State();
+    assert.deepStrictEqual(state.denials_by_class, { code: 1 }, 'counter uses the same class as the questions');
+    assert.ok(state.dir_gates[f3GateKey('code', 'src')], `gate key uses the same class: ${JSON.stringify(Object.keys(state.dir_gates))}`);
+    assert.ok(f3Edit('lib/b.py', t).reason.includes('List ALL files that import/require this file'), 'Edit code questions');
+    // The prefix is stripped only for a real worktree (its .git file or dir exists).
+    fs.mkdirSync(f3('.claude/worktrees/feat-x'), { recursive: true });
+    fs.writeFileSync(f3('.claude/worktrees/feat-x/.git'), 'gitdir: ../../../.git/worktrees/feat-x\n');
+    const wt = f3Write('.claude/worktrees/feat-x/docs/guide.md', t);
+    f3Deny(wt, 'worktree prose');
+    assert.ok(wt.reason.includes('supersedes or duplicates'), `worktree .md is prose: ${wt.reason}`);
+    f3Sibling(f3Write('.claude/worktrees/feat-x/docs/guide2.md', t), 'worktree prose sibling');
+    const wtHook = f3Write('.claude/worktrees/feat-x/.claude/hooks/x.md', t);
+    f3Deny(wtHook, 'worktree harness');
+    // 4th denial: condensed form; both forms name the loading harness only for instruction files.
+    assert.ok(wtHook.reason.includes('which harness loads this file'), `worktree .claude/hooks/*.md is instruction: ${wtHook.reason}`);
+    f3Deny(f3Write('.claude/worktrees/feat-x/.claude/hooks/y.md', t), 'worktree harness sibling');
+  });
+
+  c3Case('sibling note wording and class-prefixed gate key', () => {
+    const t = f3Turn();
+    f3Deny(f3Write('src/w/one.js', t), 'first');
+    const out = f3Write('src/w/two.js', t);
+    f3Sibling(out, 'sibling');
+    assert.strictEqual(
+      out.context,
+      `[Fact-Forcing Gate] Sibling of ${f3Root}/src/w/one.js (gated earlier at denial #1 this session); proceeding without a repeat denial.`
+    );
+    const gates = c3State().dir_gates;
+    assert.deepStrictEqual(Object.keys(gates), [f3GateKey('code', 'src/w')]);
+  });
+
+  c3Case('a future `at` or a zero ordinal is never honored', () => {
+    const now = Date.now();
+    const gate = (at, ordinal, turn = null) => ({ turn, at, first: '/forged.js', ordinal });
+    writeState({
+      checked: [],
+      last_active: now,
+      dir_gates: {
+        [f3GateKey('code', 'src/fut')]: gate(now + 3600 * 1000, 1),
+        [f3GateKey('code', 'src/zero')]: gate(now - 1000, 0),
+        [f3GateKey('code', 'src/ok')]: gate(now - 1000, 1)
+      }
+    });
+    f3Deny(f3Write('src/fut/a.js'), 'future at (no turn)');
+    f3Deny(f3Write('src/zero/a.js'), 'ordinal 0');
+    f3Sibling(f3Write('src/ok/a.js'), 'control: valid gate still matches');
+    const human = c3Human('x');
+    const t = c3WriteTranscript([human]);
+    writeState({ checked: [], last_active: now, dir_gates: { [f3GateKey('code', 'src/futt')]: gate(now + 3600 * 1000, 1, human.uuid) } });
+    f3Deny(f3Write('src/futt/a.js', t), 'future at (same turn)');
+  });
+
+  c3Case('old-shape dir_gates keys (no class prefix) are ignored and dropped', () => {
+    const now = Date.now();
+    writeState({ checked: [], last_active: now, dir_gates: { [`${f3Root}/src/legacy`]: { turn: null, at: now - 1000, first: 'forged', ordinal: 1 } } });
+    f3Deny(f3Write('src/legacy/a.js'), 'old-shape gate ignored');
+    const keys = Object.keys(c3State().dir_gates);
+    assert.deepStrictEqual(keys, [f3GateKey('code', 'src/legacy')], 'old-shape key dropped, new key recorded');
+    writeState({ checked: [], last_active: now, dir_gates: { [`bogus\u0000${f3Root}/src/b`]: { turn: null, at: now - 1000, first: 'x', ordinal: 1 } } });
+    f3Deny(f3Write('src/b/a.js'), 'unknown class prefix ignored');
+  });
+
+  c3Case('prototype keys in state are rejected and never pollute', () => {
+    const now = Date.now();
+    const legacy = f3GateKey('code', 'src/pp');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(
+      stateFile,
+      '{"checked":[],"last_active":' + now + ',"dir_gates":{"__proto__":{"turn":null,"at":1,"first":"x","ordinal":1},' +
+        '"constructor":{"turn":null,"at":' + (now - 1000) + ',"first":"x","ordinal":1},' +
+        '"prototype":{"turn":null,"at":' + (now - 1000) + ',"first":"x","ordinal":1},' +
+        JSON.stringify(legacy) + ':{"turn":null,"at":' + (now - 1000) + ',"first":"forged","ordinal":"NaN"}},' +
+        '"denials_by_class":{"__proto__":{"polluted":1},"constructor":5,"prototype":4,"code":7},' +
+        '"credited_by_class":{"constructor":2},"sibling_allows":0}',
+      'utf8'
+    );
+    f3Deny(f3Write('src/pp/a.js'), 'NaN ordinal gate not honored');
+    assert.strictEqual({}.polluted, undefined, 'Object.prototype not polluted');
+    const raw = fs.readFileSync(stateFile, 'utf8');
+    const state = JSON.parse(raw);
+    for (const field of ['dir_gates', 'denials_by_class', 'credited_by_class']) {
+      for (const bad of ['__proto__', 'constructor', 'prototype']) {
+        assert.ok(!Object.prototype.hasOwnProperty.call(state[field], bad), `${field} drops ${bad}`);
+      }
+    }
+    assert.strictEqual(state.denials_by_class.code, 8, 'code counter incremented from 7');
+    assert.deepStrictEqual(state.credited_by_class, {});
+  });
+
+  c3Case('second writes into dot-directories are denied', () => {
+    const t = f3Turn();
+    for (const [a, b] of [
+      ['.devcontainer/a.sh', '.devcontainer/post-create.sh'],
+      ['.githooks/a', '.githooks/pre-commit'],
+      ['.kiro/steering/a.md', '.kiro/steering/b.md'],
+      ['.clinerules/a.md', '.clinerules/b.md'],
+      ['.idea/a.xml', '.idea/run.xml'],
+      ['.continue/prompts/a.prompt', '.continue/prompts/b.prompt']
+    ]) {
+      f3Deny(f3Write(a, t), `${a} first`);
+      f3Deny(f3Write(b, t), `${b} second`);
+    }
+    assert.deepStrictEqual(Object.keys(c3State().dir_gates || {}), [], 'no dir gate recorded for any dot-directory');
+  });
+
+  c3Case('a symlinked directory is screened (and keyed) by its real location', () => {
+    const t = f3Turn();
+    fs.mkdirSync(f3('.claude/hooks'), { recursive: true });
+    fs.mkdirSync(f3('src/realdir'), { recursive: true });
+    try {
+      fs.symlinkSync(f3('.claude/hooks'), f3('src/tools'), 'dir');
+      fs.symlinkSync(f3('src/realdir'), f3('src/aliasdir'), 'dir');
+    } catch (e) {
+      if (process.platform === 'win32' && e.code === 'EPERM') return; // no symlink privilege
+      throw e;
+    }
+    f3Deny(f3Write('src/tools/a.sh', t), 'first write through the symlink');
+    f3Deny(f3Write('src/tools/evil.sh', t), 'second write lands in .claude/hooks');
+    f3Deny(f3Write('src/realdir/one.js', t), 'real dir first');
+    f3Sibling(f3Write('src/aliasdir/two.js', t), 'alias of the same real dir shares its gate');
+    assert.deepStrictEqual(Object.keys(c3State().dir_gates), [f3GateKey('code', 'src/realdir')], 'gate keyed by the real directory');
+  });
+
+  c3Case('a .claude/worktrees/<name>/ prefix without a .git is not stripped', () => {
+    const t = f3Turn();
+    fs.mkdirSync(f3('.claude/worktrees/fake/src'), { recursive: true });
+    f3Deny(f3Write('.claude/worktrees/fake/src/a.py', t), 'fake worktree first');
+    f3Deny(f3Write('.claude/worktrees/fake/src/b.py', t), 'fake worktree sibling');
+    f3Deny(f3Write('.claude/worktrees/fake/a.sh', t), 'fake worktree root first');
+    f3Deny(f3Write('.claude/worktrees/fake/statusline.sh', t), 'fake worktree root sibling');
+    const md = f3Write('.claude/worktrees/fake/docs/g.md', t);
+    f3Deny(md, 'fake worktree .md');
+    assert.ok(md.reason.includes('which harness loads this file') || md.reason.includes('harness/loader'), `stays instruction: ${md.reason}`);
+  });
+
+  c3Case('no class-keyed collapse output carries permissionDecision "allow"', () => {
+    assert.ok(f3Outputs.length > 30, 'collected outputs');
+    for (const stdout of f3Outputs) {
+      const output = parseOutput(stdout);
+      const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+      assert.notStrictEqual(decision, 'allow', stdout);
+    }
+  });
+
+  // --- Opt-in session cap on first-touch denials ---
+  const capEnvName = 'GATEGUARD_FACT_FORCE_MAX_DENIALS';
+  const capOutputs = [];
+  const capRun = (toolName, toolInput, transcriptPath, cap) => {
+    const out = c4Run(toolName, toolInput, transcriptPath, cap === undefined ? {} : { [capEnvName]: cap });
+    capOutputs.push(out.result.stdout);
+    return out;
+  };
+  const capAssertPassThrough = (out, toolName, label) => {
+    const output = parseOutput(out.result.stdout);
+    assert.ok(output, `${label}: valid JSON`);
+    assert.ok(!output.hookSpecificOutput, `${label}: pass-through expected, got ${out.result.stdout}`);
+    assert.strictEqual(output.tool_name, toolName, `${label}: pass-through preserves input`);
+  };
+  const capWarning = value =>
+    `[Fact-Forcing Gate] ignoring malformed ${capEnvName}=${value}; the denial cap is not active.`;
+  // Same-process run with stderr captured; restores the env var that loadDirectHook sets.
+  const capInProcess = (fn) => {
+    const saved = process.env[capEnvName];
+    const originalStderrWrite = process.stderr.write.bind(process.stderr);
+    const captured = [];
+    process.stderr.write = chunk => {
+      const s = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (s.includes(capEnvName)) captured.push(s.replace(/\n$/, ''));
+      return true;
+    };
+    try {
+      return fn(captured);
+    } finally {
+      process.stderr.write = originalStderrWrite;
+      if (saved === undefined) delete process.env[capEnvName];
+      else process.env[capEnvName] = saved;
+    }
+  };
+  const capDirectEdit = (hook, file) =>
+    parseOutput(hook.run(JSON.stringify({ tool_name: 'Edit', cwd: c4Root, tool_input: { file_path: `${c4Root}/${file}` } })).stdout);
+
+  for (const malformed of ['3.9', '+3', 'abc', '-1', '3oops', '0x3', ' 3 oops', '99999999999999999999']) {
+    c3Case(`malformed cap ${JSON.stringify(malformed)} warns once and leaves the gate uncapped`, () => {
+      writeState({ checked: [], last_active: Date.now(), fact_force_denials: 9 });
+      capInProcess(captured => {
+        const hook = loadDirectHook({ ...c4Env, [capEnvName]: malformed });
+        const first = capDirectEdit(hook, 'src/cap-malformed-a.py');
+        const second = capDirectEdit(hook, 'src/cap-malformed-b.py');
+        assert.strictEqual(first.hookSpecificOutput.permissionDecision, 'deny', 'uncapped: first denied');
+        assert.strictEqual(second.hookSpecificOutput.permissionDecision, 'deny', 'uncapped: second denied');
+        // sanitizePath trims, so the shown value has no surrounding whitespace.
+        assert.deepStrictEqual(captured, [capWarning(malformed.trim())], 'exactly one warning with the sanitized value');
+      });
+      assert.ok(!c3State().cap_allows, 'no cap allow recorded');
+    });
+  }
+
+  c3Case('a different malformed cap warns again; valid, empty and unset values never warn', () => {
+    capInProcess(captured => {
+      const hook = loadDirectHook({ ...c4Env, [capEnvName]: 'abc' });
+      capDirectEdit(hook, 'src/cap-warn-1.py');
+      process.env[capEnvName] = 'xyz';
+      capDirectEdit(hook, 'src/cap-warn-2.py');
+      capDirectEdit(hook, 'src/cap-warn-3.py');
+      assert.deepStrictEqual(captured, [capWarning('abc'), capWarning('xyz')]);
+      process.env[capEnvName] = '50';
+      capDirectEdit(hook, 'src/cap-warn-4.py');
+      process.env[capEnvName] = '';
+      capDirectEdit(hook, 'src/cap-warn-5.py');
+      delete process.env[capEnvName];
+      capDirectEdit(hook, 'src/cap-warn-6.py');
+      assert.strictEqual(captured.length, 2, `no further warnings: ${JSON.stringify(captured)}`);
+    });
+  });
+
+  c3Case('the warning value is sanitized and bounded', () => {
+    capInProcess(captured => {
+      const hook = loadDirectHook({ ...c4Env, [capEnvName]: `3\u202e\u200b${'9'.repeat(200)}x` });
+      capDirectEdit(hook, 'src/cap-warn-sanitize.py');
+      assert.strictEqual(captured.length, 1, JSON.stringify(captured));
+      assert.ok(!/[\u202e\u200b]/.test(captured[0]), 'no invisible characters');
+      assert.ok(captured[0].length < 200, `bounded: ${captured[0].length}`);
+    });
+  });
+
+  c3Case('a malformed cap also warns from the spawned hook (stderr), stdout still denies', () => {
+    const out = capRun('Edit', { file_path: `${c4Root}/src/cap-spawn.py` }, undefined, 'abc');
+    assert.strictEqual(out.decision, 'deny');
+    assert.ok(out.result.stderr.includes(capWarning('abc')), out.result.stderr);
+  });
+
+  c3Case('surrounding whitespace is trimmed (" 2 " caps at 2, no warning)', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 2 });
+    const out = capRun('Edit', { file_path: `${c4Root}/src/cap-trim.py` }, undefined, ' 2 ');
+    capAssertPassThrough(out, 'Edit', 'trimmed cap');
+    assert.ok(!out.result.stderr.includes(capEnvName), out.result.stderr);
+  });
+
+  c3Case('a cap pass marks the target checked, counts cap_allows, never counts a denial', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 2 });
+    const a = `${c4Root}/src/cap-counted-a.py`;
+    capAssertPassThrough(capRun('Edit', { file_path: a }, undefined, '2'), 'Edit', 'first past cap');
+    let state = c3State();
+    assert.strictEqual(state.cap_allows, 1, 'cap_allows counted');
+    assert.strictEqual(state.fact_force_denials, 2, 'denials unchanged');
+    assert.ok(state.checked.includes(stateKey(a)), 'cap-passed target marked checked');
+    capAssertPassThrough(capRun('Edit', { file_path: a }, undefined, '2'), 'Edit', 'retry');
+    assert.strictEqual(c3State().cap_allows, 1, 'a retry of a checked target is not recounted');
+    capAssertPassThrough(capRun('Write', { file_path: `${c4Root}/src/cap-counted-b.py`, content: 'x' }, undefined, '2'), 'Write', 'second');
+    state = c3State();
+    assert.strictEqual(state.cap_allows, 2);
+    assert.strictEqual(state.fact_force_denials, 2);
+  });
+
+  c3Case('cap_allows loads from old or malformed state and survives later writes', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 1, cap_allows: 'garbage' });
+    capRun('Edit', { file_path: `${c4Root}/src/cap-old-a.py` }, undefined, '1');
+    assert.strictEqual(c3State().cap_allows, 1, 'malformed counter treated as zero');
+    writeState({ ...c3State(), cap_allows: 7 });
+    capRun('Edit', { file_path: `${c4Root}/src/cap-old-b.py` }, undefined, '1');
+    assert.strictEqual(c3State().cap_allows, 8, 'increments the persisted count');
+    // An uncapped denial elsewhere rewrites state and must keep cap_allows.
+    capRun('Edit', { file_path: `${c4Root}/src/cap-old-c.py` });
+    assert.strictEqual(c3State().cap_allows, 8, 'kept across an unrelated state write');
+  });
+
+  c3Case('cap 0 passes the first new path without a denial', () => {
+    capAssertPassThrough(capRun('Edit', { file_path: `${c4Root}/src/cap-zero.py` }, undefined, '0'), 'Edit', 'cap 0');
+    const state = c3State();
+    assert.ok(!state.fact_force_denials, 'no denial counted');
+    assert.strictEqual(state.cap_allows, 1);
+  });
+
+  c3Case('credit and sibling allows run before the cap and do not consume it', () => {
+    const t = c3WriteTranscript([
+      c3Human('build the gadget and fix the widget factory'),
+      ...c3Search('toolu_cap_g1', 'Grep', { pattern: 'widget_factory', path: c4Root }),
+      ...c3Search('toolu_cap_g2', 'Grep', { pattern: 'gadget_maker', path: c4Root })
+    ]);
+    const credited = capRun('Edit', { file_path: `${c4Root}/src/widget_factory.py`, old_string: 'a', new_string: 'b' }, t, '1');
+    assert.ok(credited.context.includes('Prior search seen in this turn'), credited.result.stdout);
+    assert.ok(!c3State().fact_force_denials, 'credit consumes no denial');
+    const first = capRun('Write', { file_path: `${c4Root}/src/capgen/g0.js`, content: 'x' }, t, '1');
+    assert.strictEqual(first.decision, 'deny', 'the one denial the cap allows');
+    const sibling = capRun('Write', { file_path: `${c4Root}/src/capgen/g1.js`, content: 'x' }, t, '1');
+    assert.ok(sibling.context.includes('[Fact-Forcing Gate] Sibling of '), `sibling note, not a cap pass: ${sibling.result.stdout}`);
+    const creditedAfterCap = capRun('Edit', { file_path: `${c4Root}/src/gadget_maker.py`, old_string: 'a', new_string: 'b' }, t, '1');
+    assert.ok(creditedAfterCap.context.includes('Prior search seen in this turn'), 'credit still wins once the cap is reached');
+    let state = c3State();
+    assert.strictEqual(state.fact_force_denials, 1);
+    assert.strictEqual(state.sibling_allows, 1);
+    assert.strictEqual(state.fact_force_credited, 2);
+    assert.ok(!state.cap_allows, 'no cap pass yet');
+    const capped = capRun('Edit', { file_path: `${c4Root}/src/unrelated_module.py`, old_string: 'a', new_string: 'b' }, t, '1');
+    capAssertPassThrough(capped, 'Edit', 'uncredited target past the cap');
+    state = c3State();
+    assert.strictEqual(state.cap_allows, 1);
+    assert.strictEqual(state.fact_force_denials, 1);
+  });
+
+  c3Case('MultiEdit past the cap passes every entry and counts each', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 1 });
+    const files = ['src/cap-multi-a.py', 'src/cap-multi-b.py', 'src/cap-multi-c.py'].map(f => `${c4Root}/${f}`);
+    const out = capRun('MultiEdit', { edits: files.map(file_path => ({ file_path, old_string: 'a', new_string: 'b' })) }, undefined, '1');
+    capAssertPassThrough(out, 'MultiEdit', 'MultiEdit past cap');
+    const state = c3State();
+    assert.strictEqual(state.cap_allows, 3);
+    assert.strictEqual(state.fact_force_denials, 1);
+    for (const f of files) assert.ok(state.checked.includes(stateKey(f)), `${f} checked`);
+  });
+
+  c3Case('destructive and routine Bash stay gated once the cap is reached', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 5 });
+    const env = { ...c4Env, [capEnvName]: '0' };
+    const destructive = parseOutput(runBashHook({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } }, env).stdout);
+    assert.strictEqual(destructive.hookSpecificOutput.permissionDecision, 'deny', 'destructive gate unchanged');
+    const routine = parseOutput(runBashHook({ tool_name: 'Bash', tool_input: { command: 'ls' } }, env).stdout);
+    assert.strictEqual(routine.hookSpecificOutput.permissionDecision, 'deny', 'routine gate unchanged');
+    assert.ok(!c3State().cap_allows, 'Bash never counts a cap pass');
+  });
+
+  c3Case('no cap output carries permissionDecision "allow"', () => {
+    assert.ok(capOutputs.length > 10, `collected outputs: ${capOutputs.length}`);
+    for (const stdout of capOutputs) {
+      const output = parseOutput(stdout);
+      const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+      assert.notStrictEqual(decision, 'allow', stdout);
+    }
+  });
+
+  // --- Sensitive targets are never auto-passed ---
+  const sensLine = 'Sensitive target: prior-search credit, sibling collapse, and the denial cap do not apply.';
+  const sensTargets = [
+    '.env', '.env.local', 'config/.env.production', 'certs/server.pem', 'certs/server.key', 'certs/client.p12',
+    'certs/client.pfx', 'keys/id_rsa', 'keys/id_rsa.pub', 'keys/id_ed25519', 'config/credentials.json',
+    'config/secrets.yaml', 'src/auth/login_flow.py', 'src/authn/token_check.py', 'src/authz/policy_rules.py',
+    'src/security/hardening.py', 'src/secrets/vault_client.py', 'src/payment/charge_card.py',
+    'src/payments/refund_flow.py', 'src/billing/invoice_maker.py', 'db/migrations/0001_initial.py',
+    '.github/workflows/release.yml', 'SRC/Auth/Upper_Case.py'
+  ];
+  const sensOutputs = [];
+  const sensRun = (toolName, toolInput, transcriptPath, env = {}) => {
+    const out = c4Run(toolName, toolInput, transcriptPath, env);
+    sensOutputs.push(out.result.stdout);
+    return out;
+  };
+  const sensAbs = rel => `${c4Root}/${rel}`;
+  const sensDir = rel => path.posix.dirname(sensAbs(rel));
+  const sensStem = rel => path.posix.basename(rel).replace(/\.[^.]*$/, '') || path.posix.basename(rel);
+  const sensAssertDenied = (out, label) => {
+    assert.strictEqual(out.decision, 'deny', `${label}: expected deny, got ${out.result.stdout}`);
+    assert.ok(!out.context, `${label}: no credit/sibling note`);
+    assert.ok(out.reason.includes(sensLine), `${label}: sensitive line expected: ${out.reason}`);
+  };
+  // Search evidence that credits a Write of a new file in `rel`'s directory, and an Edit of its stem.
+  const sensCreditTranscript = (rel, n) => c3WriteTranscript([
+    c3Human('update it'),
+    ...c3Search(`toolu_sens_ls_${n}`, 'LS', { path: sensDir(rel) }),
+    ...c3Search(`toolu_sens_gr_${n}`, 'Grep', { pattern: sensStem(rel), path: c4Root }),
+    ...c3Search(`toolu_sens_ctl_${n}`, 'LS', { path: sensAbs('src/plain') })
+  ]);
+
+  c3Case('each sensitive target is denied on first Write despite a qualifying search (control credited)', () => {
+    sensTargets.forEach((rel, n) => {
+      clearState();
+      const t = sensCreditTranscript(rel, n);
+      sensAssertDenied(sensRun('Write', { file_path: sensAbs(rel), content: 'x' }, t), `Write ${rel}`);
+      const control = sensRun('Write', { file_path: sensAbs(`src/plain/ctl_${n}.py`), content: 'x' }, t);
+      assert.ok(control.context.includes('Prior search seen in this turn'), `control credited for ${rel}: ${control.result.stdout}`);
+      const state = c3State();
+      assert.strictEqual(state.fact_force_denials, 1, `${rel}: the denial counts`);
+      assert.strictEqual(state.fact_force_credited, 1, `${rel}: only the control was credited`);
+    });
+  });
+
+  c3Case('sensitive Edit and MultiEdit targets are denied despite a stem search', () => {
+    const t = c3WriteTranscript([
+      c3Human('fix the billing'),
+      ...c3Search('toolu_sens_e1', 'Grep', { pattern: 'invoice_maker|login_flow|plain_helper', path: c4Root })
+    ]);
+    sensAssertDenied(sensRun('Edit', { file_path: sensAbs('src/billing/invoice_maker.py'), old_string: 'a', new_string: 'b' }, t), 'Edit');
+    const multi = sensRun('MultiEdit', {
+      edits: [
+        { file_path: sensAbs('src/plain/plain_helper.py'), old_string: 'a', new_string: 'b' },
+        { file_path: sensAbs('src/auth/login_flow.py'), old_string: 'a', new_string: 'b' }
+      ]
+    }, t);
+    sensAssertDenied(multi, 'MultiEdit sensitive entry');
+    const state = c3State();
+    assert.strictEqual(state.fact_force_credited, 1, 'the ordinary entry was credited');
+    assert.strictEqual(state.fact_force_denials, 2);
+  });
+
+  c3Case('a sensitive new file never joins a same-dir sibling gate', () => {
+    const t = c3WriteTranscript([c3Human('scaffold keys')]);
+    c4AssertDenied(sensRun('Write', { file_path: sensAbs('src/keys/loader.py'), content: 'x' }, t), 'ordinary first');
+    for (const rel of ['src/keys/server.key', 'src/keys/server.pem', 'src/keys/credentials.py', 'src/keys/secrets.py', 'src/keys/id_rsa_test_fixture.py']) {
+      sensAssertDenied(sensRun('Write', { file_path: sensAbs(rel), content: 'x' }, t), rel);
+    }
+    c4AssertSibling(sensRun('Write', { file_path: sensAbs('src/keys/other.py'), content: 'x' }, t), 'ordinary sibling still collapses');
+    assert.strictEqual(c3State().sibling_allows, 1);
+  });
+
+  c3Case('a sensitive denial opens no sibling gate; sensitive dirs never collapse', () => {
+    const t = c3WriteTranscript([c3Human('scaffold auth')]);
+    sensAssertDenied(sensRun('Write', { file_path: sensAbs('src/vault/api.key'), content: 'x' }, t), 'sensitive first');
+    c4AssertDenied(sensRun('Write', { file_path: sensAbs('src/vault/client.py'), content: 'x' }, t), 'ordinary after sensitive');
+    sensAssertDenied(sensRun('Write', { file_path: sensAbs('src/auth/a.py'), content: 'x' }, t), 'auth first');
+    sensAssertDenied(sensRun('Write', { file_path: sensAbs('src/auth/b.py'), content: 'x' }, t), 'auth second');
+    const gates = Object.keys(c3State().dir_gates || {});
+    assert.ok(!gates.some(k => k.endsWith(stateKey(sensAbs('src/auth')))), `no auth gate: ${JSON.stringify(gates)}`);
+    assert.deepStrictEqual(gates, [c4GateKey(sensAbs('src/vault'))], 'only the ordinary denial opened a gate');
+  });
+
+  c3Case('sensitive targets are denied after the denial cap is reached (and still count)', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 5 });
+    const env = { GATEGUARD_FACT_FORCE_MAX_DENIALS: '1' };
+    sensTargets.forEach((rel, n) => {
+      const tool = n % 2 ? 'Edit' : 'Write';
+      const input = tool === 'Edit' ? { file_path: sensAbs(rel), old_string: 'a', new_string: 'b' } : { file_path: sensAbs(rel), content: 'x' };
+      sensAssertDenied(sensRun(tool, input, undefined, env), `${tool} ${rel} past cap`);
+    });
+    const multi = sensRun('MultiEdit', { edits: [
+      { file_path: sensAbs('src/plain/capped.py'), old_string: 'a', new_string: 'b' },
+      { file_path: sensAbs('src/payments/capped.py'), old_string: 'a', new_string: 'b' }
+    ] }, undefined, env);
+    sensAssertDenied(multi, 'MultiEdit sensitive entry past cap');
+    const control = sensRun('Edit', { file_path: sensAbs('src/plain/also_capped.py'), old_string: 'a', new_string: 'b' }, undefined, env);
+    assert.ok(!parseOutput(control.result.stdout).hookSpecificOutput, 'ordinary target passes the cap');
+    const state = c3State();
+    assert.strictEqual(state.fact_force_denials, 5 + sensTargets.length + 1, 'every sensitive denial counts');
+    assert.strictEqual(state.cap_allows, 2);
+  });
+
+  c3Case('the sensitive line also appears in condensed denials; ordinary denials are unchanged', () => {
+    writeState({ checked: [], last_active: Date.now(), fact_force_denials: 9 });
+    const condensed = sensRun('Edit', { file_path: sensAbs('src/auth/condensed.py'), old_string: 'a', new_string: 'b' });
+    sensAssertDenied(condensed, 'condensed');
+    assert.ok(condensed.reason.includes('(denial #10 this session)'), condensed.reason);
+    clearState();
+    const full = sensRun('Edit', { file_path: sensAbs('src/auth/full.py'), old_string: 'a', new_string: 'b' });
+    sensAssertDenied(full, 'full');
+    assert.ok(full.reason.includes(`${sensLine}\n\nPresent the facts, then retry the same operation.`), full.reason);
+    clearState();
+    const ordinary = sensRun('Edit', { file_path: sensAbs('src/author.py'), old_string: 'a', new_string: 'b' });
+    assert.strictEqual(ordinary.decision, 'deny');
+    assert.ok(!ordinary.reason.includes('Sensitive target'), 'segment-exact: author.py is ordinary');
+    for (const rel of ['docs/authoring.md', 'lib/paymentutils.py']) {
+      clearState();
+      const t = c3WriteTranscript([c3Human('go'), ...c3Search(`toolu_ord_${rel.length}`, 'LS', { path: sensDir(rel) })]);
+      const out = sensRun('Write', { file_path: sensAbs(rel), content: 'x' }, t);
+      assert.ok(out.context.includes('Prior search seen in this turn'), `${rel} is ordinary and credited: ${out.result.stdout}`);
+    }
+  });
+
+  // --- A symlinked directory cannot launder a sensitive real location ---
+  // r1link/src/tools -> r1link/src/auth (a real directory inside the project).
+  const r1Ready = (() => {
+    fs.mkdirSync(sensAbs('r1link/src/auth'), { recursive: true });
+    fs.writeFileSync(sensAbs('r1link/src/auth/login_flow.py'), 'x');
+    fs.mkdirSync(sensAbs('r1link/src/plain'), { recursive: true });
+    fs.writeFileSync(sensAbs('r1link/src/plain/plain_login.py'), 'x');
+    try {
+      fs.symlinkSync(sensAbs('r1link/src/auth'), sensAbs('r1link/src/tools'), 'dir');
+      return true;
+    } catch (e) {
+      if (process.platform === 'win32' && e.code === 'EPERM') return false; // no symlink privilege
+      throw e;
+    }
+  })();
+  const r1Edit = (rel, t, env) => sensRun('Edit', { file_path: sensAbs(rel), old_string: 'a', new_string: 'b' }, t, env);
+  const r1Credited = (out, label) =>
+    assert.ok(out.context.includes('Prior search seen in this turn'), `${label}: credit expected, got ${out.result.stdout}`);
+
+  c3Case('an Edit through a symlink into auth/ is denied despite a crediting search (direct control credited)', () => {
+    if (!r1Ready) return;
+    const t = c3WriteTranscript([
+      c3Human('fix login'),
+      ...c3Search('toolu_r1_g1', 'Grep', { pattern: 'login_flow|plain_login|new_login', path: c4Root })
+    ]);
+    sensAssertDenied(r1Edit('r1link/src/tools/login_flow.py', t), 'Edit via the alias');
+    sensAssertDenied(sensRun('Write', { file_path: sensAbs('r1link/src/tools/new_login.py'), content: 'x' }, t), 'Write via the alias');
+    r1Credited(r1Edit('r1link/src/plain/plain_login.py', t), 'direct non-sensitive path');
+    const state = c3State();
+    assert.strictEqual(state.fact_force_credited, 1);
+    assert.strictEqual(state.fact_force_denials, 2);
+  });
+
+  c3Case('a new file through a symlink into auth/ never joins a same-turn sibling gate', () => {
+    if (!r1Ready) return;
+    const { human, transcript } = c4Turn('scaffold handlers');
+    const gate = { turn: human.uuid, at: Date.now() - 1000, first: 'seeded.py', ordinal: 1 };
+    writeState({
+      checked: [],
+      last_active: Date.now(),
+      fact_force_denials: 1,
+      dir_gates: {
+        [c4GateKey(sensAbs('r1link/src/auth'))]: gate,
+        [c4GateKey(sensAbs('r1link/src/tools'))]: gate,
+        [c4GateKey(sensAbs('r1link/src/plain'))]: gate
+      }
+    });
+    sensAssertDenied(sensRun('Write', { file_path: sensAbs('r1link/src/tools/new_handler.py'), content: 'x' }, transcript), 'sibling via alias');
+    c4AssertSibling(sensRun('Write', { file_path: sensAbs('r1link/src/plain/new_handler.py'), content: 'x' }, transcript), 'control sibling');
+  });
+
+  c3Case('an Edit through a symlink into auth/ is denied past the denial cap (control passes)', () => {
+    if (!r1Ready) return;
+    const env = { GATEGUARD_FACT_FORCE_MAX_DENIALS: '0' };
+    sensAssertDenied(r1Edit('r1link/src/tools/login_flow.py', undefined, env), 'alias past cap 0');
+    const control = r1Edit('r1link/src/plain/plain_login.py', undefined, env);
+    assert.ok(!parseOutput(control.result.stdout).hookSpecificOutput, `control passes the cap: ${control.result.stdout}`);
+  });
+
+  c3Case('no sensitive output carries permissionDecision "allow"', () => {
+    assert.ok(sensOutputs.length > 60, `collected outputs: ${sensOutputs.length}`);
+    for (const stdout of sensOutputs) {
+      const output = parseOutput(stdout);
+      const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+      assert.notStrictEqual(decision, 'allow', stdout);
+    }
+  });
+
+  fs.rmSync(f3Base, { recursive: true, force: true });
+  fs.rmSync(f2Root, { recursive: true, force: true });
+
+  fs.rmSync(c4Root, { recursive: true, force: true });
+
+  fs.rmSync(c3TranscriptDir, { recursive: true, force: true });
 
   // Cleanup only the temp directory created by this test file.
   try {
