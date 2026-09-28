@@ -220,6 +220,100 @@ function runTests() {
       { plugin: [], userSetting: true });
     assert.strictEqual(fs.existsSync(`${value.installStatePath}.ecc.lock`), false);
   }));
+  for (const consent of [null, 'declined']) {
+    test(`fresh ${consent || 'default'} apply preserves unrelated unrecorded plugin aliases`, () => fixture(value => {
+      fs.unlinkSync(value.installStatePath);
+      for (const operation of value.basePlan.operations) fs.unlinkSync(operation.destinationPath);
+      const aliases = ['index.ts', 'index.js', 'index.mjs', 'index.cjs', 'ecc-hooks.js'];
+      const content = 'export default async () => ({ "user.plugin": () => {} });\n';
+      for (const alias of aliases) fs.writeFileSync(path.join(value.targetRoot, 'plugins', alias), content);
+      const result = applyInstallPlan(withHookConsent(value.basePlan, consent));
+      assert.strictEqual(result.applied, true);
+      const state = readInstallState(value.installStatePath);
+      for (const alias of aliases) {
+        const destination = path.join(value.targetRoot, 'plugins', alias);
+        assert.strictEqual(fs.readFileSync(destination, 'utf8'), content);
+        assert.ok(!state.operations.some(operation => operation.destinationPath === destination), 'Do not adopt a user plugin');
+      }
+    }));
+  }
+  for (const mode of ['doctor', 'repair']) {
+    test(`${mode} preserves an unrelated plugin without reporting ECC activation`, () => fixture(value => {
+      applyInstallPlan(value.declinePlan);
+      const destination = path.join(value.targetRoot, 'plugins', 'index.js');
+      const content = 'export default async () => ({ "user.plugin": () => {} });\n';
+      fs.writeFileSync(destination, content);
+      const before = fs.readFileSync(value.installStatePath);
+      if (mode === 'doctor') {
+        const result = buildDoctorReport({ repoRoot: value.sourceRoot, homeDir: value.homeDir,
+          projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+        assert.ok(!result.issues.some(issue => issue.code === 'opencode-hook-consent-violation'), JSON.stringify(result.issues));
+      } else {
+        const result = repair(value).results[0];
+        assert.notStrictEqual(result.status, 'error', result.error);
+      }
+      assert.strictEqual(fs.readFileSync(destination, 'utf8'), content);
+      const { lastValidatedAt: _beforeValidation, ...priorState } = JSON.parse(before);
+      const { lastValidatedAt: _afterValidation, ...afterState } = readInstallState(value.installStatePath);
+      assert.deepStrictEqual(afterState, priorState, 'Only the legitimate validation timestamp may change');
+      assert.ok(!afterState.operations.some(operation => operation.destinationPath === destination), 'Do not adopt a user plugin');
+    }));
+  }
+  for (const artifact of ['source', 'build']) {
+    test(`unrecorded ${artifact}-identical ECC alias still fails closed`, () => fixture(value => {
+      applyInstallPlan(value.declinePlan);
+      const source = artifact === 'source'
+        ? path.join(value.sourceRoot, '.opencode', 'plugins', 'ecc-hooks.ts')
+        : path.join(value.sourceRoot, '.opencode', 'dist', 'plugins', 'index.js');
+      if (artifact === 'build') fs.writeFileSync(source, 'module.exports = { eccHook: true };\n');
+      const content = fs.readFileSync(source);
+      const alias = path.join(value.targetRoot, 'plugins', 'index.js');
+      fs.writeFileSync(alias, content);
+      const before = fs.readFileSync(value.installStatePath);
+      assert.throws(() => applyInstallPlan(value.declinePlan), /OpenCode hook deactivation/);
+      const doctor = buildDoctorReport({ repoRoot: value.sourceRoot, homeDir: value.homeDir,
+        projectRoot: value.homeDir, targets: ['opencode'] }).results[0];
+      assert.ok(doctor.issues.some(issue => issue.code === 'opencode-hook-consent-violation'));
+      assert.strictEqual(repair(value).results[0].status, 'error');
+      assert.deepStrictEqual(fs.readFileSync(alias), content);
+      assert.deepStrictEqual(fs.readFileSync(value.installStatePath), before);
+    }));
+  }
+  test('an unrecorded collision at a planned ECC plugin destination still fails closed', () => fixture(value => {
+    fs.unlinkSync(value.installStatePath);
+    fs.unlinkSync(path.join(value.targetRoot, 'opencode.json'));
+    const destination = path.join(value.targetRoot, 'plugins', 'ecc-hooks.ts');
+    const content = '// user-owned file at an ECC destination\n';
+    fs.writeFileSync(destination, content);
+    assert.throws(() => applyInstallPlan(value.declinePlan), /user-owned|unverifiable/i);
+    assert.strictEqual(fs.readFileSync(destination, 'utf8'), content);
+    assert.strictEqual(fs.existsSync(value.installStatePath), false);
+  }));
+  for (const planned of [false, true]) {
+    test(`${planned ? 'planned ECC' : 'unrecorded user'} plugin read failures respect the attribution boundary`, () => fixture(value => {
+      const destination = path.join(value.targetRoot, 'plugins', planned ? 'ecc-hooks.ts' : 'index.js');
+      const content = planned ? fs.readFileSync(destination) : Buffer.from('// unreadable user plugin\n');
+      if (!planned) fs.writeFileSync(destination, content);
+      const originalOpen = fs.openSync;
+      let refusedReads = 0;
+      fs.openSync = function (candidate, ...args) {
+        if (typeof candidate === 'string' && path.resolve(candidate) === destination) {
+          refusedReads++;
+          throw Object.assign(new Error('Synthetic plugin read permission denied'), { code: 'EACCES' });
+        }
+        return originalOpen.call(fs, candidate, ...args);
+      };
+      try {
+        if (planned) assert.throws(() => applyInstallPlan(value.declinePlan), /permission denied/);
+        else assert.strictEqual(applyInstallPlan(value.declinePlan).applied, true);
+        assert.ok(refusedReads > 0, 'The permission boundary must be exercised');
+      } finally {
+        fs.openSync = originalOpen;
+      }
+      assert.deepStrictEqual(fs.readFileSync(destination), content);
+      if (!planned) assert.ok(!readInstallState(value.installStatePath).operations.some(operation => operation.destinationPath === destination));
+    }));
+  }
   test('repair preserves the primary failure and replacement lock when release also fails', () => fixture(value => {
     const destination = path.join(value.targetRoot, 'opencode.json');
     const lock = `${value.installStatePath}.ecc.lock`;

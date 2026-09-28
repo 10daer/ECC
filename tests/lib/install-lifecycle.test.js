@@ -2239,7 +2239,7 @@ function runTests() {
         const pluginPath = path.join(recorded.targetRoot, 'plugins', 'index.ts');
         const canonicalPluginPath = fs.realpathSync(pluginPath);
         const aliasPath = path.join(recorded.targetRoot, 'plugins', 'index.js');
-        const aliasContent = 'globalThis.lateActiveAlias = true;\n';
+        const aliasContent = fs.readFileSync(path.join(REPO_ROOT, '.opencode', 'plugins', 'index.ts'), 'utf8');
         const stateBefore = fs.readFileSync(recorded.installStatePath);
         let inserted = false;
         fs.openSync = function trackPluginWriteDescriptor(candidate, ...args) {

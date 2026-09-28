@@ -321,6 +321,35 @@ function getOpenCodeActivationKind(plan, operation) {
   return isOpenCodeHookActivationOperation(operation) ? 'config' : null;
 }
 
+function readOpenCodeAliasForAttribution(plan, destinationPath) {
+  try {
+    const operation = { destinationPath };
+    assertSafeInstallOperation(plan, operation);
+    if (!fs.lstatSync(destinationPath).isFile()) return null;
+    return readInstalledFileNoFollow(plan, operation);
+  } catch {
+    // Optional, unrecorded aliases have no ECC ownership until their bytes
+    // prove it. Never follow an unsafe path or relax recorded/planned guards.
+    return null;
+  }
+}
+
+function knownOpenCodePluginDigests(plan) {
+  const digests = new Set();
+  if (typeof plan.sourceRoot !== 'string' || !path.isAbsolute(plan.sourceRoot)) return digests;
+  const sourcePlan = { ...plan, targetRoot: plan.sourceRoot };
+  for (const directory of ['.opencode/plugins', '.opencode/dist/plugins']) {
+    for (const name of ['ecc-hooks', 'index']) {
+      for (const extension of ['ts', 'js', 'mjs', 'cjs']) {
+        const content = readOpenCodeAliasForAttribution(sourcePlan,
+          path.join(plan.sourceRoot, directory, `${name}.${extension}`));
+        if (content !== null) digests.add(crypto.createHash('sha256').update(content).digest('hex'));
+      }
+    }
+  }
+  return digests;
+}
+
 function openCodeActivationCandidates(plan, previousOperations) {
   const candidates = new Map();
   for (const operation of [...previousOperations, ...plan.operations]) {
@@ -328,17 +357,22 @@ function openCodeActivationCandidates(plan, previousOperations) {
       candidates.set(comparablePath(operation.destinationPath), operation);
     }
   }
-  // Old installs can leave aliases that are absent from the new source tree.
-  // Inspect only ECC's known entrypoint names, never unrelated user plugins.
+  // Old installs can leave unrecorded aliases, but names such as index.js
+  // are also used by unrelated plugins. Attribute only exact ECC artifacts.
+  const knownDigests = knownOpenCodePluginDigests(plan);
   for (const name of ['ecc-hooks', 'index']) {
     for (const extension of ['ts', 'js', 'mjs', 'cjs']) {
       const destinationPath = path.join(plan.targetRoot, 'plugins', `${name}.${extension}`);
       const key = comparablePath(destinationPath);
       if (!candidates.has(key)) {
-        candidates.set(key, {
-          sourceRelativePath: `.opencode/plugins/${name}.${extension}`,
-          destinationPath,
-        });
+        const content = readOpenCodeAliasForAttribution(plan, destinationPath);
+        const digest = content === null ? null : crypto.createHash('sha256').update(content).digest('hex');
+        if (knownDigests.has(digest)) {
+          candidates.set(key, {
+            sourceRelativePath: `.opencode/plugins/${name}.${extension}`,
+            destinationPath,
+          });
+        }
       }
     }
   }

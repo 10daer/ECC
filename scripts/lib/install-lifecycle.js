@@ -1799,6 +1799,7 @@ function createRepairPlanFromRecord(record, context, options = {}) {
     const statePreview = buildRecordedStatePreview(state, context, operations);
 
     const recordedPlan = {
+      sourceRoot: context.repoRoot,
       mode: state.request.legacyMode ? 'legacy' : 'recorded',
       target: record.adapter.target,
       adapter: record.adapter,
@@ -1950,6 +1951,7 @@ function preflightOpenCodeHookDeactivation(record, context, options = {}) {
   if (record.legacyLayout === 'opencode') {
     const state = record.state;
     const legacyPlan = withHookConsent({
+      sourceRoot: context.repoRoot,
       target: 'opencode',
       adapter: record.adapter,
       targetRoot: record.targetRoot,
