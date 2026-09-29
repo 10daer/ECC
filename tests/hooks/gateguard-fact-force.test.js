@@ -4611,15 +4611,32 @@ function runTests() {
   else failed++;
 
   // --- Comment and whitespace-only edits ---
+  const b3Root = fs.mkdtempSync(path.join(tmpRoot, 'gateguard-b3-'));
+  const b3Seed = tool_input => {
+    const entries = Array.isArray(tool_input.edits) ? tool_input.edits : [tool_input];
+    const byFile = new Map();
+    for (const entry of entries) {
+      const rel = entry.file_path || tool_input.file_path;
+      if (typeof rel !== 'string' || typeof entry.old_string !== 'string') continue;
+      byFile.set(rel, [...(byFile.get(rel) || []), entry.old_string]);
+    }
+    for (const [rel, parts] of byFile) {
+      const file = path.join(b3Root, rel);
+      if (fs.existsSync(file)) continue;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${parts.join('\n')}\n`);
+    }
+  };
   const b3Run = (toolName, tool_input, env = {}) => {
-    const result = runHook({ tool_name: toolName, tool_input }, { ...B2_ENV, ...env });
+    b3Seed(tool_input);
+    const result = runHook({ tool_name: toolName, tool_input }, { CLAUDE_PROJECT_DIR: b3Root, ...env });
     const output = parseOutput(result.stdout);
     const hso = output && output.hookSpecificOutput ? output.hookSpecificOutput : {};
     const context = Array.isArray(hso.additionalContext) ? hso.additionalContext.join('\n') : String(hso.additionalContext || '');
     return { result, decision: hso.permissionDecision, context, reason: hso.permissionDecisionReason || '' };
   };
   const b3State = () => (fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {});
-  const b3Key = rel => `/proj-b2/${rel}`;
+  const b3Key = rel => `${b3Root}/${rel}`;
   const B3_NOTE = 'Comment or whitespace-only change to';
 
   clearState();
@@ -4713,6 +4730,77 @@ function runTests() {
         assert.ok(!out.context.includes(B3_NOTE), `${label}: no trivial note`);
         assert.strictEqual(b3State().trivial_allows || 0, 0, `${label}: no trivial count`);
       }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('comment-looking edits that change code in their file context are denied', () => {
+      const cases = [
+        ['macro continuation', 'src/ctx/a.c', '#define A 1 \\\n// c\nint x;\n', { old_string: '// c\n', new_string: '' }],
+        ['joined next line', 'src/ctx/b.js', 'a();\n// c\nb();\n', { old_string: '// c\n', new_string: '// c ' }],
+        ['template literal', 'src/ctx/c.js', 'const q = `\n  // hint\n  SELECT 1\n`;\n', { old_string: '  // hint', new_string: '  // other' }],
+        ['docstring', 'src/ctx/d.py', 'Q = """\n# limit 10\nSELECT 1\n"""\n', { old_string: '# limit 10', new_string: '# limit 99' }],
+        ['heredoc body', 'scripts/ctx/e.sh', 'cat > colors.txt <<EOF\n#ff0000\n#00ff00\nEOF\n', { old_string: '#00ff00', new_string: '#0000ff' }],
+        ['inside a string', 'src/ctx/f.js', 'const s = "abc // q";\n', { old_string: '// q"', new_string: '// r"' }],
+        ['replace_all into a string', 'src/ctx/g.js', 'x = "// a"; // a\n', { old_string: '// a', new_string: '// b', replace_all: true }],
+        ['type directive', 'src/ctx/h.py', 'x = f()  # type: ignore\n', { old_string: '# type: ignore', new_string: '# ok' }],
+        ['suppression marker', 'src/ctx/i.py', 'call(cmd, shell=True)  # nosec\n', { old_string: '# nosec', new_string: '# reviewed' }],
+        ['build constraint', 'src/ctx/j.go', '//go:build linux\n\npackage j\n', { old_string: '//go:build linux', new_string: '//go:build ignore' }],
+        ['cgo preamble', 'src/ctx/k.go', 'package k\n\n// int add(int a) { return a; }\nimport "C"\n', { old_string: 'return a;', new_string: 'return a + 1;' }]
+      ];
+      for (const [label, rel, content, input] of cases) {
+        clearState();
+        const file = path.join(b3Root, rel);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content);
+        const out = b3Run('Edit', { file_path: rel, ...input });
+        assert.strictEqual(out.decision, 'deny', `${label}: ${out.result.stdout}`);
+        assert.strictEqual(b3State().trivial_allows || 0, 0, `${label}: no trivial count`);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('the trivial pass needs a readable regular file under the size bound', () => {
+      const input = { old_string: '// old', new_string: '// new' };
+      const cases = [['missing file', 'src/nf/missing.js']];
+      const big = path.join(b3Root, 'src/nf/big.js');
+      fs.mkdirSync(path.dirname(big), { recursive: true });
+      fs.writeFileSync(big, `// old\n${'x();\n'.repeat(300 * 1024)}`);
+      cases.push(['file over 1 MiB', 'src/nf/big.js']);
+      fs.mkdirSync(path.join(b3Root, 'src/nf/dir.js'), { recursive: true });
+      cases.push(['directory', 'src/nf/dir.js']);
+      if (process.platform !== 'win32' && spawnSync('mkfifo', [path.join(b3Root, 'src/nf/pipe.js')]).status === 0) {
+        cases.push(['named pipe', 'src/nf/pipe.js']);
+      }
+      for (const [label, rel] of cases) {
+        clearState();
+        const started = Date.now();
+        const result = runHook({ tool_name: 'Edit', tool_input: { file_path: rel, ...input } }, { CLAUDE_PROJECT_DIR: b3Root });
+        const hso = (parseOutput(result.stdout) || {}).hookSpecificOutput || {};
+        assert.strictEqual(hso.permissionDecision, 'deny', `${label}: ${result.stdout}`);
+        assert.ok(Date.now() - started < 10000, `${label}: returned promptly`);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('a comment edit next to closed multi-line constructs still passes', () => {
+      const rel = 'src/ctx/ok.js';
+      const file = path.join(b3Root, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'const q = `a\n${b}\n`;\nconst r = /[/"]+/g;\n\n// old\nfoo();\n');
+      const out = b3Run('Edit', { file_path: rel, old_string: '// old', new_string: '// new' });
+      assert.ok(out.context.includes(`${B3_NOTE} ${rel}`), out.result.stdout);
     })
   )
     passed++;

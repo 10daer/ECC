@@ -155,6 +155,11 @@ function writeTranscript(searches) {
 
 const src = name => path.join(projectRoot, 'src', name);
 
+function seed(file, content) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, content);
+}
+
 console.log('\n=== Testing GateGuard decision metrics ===\n');
 
 test('writes no metrics file when GATEGUARD_METRICS is unset', () => {
@@ -222,6 +227,7 @@ test('records a sensitive denial with the full question set', () => {
 
 test('records a comment-only edit as trivial', () => {
   resetState();
+  seed(src('quiet-helper-beta.js'), 'run(); // COMMENT-BODY-RHO old\n');
   const result = edit(src('quiet-helper-beta.js'), 'run(); // COMMENT-BODY-RHO old', 'run(); // COMMENT-BODY-RHO new');
   assert.strictEqual(result.decision, 'pass');
   const event = lastEvent();
@@ -292,6 +298,7 @@ test('records a subagent denial on a sensitive target', () => {
 
 test('records one line per file decided by a MultiEdit call', () => {
   resetState();
+  seed(src('multi-kappa.js'), 'x(); // a\ny(); // a\n');
   const result = runHook('pre:edit-write:gateguard-fact-force', {
     tool_name: 'MultiEdit',
     tool_input: {

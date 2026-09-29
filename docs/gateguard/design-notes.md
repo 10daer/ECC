@@ -291,8 +291,10 @@ state write, so an event is never half-recorded.
 `scripts/lib/gateguard-change-profile.js` reads the change the hook already
 receives (Edit `old_string`/`new_string`, each MultiEdit entry for the target,
 Write `content`) and derives three booleans: `touchesPublicSurface`,
-`touchesData` and `trivial`. It is pure string analysis: no file or transcript
-reads, no `RegExp` built from input, and every loop is a single linear pass.
+`touchesData` and `trivial`. It is string analysis of those texts and, for
+`trivial`, of the current file text the hook passes in (see
+[File context](#file-context)): no reads of its own, no `RegExp` built from
+input, and every loop is a single linear pass.
 
 The profile only ever removes questions, so anything uncertain yields the
 unknown profile (every question asked, never trivial): an unsupported
@@ -456,11 +458,56 @@ target passes with an `additionalContext` note after prior-search credit and
 before sibling collapse and the denial cap. It is not marked checked and does
 not touch the denial count or ordinal, so the next change that alters code is
 gated as a first touch; `trivial_allows` counts the passes (merged by maximum
-like the other counters). The profile sees only the snippet, so a comment-looking
-line inside a multi-line string that opens and closes outside the snippet
-reads as a comment; the trivial pass never marks the target checked and never
-applies to sensitive, instruction or config targets, so the next non-trivial
-change still meets the full gate.
+like the other counters). The trivial pass never marks the target checked and
+never applies to sensitive, instruction or config targets, so the next
+non-trivial change still meets the full gate.
+
+## File context
+
+A snippet alone cannot show whether a comment-looking line is a comment: it
+may sit inside a template literal, a docstring, a raw string or a heredoc
+that opens above it, follow a line that continues onto it, or lose its line
+break so the next line joins it. So an Edit is trivial only when checked
+against the file it applies to.
+
+- The hook reads the current target (never a sensitive one) itself: the path
+  is resolved like every other target, opened read-only and non-blocking,
+  and used only if `fstat` says it is a regular file of at most 1 MiB; CRLF
+  is folded to LF, as the Edit tool does. A missing, unreadable, larger or
+  special file (directory, FIFO, device) gives no file text and the edit is
+  not trivial. The text is never logged, stored or put in a message.
+- Each entry is applied in order, as the tool applies it, to the evolving
+  text. `old_string` must be non-empty and occur exactly once, or at least
+  once with `replace_all`; otherwise the tool would fail and the entry is not
+  trivial. Over 1 MiB of text after an edit, more than 8 MiB of scanning for
+  one call, or an edit window over 128 KiB is not trivial. A `new_string`
+  holding a `String.prototype.replace` pattern (`$$`, `$&`, `` $` ``, `$'`,
+  `$<`, `$` and a digit) is not trivial, in case the tool expands it.
+- The edit window runs from the start of the line before the first
+  occurrence to the end of the line holding the last occurrence's end
+  (through the next line when `old_string` ends in a line break), so a line
+  that loses or gains a break is compared joined. The window before and
+  after the replacement is compared with the lexer rules above.
+- The text before the window must end in plain code: not inside a comment,
+  string, template literal (including `${...}`), text block, raw string,
+  heredoc or here-string, and not after a line continuation (`\` in C-family,
+  Python and POSIX shells, a backtick in PowerShell, `^` in batch). A
+  per-language scanner decides; anything it cannot follow makes the edit not
+  trivial: a JS `/` after `}` with another `/` or quote later on the line
+  (regex or division), JSX in `.js`/`.jsx`/`.tsx` (`.ts`, `.mts` and `.cts`
+  allow `<` generics), `<!--` and `-->`, a Python f-string whose
+  replacement field holds its own quote, a comment or a line break, C#
+  raw strings and interpolation holes with quotes or braces, Kotlin `${`
+  inside strings, shell command substitution holding `case`, a heredoc or
+  a comment, a heredoc whose terminator never comes, and nesting deeper than
+  eight levels.
+- Go files that import `"C"` are never trivial: the comment before the import
+  is C code.
+
+The scanner was checked against real tokenizers over this repository: every
+line start it calls plain code in 801 JS files (espree) and 146 Python files
+(`tokenize`) is outside strings, templates, regex literals and comments and
+not a backslash continuation.
 
 ## Questions from the change profile
 

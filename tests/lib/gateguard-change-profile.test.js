@@ -28,7 +28,10 @@ function test(desc, fn) {
   }
 }
 
-const edit = (filePath, oldString, newString) => profileChange({ filePath, tool: 'Edit', edits: [{ old_string: oldString, new_string: newString }] });
+const edit = (filePath, oldString, newString) =>
+  profileChange({ filePath, tool: 'Edit', edits: [{ old_string: oldString, new_string: newString }], fileText: oldString });
+const inFile = (filePath, fileText, oldString, newString, replaceAll = false) =>
+  profileChange({ filePath, tool: 'Edit', edits: [{ old_string: oldString, new_string: newString, replace_all: replaceAll }], fileText }).trivial;
 const write = (filePath, content) => profileChange({ filePath, tool: 'Write', content });
 const surface = (filePath, oldString, newString) => edit(filePath, oldString, newString).touchesPublicSurface;
 const data = (filePath, oldString, newString) => edit(filePath, oldString, newString).touchesData;
@@ -533,9 +536,117 @@ test('Write, unknown languages and MultiEdit with any non-trivial entry are not 
   assert.strictEqual(write('a.js', '// only a comment\n').trivial, false);
   assert.strictEqual(trivial('a.rb', '# a', '# b'), false);
   assert.strictEqual(trivial('a.fish', '# a', '# b'), false);
-  const multi = edits => profileChange({ filePath: 'a.js', tool: 'Edit', edits });
+  const multi = edits => profileChange({ filePath: 'a.js', tool: 'Edit', edits, fileText: '// a\nfoo();\n// c\nf(1);\n' });
   assert.strictEqual(multi([{ old_string: '// a', new_string: '// b' }, { old_string: '// c', new_string: '// d' }]).trivial, true);
   assert.strictEqual(multi([{ old_string: '// a', new_string: '// b' }, { old_string: 'f(1)', new_string: 'f(2)' }]).trivial, false);
+});
+
+// ── file context ──
+console.log('\nfile context:');
+
+test('an edit is trivial only against the file it applies to', () => {
+  const change = { filePath: 'a.js', tool: 'Edit', edits: [{ old_string: '// a', new_string: '// b' }] };
+  assert.strictEqual(profileChange(change).trivial, false, 'no file text');
+  assert.strictEqual(profileChange({ ...change, fileText: null }).trivial, false, 'unreadable file');
+  assert.strictEqual(profileChange({ ...change, fileText: 'x();\n' }).trivial, false, 'old_string not in the file');
+  assert.strictEqual(profileChange({ ...change, fileText: '// a\n// a\n' }).trivial, false, 'ambiguous without replace_all');
+  assert.strictEqual(profileChange({ ...change, fileText: 'x();\n// a\ny();\n' }).trivial, true);
+  assert.strictEqual(inFile('a.js', 'x();\n', '', '// a'), false, 'empty old_string');
+  assert.strictEqual(inFile('a.js', '// a\n// a\n', '// a', '// b', true), true, 'replace_all over comments');
+  assert.strictEqual(inFile('a.js', `// a\n${'x();\n'.repeat(10)}`, '// a', '// b'), true);
+  assert.strictEqual(inFile('a.js', `// a\n${'x'.repeat(2 * 1024 * 1024)}`, '// a', '// b'), false, 'file over the bound');
+  for (const pattern of ["$'", '$`', '$&', '$$', '$1', '$<a>']) {
+    assert.strictEqual(inFile('a.js', 'x();\n// a\ny();\n', '// a', `// b ${pattern}`), false, `replacement pattern ${pattern}`);
+  }
+  assert.strictEqual(inFile('a.js', 'x();\n// a\ny();\n', '// a', '// costs $5 or $x'), false, 'a dollar digit reads as a pattern');
+  assert.strictEqual(inFile('a.js', 'x();\n// a\ny();\n', '// a', '// costs $ x'), true);
+});
+
+test('comment-looking text inside a multi-line construct of the file is not trivial', () => {
+  const cases = [
+    ['a.js', 'const q = `\n  // hint\n  SELECT 1\n`;\n', '  // hint', '  // other'],
+    ['a.js', 'const q = html`\n  <p>${x}</p>\n  // a\n`;\n', '  // a', '  // b'],
+    ['a.js', "const s = 'a\\\n// a';\n", "// a';", "// b';"],
+    ['a.js', 'const s = "abc // q";\n', '// q"', '// r"'],
+    ['a.js', 'x = "// a"; // a\n', '// a', '// b', true],
+    ['a.js', '/* start\nmiddle\n// a */ x(1);\n', 'x(1)', 'x(2)'],
+    ['a.ts', 'const t = `\n${a}\n// a\n`;\n', '// a', '// b'],
+    ['a.py', 'Q = """\n# limit 10\nSELECT 1\n"""\n', '# limit 10', '# limit 99'],
+    ['a.py', "Q = f'''\n{x}\n# a\n'''\n", '# a', '# b'],
+    ['a.py', 'Q = (\n    "a"\n)\nS = """x\ny\n# a\n"""\n', '# a', '# b'],
+    ['a.go', 'var q = `\nfirst\n// a\n`\n', '// a', '// b'],
+    ['a.rs', 'let s = "line\nnext\n// a";\n', '// a";', '// b";'],
+    ['a.rs', 'let s = r#"\nx\n// a\n"#;\n', '// a', '// b'],
+    ['a.rs', '/* a /* b */\nx\n// c */ y(1);\n', 'y(1)', 'y(2)'],
+    ['a.cpp', 'auto s = R"x(\nfirst\n// a\n)x";\n', '// a', '// b'],
+    ['a.cs', 'var s = @"\nfirst\n// a";\n', '// a";', '// b";'],
+    ['a.java', 'String s = """\nfirst\n// a\n""";\n', '// a', '// b'],
+    ['a.kt', 'val s = """\nfirst\n// a\n"""\n', '// a', '// b'],
+    ['a.sh', 'cat > colors.txt <<EOF\n#ff0000\n#00ff00\nEOF\n', '#00ff00', '#0000ff'],
+    ['a.sh', "echo 'multi\nline\n# a'\n", "# a'", "# b'"],
+    ['a.sh', 'x="\nfirst\n# a"\n', '# a"', '# b"'],
+    ['a.ps1', '$s = @"\nfirst\n# a\n"@\n', '# a', '# b'],
+    ['a.ps1', "$s = 'multi\nline\n# a'\n", "# a'", "# b'"],
+    ['a.ps1', '<# help\nfirst\n# a #> Get-Item a\n', 'Get-Item a', 'Remove-Item a']
+  ];
+  for (const [file, text, before, after, all] of cases) {
+    assert.strictEqual(inFile(file, text, before, after, all), false, `${file}: ${JSON.stringify(text)}`);
+  }
+});
+
+test('an edit next to a continued line is not trivial', () => {
+  const cases = [
+    ['a.c', '#define A 1 \\\n// c\nint x;\n', '// c\n', ''],
+    ['a.c', '#define A(x) \\\n  (x) + \\\n  1\n// c\n', '// c', '// d'],
+    ['a.py', 'y = 1 + \\\n    2\n# c\nz()\n', '# c\n', ''],
+    ['a.sh', 'make \\\n  all\n# c\nrm x\n', '# c\n', ''],
+    ['a.ps1', 'Get-Item `\n  a\n# c\nRemove-Item b\n', '# c\n', ''],
+    ['a.bat', 'echo a ^\nb\nREM c\necho d\n', 'REM c\n', '']
+  ];
+  for (const [file, text, before, after] of cases) {
+    assert.strictEqual(inFile(file, text, before, after), false, `${file}: ${JSON.stringify(text)}`);
+  }
+});
+
+test('an edit that joins or splits a line across the snippet boundary is not trivial', () => {
+  assert.strictEqual(inFile('a.js', 'a();\n// c\nb();\n', '// c\n', '// c '), false, 'next line joins the comment');
+  assert.strictEqual(inFile('a.js', 'a(); // x\nb();\n', '\nb();', ' b();'), false, 'line joins the previous comment');
+  assert.strictEqual(inFile('a.py', 'x = 1\n# c\nimport os\n', '# c\n', '# c'), false);
+  assert.strictEqual(inFile('a.sh', 'echo a\n# c\nrm -rf b\n', '# c\n', '# c '), false);
+});
+
+test('comment edits after closed multi-line constructs stay trivial', () => {
+  const cases = [
+    ['a.js', 'const q = `a\n${b}\nc`;\nconst r = /[/"]+/g;\nconst d = x / 2;\n\n// old\nfoo();\n', '// old', '// new'],
+    ['a.js', '#!/usr/bin/env node\nconst s = "a // b";\n\n// old\nfoo();\n', '// old', '// new'],
+    ['a.ts', 'function f<T>(x: Array<T>): T {\n  return x[0];\n}\n\n// old\nfoo();\n', '// old', '// new'],
+    ['a.py', 'def f():\n    """Doc with # hash\n    and more.\n    """\n    return f"{x!r}"\n\n# old\nfoo()\n', '# old', '# new'],
+    ['a.go', 'var q = `raw\nstring`\n\n// old\nfunc f() {}\n', '// old', '// new'],
+    ['a.rs', "fn f<'a>(s: &'a str) -> char {\n    let r = r#\"raw \" quote\"#;\n    '\"'\n}\n\n// old\nfn g() {}\n", '// old', '// new'],
+    ['a.cpp', 'auto s = R"x(\nraw )" still\n)x";\n\n// old\nint y;\n', '// old', '// new'],
+    ['a.cs', 'var s = @"a\n""b""";\nvar t = $"{name} is {age:D2}";\n\n// old\nint y;\n', '// old', '// new'],
+    ['a.java', 'String s = """\ntext\n""";\n\n// old\nint y;\n', '// old', '// new'],
+    ['a.sh', "cat <<'EOF'\n# body\nEOF\necho 'a\nb'\n\n# old\nmake\n", '# old', '# new'],
+    ['a.ps1', '$s = @"\nbody # x\n"@\n<# help\n#>\n\n# old\nGet-Item a\n', '# old', '# new'],
+    ['a.bat', 'echo a ^\nb\n\nREM old\necho c\n', 'REM old', 'REM new']
+  ];
+  for (const [file, text, before, after] of cases) {
+    assert.strictEqual(inFile(file, text, before, after), true, `${file}: ${JSON.stringify(text)}`);
+  }
+});
+
+test('file context work stays linear on hostile files', () => {
+  const size = 512 * 1024;
+  const texts = ['`'.repeat(size), '/*'.repeat(size / 2), '"\\'.repeat(size / 2), '<<a\n'.repeat(size / 4), "r#'".repeat(size / 3), '${'.repeat(size / 2), '\\\n'.repeat(size / 2)];
+  for (const [index, text] of texts.entries()) {
+    for (const file of ['a.js', 'a.py', 'a.rs', 'a.cpp', 'a.cs', 'a.sh', 'a.ps1', 'a.bat']) {
+      const start = process.hrtime.bigint();
+      inFile(file, `${text}\n// a\n`, '// a', '// b');
+      inFile(file, `${'// a\n'.repeat(1000)}${text}`, '// a', '// b', true);
+      const ms = Number(process.hrtime.bigint() - start) / 1e6;
+      assert.ok(ms < 500, `text ${index} in ${file} took ${ms.toFixed(1)} ms`);
+    }
+  }
 });
 
 test('comments that mention exports or data do not stop an edit from being trivial', () => {

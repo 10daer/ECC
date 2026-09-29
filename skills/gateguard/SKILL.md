@@ -414,24 +414,31 @@ It applies only to the extensions listed in
 entry reads cleanly:
 
 - comments are `//` and `/* */` (C family), `#` (Python), `#` at the start of
-  a word (shell), `#` and `<# #>` (PowerShell, not `#Requires`), or `REM`
-  lines (batch); C preprocessor lines, shebang lines and batch `::` labels
-  are code; whitespace inside strings, line breaks between code, and
+  a word (shell), `#` and `<# #>` (PowerShell), or `REM` lines (batch);
+  C preprocessor lines and batch `::` labels are code; directive comments are
+  code too (shebangs, encoding cookies, `# type:`, `# noqa`, `# nosec`,
+  `// @ts-...`, `eslint-...`, `//go:build`, `// +build`, `//go:embed`, Rust
+  doc comments, `#Requires`, `shellcheck`, `NOLINT`, `NOSONAR`, fallthrough
+  markers and similar); whitespace inside strings, line breaks between code, and
   the presence of whitespace between tokens are code (`a+b` → `a + b` is not
   trivial);
 - Python indentation of code lines is code;
 - never trivial: a Write; any multi-line or raw string form (backticks, triple
   quotes, `r"`, `R"`, `@"`, `$"`, f-strings, Kotlin `$`), a string running to
-  the end of a line, a line comment ending in `\`, `??/`, a nested or
-  unterminated block comment; in JS/TS any `/` outside a comment (regex versus
+  the end of a line, a line comment or code line ending in `\`, `??/`, a
+  nested or unterminated block comment; in JS/TS any `/` outside a comment (regex versus
   division), JSX-like tags, and `-->`; in shell scripts heredocs, backticks,
   `$(` inside double quotes, `$'...'`, line continuations and here-strings
   (see the design notes for the full list);
 - config, instruction, and sensitive targets never pass this way.
 
-Only the snippet is read, so a comment-looking line inside a multi-line string
-that opens and closes outside the snippet reads as a comment; because the
-file stays unchecked, the next real change is still gated.
+The edit is also checked against the current file (a regular file of at
+most 1 MiB, read by the hook and never stored): `old_string` must be found as
+the Edit tool would apply it, the lines around the change must compare equal
+as above, and the text before them must end in plain code, not inside a
+template literal, docstring, raw string, heredoc or here-string and not after
+a line continuation. A missing, unreadable or larger file, or a Go file that
+imports `"C"`, never passes this way.
 
 ### Same-turn sibling creation collapse
 

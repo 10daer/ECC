@@ -2112,9 +2112,43 @@ function subagentSensitiveDenial(filePath, data, isWrite) {
 }
 
 // --- Change profile ---
+// see docs/gateguard/design-notes.md#file-context
 
-function changeProfileFor(toolName, filePath, edits, content) {
-  return profileChange({ filePath, tool: toolName === 'Write' ? 'Write' : 'Edit', edits, content });
+const MAX_CONTEXT_FILE_BYTES = 1024 * 1024;
+
+function readTargetText(filePath, data) {
+  let fd = null;
+  try {
+    const target = resolveTargetPath(filePath, data);
+    if (!target) return null;
+    fd = fs.openSync(target.resolved, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > MAX_CONTEXT_FILE_BYTES) return null;
+    const buffer = Buffer.alloc(stat.size);
+    let read = 0;
+    while (read < buffer.length) {
+      const n = fs.readSync(fd, buffer, read, buffer.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return buffer.toString('utf8', 0, read).replace(/\r\n/g, '\n');
+  } catch (_) {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+}
+
+function changeProfileFor(toolName, filePath, edits, content, data) {
+  const tool = toolName === 'Write' ? 'Write' : 'Edit';
+  const fileText = tool === 'Edit' ? readTargetText(filePath, data) : null;
+  return profileChange({ filePath, tool, edits, content, fileText });
 }
 
 function entriesFor(edits, fileKey, data) {
@@ -2248,7 +2282,7 @@ function gate(rawInput) {
         recordDecision('credit', 'prior-search', { target: filePath, cls, sensitive });
         return { additionalContext: creditNote(credit, filePath), exitCode: 0 };
       }
-      const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content);
+      const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content, data);
       if (toolName === 'Edit' && isTrivialChange(cls, sensitive, profile)) {
         if (!countTrivialAllow()) {
           return allowWithStateWarning();
@@ -2322,7 +2356,7 @@ function gate(rawInput) {
           notes.push(creditNote(credit, filePath));
           continue;
         }
-        const profile = sensitive ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data));
+        const profile = sensitive ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data), undefined, data);
         if (isTrivialChange(cls, sensitive, profile)) {
           if (!countTrivialAllow()) {
             return allowWithStateWarning();
