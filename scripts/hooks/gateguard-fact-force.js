@@ -30,9 +30,9 @@ const { classifyPowerShellDestructiveCommand } = require('../lib/powershell-dest
 const { stripHeredocBodies } = require('./gateguard-heredoc');
 const {
   WINDOWS_PATH_PATTERN,
-  CLASS_QUESTIONS,
-  CLASS_CONDENSED_HINTS,
-  QUOTE_INSTRUCTION,
+  questionIdsFor,
+  questionText,
+  condensedHintFor,
   resolveTargetPath,
   canonicalPathKey,
   classifyTarget,
@@ -42,6 +42,7 @@ const {
 } = require('../lib/gateguard-target-class');
 const { scanCurrentTurn, createTurnScanner, currentTurnId, transcriptPathFor } = require('../lib/gateguard-turn-scan');
 const { createSearchEvidence } = require('../lib/gateguard-search-evidence');
+const { profileChange } = require('../lib/gateguard-change-profile');
 const {
   getDenialCount,
   getCreditedCount,
@@ -1829,45 +1830,9 @@ function batchSiblingWarning(safePath) {
   );
 }
 
-function editGateMsg(filePath) {
+function firstTouchGateMsg(filePath, isWrite, cls, profile) {
   const safe = sanitizePath(filePath);
-  return [
-    '[Fact-Forcing Gate]',
-    '',
-    `Before editing ${safe}, present these facts:`,
-    '',
-    '1. List ALL files that import/require this file (search the tree — Glob/Grep, or find/grep via Bash)',
-    '2. List the public functions/classes affected by this change',
-    '3. If this file reads/writes data files, show field names, structure, and date format (use redacted or synthetic values, not raw production data)',
-    "4. Quote the user's current instruction verbatim",
-    '',
-    batchSiblingWarning(safe),
-    '',
-    'Present the facts, then retry the same operation.'
-  ].join('\n');
-}
-
-function writeGateMsg(filePath) {
-  const safe = sanitizePath(filePath);
-  return [
-    '[Fact-Forcing Gate]',
-    '',
-    `Before creating ${safe}, present these facts:`,
-    '',
-    '1. Name the file(s) and line(s) that will call this new file',
-    '2. Confirm no existing file serves the same purpose (search the tree — Glob/Grep, or find/grep via Bash)',
-    '3. If this file reads/writes data files, show field names, structure, and date format (use redacted or synthetic values, not raw production data)',
-    "4. Quote the user's current instruction verbatim",
-    '',
-    batchSiblingWarning(safe),
-    '',
-    'Present the facts, then retry the same operation.'
-  ].join('\n');
-}
-
-function classGateMsg(filePath, cls, isWrite) {
-  const safe = sanitizePath(filePath);
-  const questions = [...CLASS_QUESTIONS[cls](isWrite), QUOTE_INSTRUCTION];
+  const questions = questionIdsFor(cls, isWrite, profile).map(questionText);
   return [
     '[Fact-Forcing Gate]',
     '',
@@ -1881,23 +1846,14 @@ function classGateMsg(filePath, cls, isWrite) {
   ].join('\n');
 }
 
-function firstTouchGateMsg(filePath, isWrite, cls) {
-  if (!CLASS_QUESTIONS[cls]) {
-    return isWrite ? writeGateMsg(filePath) : editGateMsg(filePath);
-  }
-  return classGateMsg(filePath, cls, isWrite);
-}
-
 /**
  * Condensed single-line denial used after the full-block budget is spent
  * (#2142). Carries the denial ordinal so consecutive denials differ
  * textually, and a one-line recovery hint instead of the multi-line block.
  */
-function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = false) {
+function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = false, profile = null) {
   const safe = sanitizePath(filePath);
-  const hint = CLASS_CONDENSED_HINTS[cls]
-    ? CLASS_CONDENSED_HINTS[cls](action === 'creation')
-    : "briefly state importers/callers, affected API, data schemas if any, and the user's verbatim instruction, then retry.";
+  const hint = condensedHintFor(cls, action === 'creation', profile);
   return (
     `[Fact-Forcing Gate] (denial #${ordinal} this session) First ${action} of ${safe}: ` +
     `${hint} ` +
@@ -1916,12 +1872,12 @@ function withSensitiveNote(message) {
   return `${message.slice(0, at)}${SENSITIVE_TARGET_NOTE}\n\n${message.slice(at)}`;
 }
 
-function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive }) {
+function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile }) {
   if (denials > getFullDenialBudget()) {
     const action = isWrite ? 'creation' : 'edit';
-    return denyResult(condensedGateMsg(action, filePath, denials, cls, sensitive), { includeRecoveryHint: false });
+    return denyResult(condensedGateMsg(action, filePath, denials, cls, sensitive, profile), { includeRecoveryHint: false });
   }
-  const message = firstTouchGateMsg(filePath, isWrite, cls);
+  const message = firstTouchGateMsg(filePath, isWrite, cls, profile);
   return denyResult(sensitive ? withSensitiveNote(message) : message, {
     narrowRecoveryHint: EDIT_WRITE_NARROW_RECOVERY_HINT
   });
@@ -2052,6 +2008,16 @@ function siblingNote(gate) {
   );
 }
 
+// --- Change profile ---
+
+function changeProfileFor(toolName, filePath, edits, content) {
+  return profileChange({ filePath, tool: toolName === 'Write' ? 'Write' : 'Edit', edits, content });
+}
+
+function entriesFor(edits, fileKey, data) {
+  return edits.filter(edit => edit && typeof edit.file_path === 'string' && canonicalPathKey(edit.file_path, data) === fileKey);
+}
+
 // --- Core logic (exported for run-with-flags.js) ---
 
 function run(rawInput) {
@@ -2120,7 +2086,8 @@ function run(rawInput) {
         // see docs/gateguard/design-notes.md#denial-cap
         return rawInput;
       }
-      return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive });
+      const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content);
+      return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, profile });
     }
 
     return rawInput; // allow
@@ -2157,7 +2124,8 @@ function run(rawInput) {
           // see docs/gateguard/design-notes.md#denial-cap
           continue;
         }
-        return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive });
+        const profile = sensitive ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data));
+        return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, profile });
       }
     }
     if (creditNotes.length > 0) {

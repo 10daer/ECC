@@ -148,33 +148,65 @@ function classifyTargetFor(filePath, data) {
 const SEARCH_THE_TREE = '(search the tree — Glob/Grep, or find/grep via Bash)';
 const QUOTE_INSTRUCTION = "Quote the user's current instruction verbatim";
 
-const CLASS_QUESTIONS = {
-  instruction: () => [
-    'Name the harness/loader that reads this file (Claude Code, Codex, Cursor, OpenCode, …) and when it loads it',
-    'Describe what agent behaviour changes as a result',
-    `Confirm no existing instruction, skill, or agent file already covers this ${SEARCH_THE_TREE}`
-  ],
-  test: () => [
-    'Name what behaviour is under test and which module/function it exercises',
-    `Name the existing test file(s) covering this module, or confirm none exist ${SEARCH_THE_TREE}`
-  ],
-  prose: isWrite =>
-    isWrite
-      ? [
-        `Name any existing doc this supersedes or duplicates ${SEARCH_THE_TREE}`,
-        'State where it will be linked or referenced from',
-        'Explain why a new file rather than editing an existing one'
-      ]
-      : [
-        `List other docs or code that reference the section being changed ${SEARCH_THE_TREE}`,
-        'State what the change corrects or adds'
-      ],
-  config: () => [
-    'Name which process/tool reads this file and when',
-    'Describe the effect of the change',
-    'Confirm no secrets or credentials are being written in plain text'
-  ]
+const QUESTION_TEXT = Object.freeze({
+  importers: `List ALL files that import/require this file ${SEARCH_THE_TREE}`,
+  'public-api': 'List the public functions/classes affected by this change',
+  'local-callers': `List the call sites in this file or its module that rely on the changed behaviour ${SEARCH_THE_TREE}`,
+  callers: 'Name the file(s) and line(s) that will call this new file',
+  'no-duplicate': `Confirm no existing file serves the same purpose ${SEARCH_THE_TREE}`,
+  'data-schema':
+    'If this file reads/writes data files, show field names, structure, and date format (use redacted or synthetic values, not raw production data)',
+  loader: 'Name the harness/loader that reads this file (Claude Code, Codex, Cursor, OpenCode, …) and when it loads it',
+  'behaviour-change': 'Describe what agent behaviour changes as a result',
+  'no-duplicate-instruction': `Confirm no existing instruction, skill, or agent file already covers this ${SEARCH_THE_TREE}`,
+  'under-test': 'Name what behaviour is under test and which module/function it exercises',
+  'existing-tests': `Name the existing test file(s) covering this module, or confirm none exist ${SEARCH_THE_TREE}`,
+  supersedes: `Name any existing doc this supersedes or duplicates ${SEARCH_THE_TREE}`,
+  'linked-from': 'State where it will be linked or referenced from',
+  'why-new-file': 'Explain why a new file rather than editing an existing one',
+  references: `List other docs or code that reference the section being changed ${SEARCH_THE_TREE}`,
+  'corrects-or-adds': 'State what the change corrects or adds',
+  'config-reader': 'Name which process/tool reads this file and when',
+  'config-effect': 'Describe the effect of the change',
+  'no-plaintext-secrets': 'Confirm no secrets or credentials are being written in plain text',
+  'quote-instruction': QUOTE_INSTRUCTION
+});
+
+const CLASS_QUESTION_IDS = {
+  instruction: () => ['loader', 'behaviour-change', 'no-duplicate-instruction'],
+  test: () => ['under-test', 'existing-tests'],
+  prose: isWrite => (isWrite ? ['supersedes', 'linked-from', 'why-new-file'] : ['references', 'corrects-or-adds']),
+  config: () => ['config-reader', 'config-effect', 'no-plaintext-secrets']
 };
+
+const CLASS_QUESTIONS = Object.fromEntries(
+  Object.entries(CLASS_QUESTION_IDS).map(([cls, ids]) => [cls, isWrite => ids(isWrite).map(id => QUESTION_TEXT[id])])
+);
+
+// see docs/gateguard/design-notes.md#questions-from-the-change-profile
+function codeQuestionIds(isWrite, profile) {
+  const known = Boolean(profile) && profile.known === true;
+  const surface = !known || profile.touchesPublicSurface !== false;
+  const data = !known || profile.touchesData !== false;
+  const opening = isWrite ? ['callers', 'no-duplicate'] : surface ? ['importers', 'public-api'] : ['local-callers'];
+  return data ? [...opening, 'data-schema'] : opening;
+}
+
+/** Stable ids of the first-touch questions for a class, action and change profile. */
+function questionIdsFor(cls, isWrite, profile) {
+  const ids = Object.hasOwn(CLASS_QUESTION_IDS, cls) ? CLASS_QUESTION_IDS[cls](Boolean(isWrite)) : codeQuestionIds(Boolean(isWrite), profile);
+  return [...ids, 'quote-instruction'];
+}
+
+/** Question text for an id from `questionIdsFor`. */
+function questionText(id) {
+  return Object.hasOwn(QUESTION_TEXT, id) ? QUESTION_TEXT[id] : '';
+}
+
+const CODE_CONDENSED_HINT =
+  "briefly state importers/callers, affected API, data schemas if any, and the user's verbatim instruction, then retry.";
+const LOCAL_CODE_CONDENSED_HINT =
+  "briefly state the call sites in this file or its module that rely on the change, data schemas if any, and the user's verbatim instruction, then retry.";
 
 const CLASS_CONDENSED_HINTS = {
   instruction: () =>
@@ -188,6 +220,12 @@ const CLASS_CONDENSED_HINTS = {
   config: () =>
     "briefly state which process reads this file, the effect of the change, that no secrets are written in plain text, and the user's verbatim instruction, then retry."
 };
+
+/** One-line condensed hint matching `questionIdsFor`. */
+function condensedHintFor(cls, isWrite, profile) {
+  if (Object.hasOwn(CLASS_CONDENSED_HINTS, cls)) return CLASS_CONDENSED_HINTS[cls](Boolean(isWrite));
+  return questionIdsFor(cls, isWrite, profile).includes('local-callers') ? LOCAL_CODE_CONDENSED_HINT : CODE_CONDENSED_HINT;
+}
 
 // --- Sensitive targets ---
 // see docs/gateguard/design-notes.md#sensitive-targets
@@ -331,6 +369,9 @@ module.exports = {
   CLASS_QUESTIONS,
   CLASS_CONDENSED_HINTS,
   QUOTE_INSTRUCTION,
+  questionIdsFor,
+  questionText,
+  condensedHintFor,
   resolveTargetPath,
   canonicalPathKey,
   classifyTarget,

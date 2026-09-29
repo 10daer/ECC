@@ -81,8 +81,10 @@ their absolute path. A Windows-style path has no real location on a POSIX host
 The first matching class wins: instruction, test, prose, config, code (the
 fallback). Cursor `.mdc` rule files are instructions wherever they live. A
 basename starting with `.env` is config unless it has a code extension
-(`.env.example.ts` is source). Code targets keep the original four questions;
-other classes get class-specific questions and a class-specific condensed hint.
+(`.env.example.ts` is source). Code targets ask the original four questions,
+narrowed by the change profile (see
+[Questions from the change profile](#questions-from-the-change-profile)); other
+classes get class-specific questions and a class-specific condensed hint.
 
 ## Worktree prefix
 
@@ -344,3 +346,32 @@ line inside a multi-line string that opens and closes outside the snippet
 reads as a comment; the trivial pass never marks the target checked and never
 applies to sensitive, instruction or config targets, so the next non-trivial
 change still meets the full gate.
+
+## Questions from the change profile
+
+Every question has a stable id, and `questionIdsFor(class, isWrite, profile)`
+returns the ids in the order asked, so later measurement can record which
+questions were asked without storing text.
+
+| Target | Profile | Question ids |
+|---|---|---|
+| code Edit/MultiEdit | unknown | `importers`, `public-api`, `data-schema`, `quote-instruction` |
+| code Edit/MultiEdit | public surface | `importers`, `public-api`, [`data-schema`], `quote-instruction` |
+| code Edit/MultiEdit | no public surface | `local-callers`, [`data-schema`], `quote-instruction` |
+| code Write | unknown | `callers`, `no-duplicate`, `data-schema`, `quote-instruction` |
+| code Write | known | `callers`, `no-duplicate`, [`data-schema`], `quote-instruction` |
+| instruction | any | `loader`, `behaviour-change`, `no-duplicate-instruction`, `quote-instruction` |
+| test | any | `under-test`, `existing-tests`, `quote-instruction` |
+| prose Write | any | `supersedes`, `linked-from`, `why-new-file`, `quote-instruction` |
+| prose Edit | any | `references`, `corrects-or-adds`, `quote-instruction` |
+| config | any | `config-reader`, `config-effect`, `no-plaintext-secrets`, `quote-instruction` |
+
+`[data-schema]` is asked only when `touchesData`. With an unknown profile the
+code text is byte-identical to the fixed four questions. Sensitive targets are
+never profiled, so they always get the full code questions. Instruction and
+config questions carry no change-dependent item, and the test and prose items
+do not depend on what the change touches, so the profile leaves those classes
+alone. For a MultiEdit, the denied file's profile covers every entry for that
+file (same canonical key); entries for other files do not count. The condensed
+denial uses the local-callers hint when `local-callers` is asked, else the
+original code hint.

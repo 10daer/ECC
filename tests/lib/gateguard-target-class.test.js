@@ -16,6 +16,10 @@ const hookPath = path.join(__dirname, '..', '..', 'scripts', 'hooks', 'gateguard
 const {
   CLASS_QUESTIONS,
   CLASS_CONDENSED_HINTS,
+  QUOTE_INSTRUCTION,
+  questionIdsFor,
+  questionText,
+  condensedHintFor,
   COLLAPSIBLE_CLASSES,
   canonicalPathKey,
   classifyTarget,
@@ -312,6 +316,48 @@ test('every non-code class has questions and a condensed hint; code has neither'
   assert.strictEqual(CLASS_QUESTIONS.code, undefined);
   assert.strictEqual(CLASS_CONDENSED_HINTS.code, undefined);
   assert.notDeepStrictEqual(CLASS_QUESTIONS.prose(true), CLASS_QUESTIONS.prose(false), 'prose Write and Edit differ');
+});
+
+test('questionIdsFor gives stable ids per class, action and change profile', () => {
+  const known = (touchesPublicSurface, touchesData) => ({ known: true, language: 'js', touchesPublicSurface, touchesData, trivial: false });
+  const table = [
+    ['code', false, null, ['importers', 'public-api', 'data-schema', 'quote-instruction']],
+    ['code', true, null, ['callers', 'no-duplicate', 'data-schema', 'quote-instruction']],
+    ['code', false, { known: false, touchesPublicSurface: false, touchesData: false }, ['importers', 'public-api', 'data-schema', 'quote-instruction']],
+    ['code', false, known(true, true), ['importers', 'public-api', 'data-schema', 'quote-instruction']],
+    ['code', false, known(true, false), ['importers', 'public-api', 'quote-instruction']],
+    ['code', false, known(false, true), ['local-callers', 'data-schema', 'quote-instruction']],
+    ['code', false, known(false, false), ['local-callers', 'quote-instruction']],
+    ['code', true, known(false, false), ['callers', 'no-duplicate', 'quote-instruction']],
+    ['code', true, known(true, true), ['callers', 'no-duplicate', 'data-schema', 'quote-instruction']],
+    ['instruction', false, known(false, false), ['loader', 'behaviour-change', 'no-duplicate-instruction', 'quote-instruction']],
+    ['test', true, known(false, false), ['under-test', 'existing-tests', 'quote-instruction']],
+    ['prose', true, null, ['supersedes', 'linked-from', 'why-new-file', 'quote-instruction']],
+    ['prose', false, null, ['references', 'corrects-or-adds', 'quote-instruction']],
+    ['config', false, known(false, false), ['config-reader', 'config-effect', 'no-plaintext-secrets', 'quote-instruction']],
+    ['__proto__', false, null, ['importers', 'public-api', 'data-schema', 'quote-instruction']]
+  ];
+  for (const [cls, isWrite, profile, expected] of table) {
+    const ids = questionIdsFor(cls, isWrite, profile);
+    assert.deepStrictEqual(ids, expected, `${cls} ${isWrite ? 'Write' : 'Edit'} ${JSON.stringify(profile)}`);
+    for (const id of ids) assert.ok(questionText(id), `${id} has text`);
+  }
+  assert.strictEqual(questionText('constructor'), '');
+  assert.strictEqual(questionText('missing'), '');
+});
+
+test('class question texts are unchanged by the ids', () => {
+  assert.deepStrictEqual(questionIdsFor('prose', true).slice(0, -1).map(questionText), CLASS_QUESTIONS.prose(true));
+  assert.deepStrictEqual(questionIdsFor('config', false).slice(0, -1).map(questionText), CLASS_QUESTIONS.config(false));
+  assert.strictEqual(questionText('quote-instruction'), QUOTE_INSTRUCTION);
+});
+
+test('condensedHintFor matches the question set', () => {
+  const local = { known: true, touchesPublicSurface: false, touchesData: false };
+  assert.ok(condensedHintFor('code', false, local).includes('call sites in this file or its module'));
+  assert.ok(condensedHintFor('code', false, null).startsWith('briefly state importers/callers'));
+  assert.ok(condensedHintFor('code', true, local).startsWith('briefly state importers/callers'));
+  assert.strictEqual(condensedHintFor('test', false, local), CLASS_CONDENSED_HINTS.test(false));
 });
 
 // ── isSensitiveTarget ──

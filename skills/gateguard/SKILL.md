@@ -64,6 +64,12 @@ Before editing {file_path}, present these facts:
 4. Quote the user's current instruction verbatim
 ```
 
+These four are the full set, asked whenever the change cannot be read with
+confidence. When it can (see [Questions fit the change](#questions-fit-the-change)),
+an edit that touches no public declaration asks instead for the call sites in
+the file or its module that rely on the changed behaviour, and item 3 is
+dropped when the change handles no data.
+
 ### Write Gate (first new file creation)
 
 For **code** targets the Write gate asks:
@@ -77,6 +83,37 @@ Before creating {file_path}, present these facts:
    and date format (use redacted or synthetic values, not raw production data)
 4. Quote the user's current instruction verbatim
 ```
+
+Item 3 is dropped when the new content handles no data.
+
+### Questions fit the change
+
+For **code** targets the gate reads the change it is about to allow (Edit
+`old_string`/`new_string`, every MultiEdit entry for the file, Write
+`content`) and decides two things:
+
+- **Public surface:** a line on either side declares or exposes a public name.
+  JS/TS: `export`, `exports`, `public`, `declare` (`.d.ts` files always); Python:
+  `def`/`class` not starting with `_`, dunders, `__all__`, a module-level public
+  assignment (`__init__.py` always); Go: capitalised `func`/`type`/`var`/`const`
+  names, `package`, lines starting with a capital; Rust: `pub`, `impl`, `trait`,
+  `#[macro_export]`. Java, Kotlin, C#, C and C++, and every Write, always count
+  as touching it. Touching it keeps questions 1 and 2; otherwise both are
+  replaced by "List the call sites in this file or its module that rely on the
+  changed behaviour".
+- **Data:** words for file I/O, formats (`json`, `csv`, `yaml`, …),
+  serialisation, schemas, SQL and dates on either side. Without them the data
+  question is dropped.
+
+Supported extensions: `.js .mjs .cjs .jsx .ts .tsx .mts .cts .py .pyi .go .rs
+.java .kt .kts .cs .c .h .cc .cpp .cxx .hpp .hh .hxx`. Any other extension, a
+missing or non-string field, more than 64 MultiEdit entries, a side over
+64 KiB, or 256 KiB in total means the full questions, word for word. Sensitive
+targets always get the full questions. Other classes keep their class
+questions. Each question has a stable id (`importers`, `public-api`,
+`local-callers`, `callers`, `no-duplicate`, `data-schema`,
+`quote-instruction`, and one per class question), listed in
+`docs/gateguard/design-notes.md`.
 
 ### Questions by target class
 

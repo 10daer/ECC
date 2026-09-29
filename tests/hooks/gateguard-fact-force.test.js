@@ -744,7 +744,7 @@ function runTests() {
     test('denies first Edit per file with fact-forcing message', () => {
       const input = {
         tool_name: 'Edit',
-        tool_input: { file_path: '/src/app.js', old_string: 'foo', new_string: 'bar' }
+        tool_input: { file_path: '/src/app.js', old_string: 'export function foo() {', new_string: 'export function bar() {' }
       };
       const result = runHook(input);
       assert.strictEqual(result.code, 0, 'exit code should be 0');
@@ -4328,7 +4328,12 @@ function runTests() {
   clearState();
   if (
     test('src/a.py Write and Edit keep the code text byte-identical', () => {
-      const writeReason = c2Reason('Write', 'src/a.py');
+      const fullReason = tool_input => {
+        const output = parseOutput(runHook({ tool_name: tool_input.content === undefined ? 'Edit' : 'Write', tool_input }, C2_ENV).stdout);
+        assert.ok(output && output.hookSpecificOutput, `${tool_input.file_path} should be denied`);
+        return output.hookSpecificOutput.permissionDecisionReason;
+      };
+      const writeReason = fullReason({ file_path: 'src/a.py', content: 'import json\n' });
       const expectedWrite = [
         '[Fact-Forcing Gate]',
         '',
@@ -4345,7 +4350,7 @@ function runTests() {
         ''
       ].join('\n');
       assert.ok(writeReason.startsWith(expectedWrite), 'code Write block unchanged');
-      const editReason = c2Reason('Edit', 'src/b.py');
+      const editReason = fullReason({ file_path: 'src/b.py', old_string: 'def load(path):', new_string: 'def load_json(path):' });
       const expectedEdit = [
         '[Fact-Forcing Gate]',
         '',
@@ -4400,6 +4405,161 @@ function runTests() {
     passed++;
   else failed++;
 
+  // --- Questions from the change profile ---
+  const B2_ENV = { CLAUDE_PROJECT_DIR: '/proj-b2' };
+  const b2Reason = (toolName, tool_input, env = {}) => {
+    const output = parseOutput(runHook({ tool_name: toolName, tool_input }, { ...B2_ENV, ...env }).stdout);
+    assert.ok(output && output.hookSpecificOutput, `${toolName} ${JSON.stringify(tool_input).slice(0, 80)} should be denied`);
+    assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny');
+    return output.hookSpecificOutput.permissionDecisionReason;
+  };
+  const b2Questions = reason => reason.split('\n').filter(line => /^\d+\. /.test(line)).map(line => line.replace(/^\d+\. /, ''));
+  const B2_TEXT = {
+    importers: 'List ALL files that import/require this file (search the tree — Glob/Grep, or find/grep via Bash)',
+    publicApi: 'List the public functions/classes affected by this change',
+    localCallers: 'List the call sites in this file or its module that rely on the changed behaviour (search the tree — Glob/Grep, or find/grep via Bash)',
+    callers: 'Name the file(s) and line(s) that will call this new file',
+    noDuplicate: 'Confirm no existing file serves the same purpose (search the tree — Glob/Grep, or find/grep via Bash)',
+    dataSchema: 'If this file reads/writes data files, show field names, structure, and date format (use redacted or synthetic values, not raw production data)',
+    quote: QUOTE_LINE
+  };
+  const B2_FULL_EDIT = [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.dataSchema, B2_TEXT.quote];
+  const B2_FULL_WRITE = [B2_TEXT.callers, B2_TEXT.noDuplicate, B2_TEXT.dataSchema, B2_TEXT.quote];
+
+  clearState();
+  if (
+    test('an Edit that changes an exported signature asks for importers and the affected public API', () => {
+      const reason = b2Reason('Edit', { file_path: 'src/api.js', old_string: 'export function load(a) {', new_string: 'export function load(a, b) {' });
+      assert.deepStrictEqual(b2Questions(reason), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote]);
+      assertFrame(reason, 'editing', 'src/api.js');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('an Edit of a function body asks for call sites in the file or module instead of importers', () => {
+      const reason = b2Reason('Edit', { file_path: 'src/calc.js', old_string: '  return a + 1;', new_string: '  return a * 2;' });
+      assert.deepStrictEqual(b2Questions(reason), [B2_TEXT.localCallers, B2_TEXT.quote]);
+      assertFrame(reason, 'editing', 'src/calc.js');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('an Edit that handles data keeps the data-schema question', () => {
+      const reason = b2Reason('Edit', { file_path: 'src/calc.py', old_string: '    x = 1', new_string: '    rows = json.load(fh)' });
+      assert.deepStrictEqual(b2Questions(reason), [B2_TEXT.localCallers, B2_TEXT.dataSchema, B2_TEXT.quote]);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('a Write of a new code file without data handling drops the data-schema question', () => {
+      const reason = b2Reason('Write', { file_path: 'src/new_mod.js', content: 'export const x = 1;\n' });
+      assert.deepStrictEqual(b2Questions(reason), [B2_TEXT.callers, B2_TEXT.noDuplicate, B2_TEXT.quote]);
+      const withData = b2Reason('Write', { file_path: 'lib/new_io.js', content: "const fs = require('fs');\n" });
+      assert.deepStrictEqual(b2Questions(withData), B2_FULL_WRITE);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('an unknown or over-bound change keeps the full code questions byte-identical', () => {
+      const cases = [
+        ['Edit', { file_path: 'src/a.rb', old_string: 'a', new_string: 'b' }, B2_FULL_EDIT],
+        ['Edit', { file_path: 'src/big.js', old_string: 'x'.repeat(70 * 1024), new_string: 'y' }, B2_FULL_EDIT],
+        ['Edit', { file_path: 'src/shape.js' }, B2_FULL_EDIT],
+        ['Edit', { file_path: 'src/shape2.js', old_string: 5, new_string: 'b' }, B2_FULL_EDIT],
+        ['Write', { file_path: 'src/d.rb', content: 'x' }, B2_FULL_WRITE],
+        ['Write', { file_path: 'src/e.js' }, B2_FULL_WRITE]
+      ];
+      for (const [tool, input, expected] of cases) {
+        clearState();
+        const reason = b2Reason(tool, input);
+        assert.deepStrictEqual(b2Questions(reason), expected, `${input.file_path}`);
+        const header = `Before ${tool === 'Write' ? 'creating' : 'editing'} ${input.file_path}, present these facts:`;
+        const block = ['[Fact-Forcing Gate]', '', header, '', ...expected.map((q, i) => `${i + 1}. ${q}`), ''].join('\n');
+        assert.ok(reason.startsWith(block), `${input.file_path}: block unchanged`);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('sensitive code targets always get the full code questions', () => {
+      const reason = b2Reason('Edit', { file_path: 'src/auth/login.js', old_string: '  return a + 1;', new_string: '  return a * 2;' });
+      assert.deepStrictEqual(b2Questions(reason), B2_FULL_EDIT);
+      assert.ok(reason.includes('Sensitive target'), 'sensitive note');
+      const write = b2Reason('Write', { file_path: 'src/billing/new.js', content: 'export const x = 1;\n' });
+      assert.deepStrictEqual(b2Questions(write), B2_FULL_WRITE);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('config, instruction and test targets keep their class questions whatever the change', () => {
+      const config = b2Questions(b2Reason('Write', { file_path: 'config/app.yaml', content: 'a: 1\n' }));
+      assert.strictEqual(config.length, 4, 'config keeps three questions and the quote');
+      assert.ok(config[2].includes('no secrets or credentials'));
+      const instruction = b2Questions(b2Reason('Edit', { file_path: 'CLAUDE.md', old_string: 'a', new_string: 'b' }));
+      assert.strictEqual(instruction.length, 4, 'instruction keeps three questions and the quote');
+      const testFile = b2Questions(b2Reason('Edit', { file_path: 'src/a.test.js', old_string: '  return 1;', new_string: '  return 2;' }));
+      assert.ok(testFile[0].includes('behaviour is under test'), 'test questions');
+      assert.strictEqual(testFile.length, 3);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('MultiEdit questions follow every entry for the denied file', () => {
+      const surface = b2Reason('MultiEdit', {
+        edits: [
+          { file_path: 'src/m.js', old_string: '  return 1;', new_string: '  return 2;' },
+          { file_path: 'src/m.js', old_string: 'function f() {', new_string: 'export function f() {' }
+        ]
+      });
+      assert.deepStrictEqual(b2Questions(surface), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote]);
+      clearState();
+      const local = b2Reason('MultiEdit', {
+        edits: [
+          { file_path: 'src/n.js', old_string: '  return 1;', new_string: '  return 2;' },
+          { file_path: 'src/other.js', old_string: 'export const y = 1;', new_string: 'export const y = 2;' }
+        ]
+      });
+      assert.deepStrictEqual(b2Questions(local), [B2_TEXT.localCallers, B2_TEXT.quote], 'entries for other files do not count');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('condensed denials follow the change profile', () => {
+      const env = { GATEGUARD_FACT_FORCE_FULL_DENIALS: '0' };
+      const local = b2Reason('Edit', { file_path: 'src/c1.js', old_string: '  return 1;', new_string: '  return 2;' }, env);
+      assert.ok(local.includes('the call sites in this file or its module that rely on the change'), local);
+      assert.ok(!local.includes('importers/callers'), 'no importer hint for a local change');
+      const full = b2Reason('Edit', { file_path: 'src/c2.rb', old_string: 'a', new_string: 'b' }, env);
+      assert.ok(full.includes('briefly state importers/callers, affected API, data schemas if any'), 'unknown profile keeps the hint');
+    })
+  )
+    passed++;
+  else failed++;
+
   clearState();
   if (
     test('scripts/hooks/x.js is code, not instruction', () => {
@@ -4437,7 +4597,7 @@ function runTests() {
       const editReason = c2Reason('Edit', 'docs/late-edit.md', env);
       assert.ok(editReason.includes('(denial #2 this session) First edit of docs/late-edit.md: '), 'ordinal advances');
       assert.ok(editReason.includes('what references the changed section'), 'prose Edit hint');
-      const codeReason = c2Reason('Edit', 'src/late.js', env);
+      const codeReason = c2Reason('Edit', 'src/late.rb', env);
       assert.ok(codeReason.includes('briefly state importers/callers, affected API, data schemas if any'), 'code hint unchanged');
     })
   )
@@ -5776,7 +5936,7 @@ function runTests() {
     const state = c3State();
     assert.deepStrictEqual(state.denials_by_class, { code: 1 }, 'counter uses the same class as the questions');
     assert.ok(state.dir_gates[f3GateKey('code', 'src')], `gate key uses the same class: ${JSON.stringify(Object.keys(state.dir_gates))}`);
-    assert.ok(f3Edit('lib/b.py', t).reason.includes('List ALL files that import/require this file'), 'Edit code questions');
+    assert.ok(f3Edit('lib/b.py', t).reason.includes('List the call sites in this file or its module'), 'Edit code questions');
     // The prefix is stripped only for a real worktree (its .git file or dir exists).
     fs.mkdirSync(f3('.claude/worktrees/feat-x'), { recursive: true });
     fs.writeFileSync(f3('.claude/worktrees/feat-x/.git'), 'gitdir: ../../../.git/worktrees/feat-x\n');

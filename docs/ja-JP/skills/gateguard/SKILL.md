@@ -95,6 +95,8 @@ Before creating {file_path}, present these facts:
 | prose (Edit) | List other docs or code that reference the section being changed *(search)* · State what the change corrects or adds |
 | config | Name which process/tool reads this file and when · Describe the effect of the change · Confirm no secrets or credentials are being written in plain text |
 
+code クラスでは変更内容も読み、公開宣言に触れない Edit には importer/公開 API の代わりに「このファイルまたはモジュール内で変更された振る舞いに依存する呼び出し箇所」を尋ね、データを扱わない変更ではデータ形式の質問を省きます（未対応の拡張子、64 KiB 超などの判定不能な変更と機密対象では従来の 4 問のままです）。
+
 メッセージの文面以外でクラスが影響するのは兄弟ファイル集約だけです（集約できるクラスと、同じクラス同士でのみ集約されること）。
 
 ### Destructive Bash Gate (every destructive command)
