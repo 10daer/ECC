@@ -195,6 +195,10 @@ assignment, wrapper (`env`, `sudo`, `xargs`, `sh -c`), unknown command,
 write/execute option, or PowerShell `$`, `@`, `(`, `{` or `--%` makes the
 command ordinary. Destructive detection runs first, unchanged.
 
+Session state expires after 8 idle hours when it is keyed by a session id or
+transcript path, and after 30 idle minutes when it falls back to the project
+directory.
+
 ## Parallel Batches and Partial Application
 
 The first-touch gate evaluates each tool call independently. When several

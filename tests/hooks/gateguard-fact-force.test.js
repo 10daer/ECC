@@ -46,7 +46,7 @@ function writeExpiredState() {
     fs.mkdirSync(stateDir, { recursive: true });
     const expired = {
       checked: ['some_file.js', '__bash_session__'],
-      last_active: Date.now() - 31 * 60 * 1000 // 31 minutes ago
+      last_active: Date.now() - (8 * 60 + 1) * 60 * 1000
     };
     fs.writeFileSync(stateFile, JSON.stringify(expired), 'utf8');
   } catch (_) {
@@ -1066,7 +1066,7 @@ function runTests() {
 
   // --- Test 6: session state resets after timeout ---
   if (
-    test('session state resets after 30-minute timeout', () => {
+    test('session state resets after the idle window', () => {
       writeExpiredState();
       const input = {
         tool_name: 'Edit',
@@ -1648,7 +1648,7 @@ function runTests() {
       fs.writeFileSync(staleFile, JSON.stringify({ checked: [], last_active: Date.now() }), 'utf8');
       fs.writeFileSync(freshFile, JSON.stringify({ checked: [], last_active: Date.now() }), 'utf8');
 
-      const staleTime = new Date(Date.now() - 61 * 60 * 1000);
+      const staleTime = new Date(Date.now() - 17 * 60 * 60 * 1000);
       fs.utimesSync(staleFile, staleTime, staleTime);
 
       const result = runHook({
@@ -6799,6 +6799,67 @@ function runTests() {
     const routine = roBash('npm test', { agent_id: 'agent-ro' });
     assert.strictEqual(roDecision(routine), 'deny');
     assert.ok(roReason(routine).includes('current user request'));
+  });
+
+  // --- Idle window follows the session key ---
+  const idleEnvNoIds = { CLAUDE_SESSION_ID: '', ECC_SESSION_ID: '', CLAUDE_TRANSCRIPT_PATH: '' };
+  const idleStateFiles = () => fs.readdirSync(stateDir).filter(f => f.startsWith('state-') && f.endsWith('.json'));
+  const idleSeed = (fileName, ageMs) => {
+    fs.mkdirSync(stateDir, { recursive: true });
+    const file = path.join(stateDir, fileName);
+    fs.writeFileSync(file, JSON.stringify({ checked: ['__bash_session__'], last_active: Date.now() - ageMs }), 'utf8');
+    return file;
+  };
+  const HOUR = 60 * 60 * 1000;
+
+  c3Case('state keyed by a session id survives two idle hours', () => {
+    writeState({ checked: ['__bash_session__'], last_active: Date.now() - 2 * HOUR });
+    assert.strictEqual(roDecision(roBash('npm test')), undefined);
+  });
+
+  c3Case('state keyed by a session id expires after eight idle hours', () => {
+    writeState({ checked: ['__bash_session__'], last_active: Date.now() - 8 * HOUR - 60 * 1000 });
+    assert.strictEqual(roDecision(roBash('npm test')), 'deny');
+  });
+
+  c3Case('state keyed by a transcript path survives two idle hours', () => {
+    const transcript = path.join(stateDir, 'idle-session.jsonl');
+    roBash('npm test', { transcript_path: transcript }, idleEnvNoIds);
+    const [file] = idleStateFiles();
+    assert.ok(/^state-tx-/.test(file), file);
+    const state = JSON.parse(fs.readFileSync(path.join(stateDir, file), 'utf8'));
+    fs.writeFileSync(path.join(stateDir, file), JSON.stringify({ ...state, last_active: Date.now() - 2 * HOUR }), 'utf8');
+    assert.strictEqual(roDecision(roBash('npm test', { transcript_path: transcript }, idleEnvNoIds)), undefined);
+  });
+
+  c3Case('state keyed by the project fallback still expires after 30 idle minutes', () => {
+    const env = { ...idleEnvNoIds, CLAUDE_PROJECT_DIR: path.join(stateDir, 'idle-project') };
+    roBash('npm test', {}, env);
+    const [file] = idleStateFiles();
+    assert.ok(/^state-proj-/.test(file), file);
+    idleSeed(file, 31 * 60 * 1000);
+    assert.strictEqual(roDecision(roBash('npm test', {}, env)), 'deny');
+  });
+
+  c3Case('module-load pruning keeps session files for the long window and project files for the short one', () => {
+    const age = (file, ms) => fs.utimesSync(file, new Date(Date.now() - ms), new Date(Date.now() - ms));
+    const recentSession = idleSeed('state-recent-session.json', 0);
+    const oldSession = idleSeed('state-old-session.json', 0);
+    const recentTx = idleSeed(`state-tx-${'a'.repeat(24)}.json`, 0);
+    const oldProj = idleSeed(`state-proj-${'b'.repeat(24)}.json`, 0);
+    const oldTmp = path.join(stateDir, 'state-recent-session.json.tmp.1.abcd');
+    fs.writeFileSync(oldTmp, '{}', 'utf8');
+    age(recentSession, 2 * HOUR);
+    age(recentTx, 2 * HOUR);
+    age(oldSession, 17 * HOUR);
+    age(oldProj, 61 * 60 * 1000);
+    age(oldTmp, 61 * 60 * 1000);
+    loadDirectHook();
+    assert.ok(fs.existsSync(recentSession), 'session file inside the long window is kept');
+    assert.ok(fs.existsSync(recentTx), 'transcript file inside the long window is kept');
+    assert.ok(!fs.existsSync(oldSession), 'session file past the long window is pruned');
+    assert.ok(!fs.existsSync(oldProj), 'project fallback file past the short window is pruned');
+    assert.ok(!fs.existsSync(oldTmp), 'stale temp file is pruned on the short window');
   });
 
   fs.rmSync(f3Base, { recursive: true, force: true });

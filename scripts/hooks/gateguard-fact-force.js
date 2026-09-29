@@ -65,8 +65,10 @@ const {
 const STATE_DIR = process.env.GATEGUARD_STATE_DIR || path.join(process.env.HOME || process.env.USERPROFILE || '/tmp', '.gateguard');
 let activeStateFile = null;
 
-// State expires after 30 minutes of inactivity
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+const SESSION_ID_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+const PROJECT_KEY_PREFIX = 'proj-';
+let activeIdleWindowMs = SESSION_TIMEOUT_MS;
 const READ_HEARTBEAT_MS = 60 * 1000;
 
 // Maximum checked entries to prevent unbounded growth
@@ -1394,10 +1396,16 @@ function resolveSessionKey(data) {
   return hashSessionKey('proj', path.resolve(projectFingerprint));
 }
 
+// see docs/gateguard/design-notes.md#idle-window
+function idleWindowForKey(sessionKey) {
+  return sessionKey.startsWith(PROJECT_KEY_PREFIX) ? SESSION_TIMEOUT_MS : SESSION_ID_TIMEOUT_MS;
+}
+
 function getStateFile(data) {
   if (!activeStateFile) {
     const sessionKey = resolveSessionKey(data);
     activeStateFile = path.join(STATE_DIR, `state-${sessionKey}.json`);
+    activeIdleWindowMs = idleWindowForKey(sessionKey);
   }
   return activeStateFile;
 }
@@ -1408,7 +1416,7 @@ function loadState() {
     if (fs.existsSync(stateFile)) {
       const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       const lastActive = state.last_active || 0;
-      if (Date.now() - lastActive > SESSION_TIMEOUT_MS) {
+      if (Date.now() - lastActive > activeIdleWindowMs) {
         try {
           fs.unlinkSync(stateFile);
         } catch (_) {
@@ -1682,7 +1690,6 @@ function isChecked(key) {
   return found;
 }
 
-// Prune stale session files older than 1 hour
 (function pruneStaleFiles() {
   try {
     const files = fs.readdirSync(STATE_DIR);
@@ -1691,9 +1698,10 @@ function isChecked(key) {
       const isStateFile = f.startsWith('state-') && (f.endsWith('.json') || f.includes('.json.tmp.'));
       if (!isStateFile) continue;
       const fp = path.join(STATE_DIR, f);
+      const window = f.endsWith('.json') ? idleWindowForKey(f.slice('state-'.length)) : SESSION_TIMEOUT_MS;
       try {
         const stat = fs.statSync(fp);
-        if (now - stat.mtimeMs > SESSION_TIMEOUT_MS * 2) {
+        if (now - stat.mtimeMs > window * 2) {
           fs.unlinkSync(fp);
         }
       } catch (_) {
