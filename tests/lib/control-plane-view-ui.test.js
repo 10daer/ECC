@@ -539,11 +539,21 @@ let failures = 0;
       const eventsBefore = textOf(repaired.elements.get('events'));
       const lanesBefore = textOf(repaired.elements.get('lanes'));
       const markersBefore = markerShapes(repaired.context);
+      const logBeforeMalformed = repaired.context.log.length;
       await repaired.pollAgain();
       assert.strictEqual(textOf(repaired.elements.get('events')), eventsBefore, `${name}: retain previous events`);
       assert.strictEqual(textOf(repaired.elements.get('lanes')), lanesBefore, `${name}: retain previous lanes`);
       assert.strictEqual(repaired.elements.get('status').textContent, 'offline');
       const drawStart = repaired.context.log.length;
+      // When the malformed data fails after draw() started, the rollback
+      // redraws immediately, so the retained markers must be on the canvas
+      // before any resize. Checking only after resizeAgain() would pass even
+      // with the immediate redraw removed, since resize redraws the accepted
+      // view on its own.
+      if (name === 'drawing') {
+        assert.deepStrictEqual(markerShapes({ log: repaired.context.log.slice(logBeforeMalformed) }), markersBefore,
+          `${name}: the rollback must redraw the retained markers immediately`);
+      }
       assert.doesNotThrow(() => repaired.resizeAgain(), `${name}: resize must use the last accepted view`);
       assert.deepStrictEqual(markerShapes({ log: repaired.context.log.slice(drawStart) }), markersBefore);
       assert.match(repaired.labelOf('c'), /unavailable.*unknown/i);
