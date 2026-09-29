@@ -286,6 +286,16 @@ writers are merged on save (checked keys by union, counts by maximum, gates by
 newest `at`). Marking a target checked and recording its event happen in one
 state write, so an event is never half-recorded.
 
+## MultiEdit paths
+
+A MultiEdit call names its file once, in `tool_input.file_path`, and its
+`edits` entries carry only `old_string`, `new_string` and `replace_all`. An
+entry without a `file_path` of its own is gated as the call's `file_path`
+(at top level and in subagents), so the call meets the same first-touch,
+sensitive-target and trivial-edit rules as an Edit of that file. Entries that
+name their own path keep it. Non-object entries are skipped; a non-array
+`edits` is treated as empty.
+
 ## Change profile
 
 `scripts/lib/gateguard-change-profile.js` reads the change the hook already
@@ -326,8 +336,10 @@ around a public declaration means the edit is inside that symbol.
 - Go: `func` (after an optional receiver), `type`, `var` or `const` with a
   capitalised name, a `package` line, and any line that starts with a
   capital letter (exported fields, interface methods, grouped declarations).
-- Rust: lines starting with `pub` (any `pub(...)`), `impl`, `trait`, or
-  `#[macro_export`.
+- Rust: lines starting with `pub` (any `pub(...)`), `impl`, `trait`,
+  `extern`, or an ABI or trait attribute (`#[macro_export`, `#[derive`,
+  `#[repr`, `#[no_mangle`, `#[export_name`, and their `#[unsafe(...)]`
+  forms).
 - POSIX shells: a function definition (`name() {`, `function name`), an
   `export`, or `declare -x`/`typeset -x`, at any indentation. A sourced
   script's functions and exported variables are what other scripts use.
@@ -343,6 +355,31 @@ An Edit that changes a function body without its declaration line in the
 snippet reads as not touching the surface; the local question still asks for
 the call sites that rely on the behaviour.
 
+A member line can be public surface even though its container's declaration
+is not in the snippet: a property of an exported interface, a variant of a
+public enum, a name in an export list. So, when the hook passes the file text,
+the nearest line above the first occurrence that starts at column 0 (skipping
+blank lines, comments and decorators; a closing `}`, `]` or `)` there means
+the edit is at top level) is read as the enclosing opener:
+
+- JS/TS: `module.exports`/`exports` assigned an object, array or call, and
+  `export` (or `export default`) of an interface, enum, type, namespace,
+  module, `declare`, `{ ... }` list, or `const`/`let`/`var` that is not a
+  function or arrow: every line inside is surface. An exported class: lines
+  at the class's member indentation (the first non-blank line after the
+  opener) are surface; method bodies are not. An exported `function` or
+  `async function` is a body, as before.
+- Python: `__all__` makes every line surface; a public `class` makes an
+  assignment or annotation of a public name at member indentation (class
+  attributes, dataclass fields) surface.
+- Rust: a `pub` enum, struct, union, trait or `use` makes lines at member
+  indentation surface.
+
+The upward scan stops after 4 MiB in total and then counts as surface. The
+opener is found by indentation, not by parsing, so it can over-match (a method
+body inside an exported object literal counts), which only keeps the importer
+question.
+
 ## Data handling
 
 `touchesData` looks at every side (both sides of an Edit) as words: identifiers
@@ -350,8 +387,11 @@ are split on non-alphanumerics, `_` and camelCase boundaries and lowercased,
 so `validate` and `updated` never match `date`. It is true for a data word
 (formats such as `json`, `csv`, `yaml`, `parquet`; serialisation; `schema`;
 SQL and database words; date/time words such as `date`, `datetime`,
-`timestamp`, `strftime`, `utc`; file I/O such as `fs`, `fopen`, `pathlib`),
-for `open(`, for adjacent pairs such as `read file`,
+`timestamp`, `strftime`, `utc`, `chrono`, `zoneinfo`; encodings such as
+`base64`, `encoding`, `msgpack`; browser storage and cookies; data-store
+clients such as `redis`, `prisma`, `sqlalchemy`; file I/O such as `fs`,
+`fopen`, `pathlib`), for `open(`, for adjacent pairs such as `read file`,
+`time now`, `time parse`, `system time`,
 `write text`, `read to`, and for SQL keyword pairs anywhere in the text
 (`select`+`from`, `insert`+`into`, `create`+`table`, ...). Over-matching only
 keeps the data question.
@@ -609,7 +649,9 @@ question still comes before the first command that can change something.
   rejects.
 - Options that execute or write reject: `find -exec*`/`-ok*`/`-delete`/
   `-fprint*`/`-fls`, `fd -x`/`-X`/`--exec*` (also inside a short cluster),
-  `rg --pre*`/`--hostname-bin`, `tree -o`/`-R` (also inside a short cluster).
+  `rg --pre*`/`--hostname-bin`/`--search-zip`/`-z` (`-z` runs decompressors
+  found on `PATH`, which older ripgrep on Windows also looked up in the
+  working directory), `tree -o`/`-R` (also inside a short cluster).
 - `git` takes no global options. The subcommand must be `status`, `log`,
   `diff`, `show`, `ls-files`, `rev-parse` or `branch`, and every option must
   be in that subcommand's allowlist, so `--output` (and its abbreviations),
@@ -679,6 +721,10 @@ and how often a denial followed a search that nearly counted.
 - **Never changes a decision.** Every metrics error (unwritable directory,
   a directory in place of the file, a failed rotation) is ignored, and the
   gate's result is returned unchanged.
+- **No symlinks.** The file is checked with `lstat` and opened with
+  `O_NOFOLLOW`; a symlink or other non-regular file in its place is left
+  alone and nothing is written, so a shared state directory cannot redirect
+  the append or the rotation onto another file.
 - **Bounded.** When an append would take `metrics.jsonl` past 1 MiB it is
   renamed to `metrics.jsonl.1`, replacing the previous rotation, so the two
   files together stay near 2 MiB. Concurrent hooks may interleave lines or

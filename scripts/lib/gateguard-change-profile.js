@@ -1326,9 +1326,12 @@ function goLineIsSurface(line) {
   return isUpper(t[at]);
 }
 
+const RUST_SURFACE_ATTRIBUTES = ['#[macro_export', '#[derive', '#[repr', '#[no_mangle', '#[unsafe(no_mangle', '#[export_name', '#[unsafe(export_name'];
+
 function rustLineIsSurface(line) {
   const t = line.slice(skipSpaces(line, 0));
-  return leadingWord(t, 'pub') || leadingWord(t, 'impl') || leadingWord(t, 'trait') || t.startsWith('#[macro_export');
+  return leadingWord(t, 'pub') || leadingWord(t, 'impl') || leadingWord(t, 'trait') || leadingWord(t, 'extern') ||
+    RUST_SURFACE_ATTRIBUTES.some(attribute => t.startsWith(attribute));
 }
 
 function shellFunctionName(t) {
@@ -1388,6 +1391,114 @@ function textTouchesSurface(text, lineIsSurface) {
   return false;
 }
 
+// --- Container members ---
+// see docs/gateguard/design-notes.md#public-surface
+
+const MAX_OPENER_SCAN = 4 * 1024 * 1024;
+const JS_BODY_KINDS = ['function', 'async'];
+const JS_MEMBER_KINDS = ['class', 'abstract'];
+const JS_CONTAINER_KINDS = ['interface', 'enum', 'type', 'namespace', 'module', 'const', 'let', 'var', 'declare', '{'];
+const RUST_CONTAINER_KINDS = ['enum', 'struct', 'union', 'trait', 'use'];
+
+function indentOf(line) {
+  return line.slice(0, skipSpaces(line, 0));
+}
+
+function lineAt(text, start) {
+  const end = lineEndAt(text, start);
+  return { text: text.slice(start, end), next: end + (text[end] === '\r' && text[end + 1] === '\n' ? 2 : 1) };
+}
+
+function isCommentLine(t) {
+  return t.startsWith('//') || t.startsWith('/*') || t.startsWith('*') || t.startsWith('#') || t.startsWith('@');
+}
+
+function enclosingOpener(text, at, budget) {
+  let end = lineStartOf(text, at);
+  while (end > 0) {
+    let last = end - 1;
+    if (text[last] === '\n' && text[last - 1] === '\r') last--;
+    const start = lineStartOf(text, last);
+    budget.left -= end - start;
+    if (budget.left < 0) return null;
+    const line = text.slice(start, last);
+    end = start;
+    if (!line.trim() || isSpace(line[0])) continue;
+    if ('}])'.includes(line[0])) return null;
+    if (isCommentLine(line)) continue;
+    return { line, start };
+  }
+  return null;
+}
+
+function jsContainerKind(opener) {
+  const t = opener.trimEnd();
+  const bodyLike = t.includes('=>') || containsWord(t, 'function');
+  if (containsWord(t, 'exports')) return !bodyLike && /[{[(]$/.test(t) ? 'all' : null;
+  if (!leadingWord(t, 'export')) return null;
+  let rest = t.slice(skipSpaces(t, 6));
+  if (leadingWord(rest, 'default')) rest = rest.slice(skipSpaces(rest, 7));
+  if (JS_BODY_KINDS.some(word => leadingWord(rest, word))) return null;
+  if (JS_MEMBER_KINDS.some(word => leadingWord(rest, word))) return 'members';
+  if (rest.startsWith('{')) return 'all';
+  if (!JS_CONTAINER_KINDS.some(word => leadingWord(rest, word))) return null;
+  return bodyLike ? null : 'all';
+}
+
+function containerKind(opener, language) {
+  if (language === 'js') return jsContainerKind(opener);
+  if (language === 'python') {
+    if (opener.includes('__all__')) return 'all';
+    return leadingWord(opener, 'class') && pythonNameIsPublic(identifierAt(opener, skipSpaces(opener, 5))) ? 'fields' : null;
+  }
+  if (language === 'rust' && leadingWord(opener, 'pub')) {
+    const words = opener.split(/[^A-Za-z0-9_]+/);
+    return RUST_CONTAINER_KINDS.some(word => words.includes(word)) ? 'members' : null;
+  }
+  return null;
+}
+
+function memberIndent(text, opener) {
+  let at = lineAt(text, opener.start).next;
+  while (at < text.length) {
+    const line = lineAt(text, at);
+    if (line.text.trim()) return indentOf(line.text);
+    at = line.next;
+  }
+  return null;
+}
+
+function isMemberLine(line, indent, kind) {
+  if (!indent || indentOf(line) !== indent) return false;
+  const t = line.slice(indent.length);
+  if (!t || '}])'.includes(t[0]) || isCommentLine(t)) return false;
+  if (kind !== 'fields') return true;
+  const name = identifierAt(t, 0);
+  const after = t[skipSpaces(t, name.length)];
+  return pythonNameIsPublic(name) && isLetter(name[0]) && (after === ':' || (after === '=' && t[skipSpaces(t, name.length) + 1] !== '='));
+}
+
+function containerTouchesSurface(pairs, fileText, language) {
+  if (typeof fileText !== 'string' || fileText.length > MAX_FILE_CHARS) return false;
+  const budget = { left: MAX_OPENER_SCAN };
+  for (const [oldString, newString] of pairs) {
+    const at = oldString ? fileText.indexOf(oldString) : -1;
+    if (at === -1) continue;
+    const opener = enclosingOpener(fileText, at, budget);
+    if (budget.left < 0) return true;
+    const kind = opener ? containerKind(opener.line, language) : null;
+    if (!kind) continue;
+    if (kind === 'all') return true;
+    const indent = memberIndent(fileText, opener);
+    const start = lineStartOf(fileText, at);
+    const end = lineEndAt(fileText, at + oldString.length);
+    const before = fileText.slice(start, end);
+    const after = `${fileText.slice(start, at)}${newString}${fileText.slice(at + oldString.length, end)}`;
+    if (`${before}\n${after}`.split(/\r\n|\r|\n/).some(line => isMemberLine(line, indent, kind))) return true;
+  }
+  return false;
+}
+
 // --- Data handling ---
 
 const DATA_WORDS = new Set([
@@ -1398,12 +1509,17 @@ const DATA_WORDS = new Set([
   'date', 'dates', 'datetime', 'timestamp', 'timestamps', 'strftime', 'strptime', 'isoformat', 'iso', 'iso8601', 'timezone',
   'tz', 'utc', 'epoch', 'dayjs', 'moment', 'luxon', 'instant',
   'fs', 'fopen', 'fread', 'fwrite', 'fgets', 'ioutil', 'bufio', 'pathlib', 'shutil', 'readfile', 'writefile', 'fstream',
-  'ifstream', 'ofstream'
+  'ifstream', 'ofstream',
+  'chrono', 'zoneinfo', 'pytz', 'tzinfo', 'temporal', 'base64', 'encoding', 'charset', 'codec', 'msgpack', 'bson', 'cbor',
+  'xlsx', 'storage', 'cookie', 'cookies', 'redis', 'prisma', 'knex', 'sequelize', 'mongoose', 'typeorm', 'drizzle',
+  'sqlalchemy', 'jdbc', 'firestore', 'dynamodb'
 ]);
 const DATA_PAIRS = [
   ['read', 'file'], ['write', 'file'], ['append', 'file'], ['open', 'file'], ['read', 'text'], ['write', 'text'],
   ['read', 'bytes'], ['write', 'bytes'], ['read', 'to'], ['read', 'lines'], ['write', 'lines'], ['read', 'all'],
-  ['file', 'reader'], ['file', 'writer'], ['file', 'stream'], ['read', 'csv'], ['to', 'csv']
+  ['file', 'reader'], ['file', 'writer'], ['file', 'stream'], ['read', 'csv'], ['to', 'csv'],
+  ['time', 'now'], ['time', 'parse'], ['time', 'unix'], ['time', 'since'], ['time', 'format'], ['time', 'time'],
+  ['time', 'duration'], ['time', 'zone'], ['time', 'stamp'], ['system', 'time']
 ];
 const SQL_PAIRS = [['select', 'from'], ['insert', 'into'], ['delete', 'from'], ['create', 'table'], ['alter', 'table'], ['drop', 'table'], ['update', 'set']];
 
@@ -1524,7 +1640,7 @@ function profileChange(input) {
     if (!texts || !withinBounds(texts.sides)) return UNKNOWN_PROFILE;
     const lineIsSurface = SURFACE_BY_LANGUAGE[language];
     const touchesPublicSurface = input.tool === 'Write' || !lineIsSurface || wholeFileIsSurface(input.filePath, language) ||
-      texts.sides.some(side => textTouchesSurface(side, lineIsSurface));
+      texts.sides.some(side => textTouchesSurface(side, lineIsSurface)) || containerTouchesSurface(texts.pairs, input.fileText, language);
     const touchesData = texts.sides.some(side => textTouchesData(side, language));
     const trivial = input.tool === 'Edit' && trivialInFile(texts.pairs, input.fileText, lexSpecFor(input.filePath, language));
     return Object.freeze({ known: true, language, touchesPublicSurface, touchesData, trivial });

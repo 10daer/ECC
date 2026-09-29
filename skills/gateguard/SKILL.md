@@ -48,7 +48,8 @@ Both agents produce code that runs and passes tests. The difference is design de
 
 ### Edit / MultiEdit Gate (first edit per file)
 
-MultiEdit is handled identically — each file in the batch is gated individually.
+MultiEdit is handled identically — each file in the batch is gated individually;
+entries without their own `file_path` are gated as the call's `file_path`.
 
 The questions depend on the target's class (see
 [Questions by target class](#questions-by-target-class)). For **code**
@@ -97,14 +98,20 @@ For **code** targets the gate reads the change it is about to allow (Edit
   `def`/`class` not starting with `_`, dunders, `__all__`, a module-level public
   assignment such as `BASE_URL = ...` (`__init__.py` always); Go: capitalised
   `func`/`type`/`var`/`const` names, `package`, lines starting with a capital;
-  Rust: `pub`, `impl`, `trait`, `#[macro_export]`; shell: function definitions,
+  Rust: `pub`, `impl`, `trait`, `extern`, `#[macro_export]`, `#[derive]`,
+  `#[repr]`, `#[no_mangle]`; shell: function definitions,
   `export`, `declare -x`; PowerShell: `function`, `filter`, `param`,
-  `Export-ModuleMember`, `[CmdletBinding`. Java, Kotlin, C#, C, C++ and batch
+  `Export-ModuleMember`, `[CmdletBinding`. A member of an exported container
+  counts too, judged from the file: lines inside an exported interface, enum,
+  type, object or export list, member declarations of an exported class,
+  `__all__` entries, public class attributes and dataclass fields, and members
+  of a `pub` enum, struct, trait or `use` list. Java, Kotlin, C#, C, C++ and batch
   files, and every Write, always count as touching it. Touching it keeps questions 1 and 2; otherwise both are
   replaced by "List the call sites in this file or its module that rely on the
   changed behaviour".
 - **Data:** words for file I/O, formats (`json`, `csv`, `yaml`, …),
-  serialisation, schemas, SQL and dates on either side; in shell scripts also
+  serialisation, encodings, schemas, SQL, data stores, browser storage, dates
+  and clock reads on either side; in shell scripts also
   redirection to a file, `curl`, `wget`, `jq` and PowerShell file and web
   cmdlets. Without them the data
   question is dropped.
@@ -199,7 +206,7 @@ their aliases, `rg`, `git`) passes and is counted in
 `routine_readonly_passes`. The first other command is still gated. Any
 redirection, `tee`, substitution, backtick, variable, environment
 assignment, wrapper (`env`, `sudo`, `xargs`, `sh -c`), unknown command,
-`find -exec`/`-delete`, `fd -x`, `rg --pre`, `tree -o`, `git` global option or
+`find -exec`/`-delete`, `fd -x`, `rg --pre`/`-z`, `tree -o`, `git` global option or
 write/execute option, or PowerShell `$`, `@`, `(`, `{` or `--%` makes the
 command ordinary. Destructive detection runs first, unchanged.
 

@@ -11,6 +11,7 @@ const SESSION_DIGEST_LENGTH = 12;
 const CODE_MAX_LENGTH = 48;
 const CODE_PATTERN = /^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)?$/;
 const SESSION_PATTERN = /^[0-9a-f]{12}$/;
+const APPEND_FLAGS = fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | (fs.constants.O_NOFOLLOW || 0);
 
 const DECISIONS = Object.freeze([
   'deny',
@@ -83,6 +84,7 @@ function isMetricsEvent(value) {
 
 /** Append events to `<dir>/metrics.jsonl` in one write, rotating to `.1` past the size cap; never throws. */
 function appendMetrics(dir, events) {
+  let fd = null;
   try {
     const lines = events
       .filter(Boolean)
@@ -93,18 +95,29 @@ function appendMetrics(dir, events) {
     fs.mkdirSync(dir, { recursive: true });
     let size = 0;
     try {
-      const stat = fs.statSync(file);
-      size = stat.isFile() ? stat.size : 0;
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile()) return false;
+      size = stat.size;
     } catch (_) {
       size = 0;
     }
     if (size > 0 && size + Buffer.byteLength(lines) > METRICS_MAX_BYTES) {
       fs.renameSync(file, `${file}.1`);
     }
-    fs.appendFileSync(file, lines, { encoding: 'utf8', mode: 0o600 });
+    fd = fs.openSync(file, APPEND_FLAGS, 0o600);
+    if (!fs.fstatSync(fd).isFile()) return false;
+    fs.writeSync(fd, lines);
     return true;
   } catch (_) {
     return false;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {
+        /* ignore */
+      }
+    }
   }
 }
 

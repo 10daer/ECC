@@ -156,6 +156,52 @@ test('Rust: pub items, impl/trait blocks and macro exports touch the surface', (
   assert.strictEqual(surface('a.rs', 'let publish = 1;', 'let publish = 2;'), false);
 });
 
+test('Rust: derive, repr, no_mangle and extern items touch the surface', () => {
+  assert.strictEqual(surface('a.rs', '#[derive(Clone)]', '#[derive(Clone, Copy)]'), true);
+  assert.strictEqual(surface('a.rs', '#[repr(C)]', '#[repr(packed)]'), true);
+  assert.strictEqual(surface('a.rs', '#[no_mangle]', '#[export_name = "f"]'), true);
+  assert.strictEqual(surface('a.rs', 'extern "C" fn f() {}', 'extern "C" fn f(x: i32) {}'), true);
+  assert.strictEqual(surface('a.rs', '#[inline]', '#[inline(always)]'), false);
+});
+
+test('members of exported containers touch the surface when the file shows the container', () => {
+  const inside = (filePath, fileText, oldString, newString) =>
+    profileChange({ filePath, tool: 'Edit', edits: [{ old_string: oldString, new_string: newString }], fileText }).touchesPublicSurface;
+  const hits = [
+    ['a.js', 'module.exports = {\n  parse,\n  format,\n};\n', '  format,\n', ''],
+    ['a.js', 'exports.defaults = {\n  retries: 3,\n};\n', '  retries: 3,', '  retries: 5,'],
+    ['a.ts', 'export interface Options {\n  timeout: number;\n}\n', '  timeout: number;', '  timeout?: number;'],
+    ['a.ts', 'export enum Color {\n  Red,\n  Green,\n}\n', '  Green,\n', ''],
+    ['a.ts', 'export type Mode =\n  | "a"\n  | "b";\n', '  | "b";', '  | "c";'],
+    ['a.ts', 'export declare namespace N {\n  const x: number;\n}\n', '  const x: number;', '  const x: string;'],
+    ['a.js', 'export const defaults = {\n  retries: 3,\n};\n', '  retries: 3,', '  retries: 5,'],
+    ['a.js', 'export {\n  parse,\n  format,\n};\n', '  format,\n', ''],
+    ['a.ts', 'export class Client {\n  constructor(private url: string) {}\n\n  get(path: string) {\n    return 1;\n  }\n}\n', '  get(path: string) {', '  get(path: string, opts?: object) {'],
+    ['a.ts', 'export default class Client {\n  static retries = 3;\n}\n', '  static retries = 3;', '  static retries = 5;'],
+    ['a.py', '__all__ = [\n    "a",\n    "b",\n]\n', '    "b",\n', ''],
+    ['a.py', '@dataclass\nclass Options:\n    timeout: int = 5\n', '    timeout: int = 5', '    timeout: float = 5.0'],
+    ['a.py', 'class Options:\n    """Doc."""\n    retries = 3\n', '    retries = 3', '    retries = 5'],
+    ['a.rs', 'pub enum E {\n    A,\n    B,\n}\n', '    B,\n', ''],
+    ['a.rs', 'pub struct S {\n    a: u8,\n}\n', '    a: u8,', '    a: u16,'],
+    ['a.rs', 'pub trait T {\n    fn f(&self);\n}\n', '    fn f(&self);', '    fn f(&self, x: u8);'],
+    ['a.rs', 'pub use crate::{\n    a,\n    b,\n};\n', '    b,\n', '']
+  ];
+  for (const [file, text, before, after] of hits) assert.strictEqual(inside(file, text, before, after), true, `${file}: ${JSON.stringify(before)}`);
+  const misses = [
+    ['a.js', 'export function f() {\n  return 1;\n}\n', '  return 1;', '  return 2;'],
+    ['a.js', 'export const handler = async (req) => {\n  return 1;\n};\n', '  return 1;', '  return 2;'],
+    ['a.js', 'module.exports = function (x) {\n  return x;\n};\n', '  return x;', '  return x + 1;'],
+    ['a.ts', 'export class Client {\n  get(path: string) {\n    return 1;\n  }\n}\n', '    return 1;', '    return 2;'],
+    ['a.js', 'function local() {\n  return 1;\n}\nmodule.exports = { local };\n', '  return 1;', '  return 2;'],
+    ['a.py', 'class Options:\n    def run(self):\n        x = 1\n', '        x = 1', '        x = 2'],
+    ['a.py', 'class _Private:\n    x = 1\n', '    x = 1', '    x = 2'],
+    ['a.py', 'def f():\n    x = 1\n', '    x = 1', '    x = 2'],
+    ['a.rs', 'pub struct S {\n    a: u8,\n}\n\nfn f() {\n    x();\n}\n', '    x();', '    y();'],
+    ['a.rs', 'impl S {\n    fn helper(&self) {\n        x();\n    }\n}\n', '        x();', '        y();']
+  ];
+  for (const [file, text, before, after] of misses) assert.strictEqual(inside(file, text, before, after), false, `${file}: ${JSON.stringify(before)}`);
+});
+
 test('Java, Kotlin, C#, C and C++ always count as touching the surface', () => {
   for (const file of ['a.java', 'a.kt', 'a.cs', 'a.c', 'a.cpp']) {
     const profile = edit(file, 'x = 1;', 'x = 2;');
@@ -342,6 +388,27 @@ test('file I/O, serialisation, SQL, schema and date handling touch data', () => 
   for (const [file, text] of hits) {
     assert.strictEqual(edit(file, 'x = 1', `${text}\n`).touchesData, true, `${file}: ${text}`);
   }
+});
+
+test('clock reads, encodings, browser storage and data stores touch data', () => {
+  const hits = [
+    ['a.go', 't := time.Now()'],
+    ['a.go', 'd, err := time.ParseDuration(s)'],
+    ['a.py', 'started = time.time()'],
+    ['a.rs', 'let now = SystemTime::now();'],
+    ['a.rs', 'let t = chrono::Local::now();'],
+    ['a.py', 'zone = ZoneInfo("UTC")'],
+    ['a.js', 'const raw = Buffer.from(s, "base64");'],
+    ['a.js', 'localStorage.setItem("k", v);'],
+    ['a.js', 'document.cookie = v;'],
+    ['a.py', 'packed = msgpack.packb(v)'],
+    ['a.js', 'await prisma.user.findMany();'],
+    ['a.py', 'engine = sqlalchemy.create_engine(url)'],
+    ['a.js', 'const text = new TextDecoder(encoding).decode(bytes);']
+  ];
+  for (const [file, text] of hits) assert.strictEqual(data(file, 'x = 1', text), true, `${file}: ${text}`);
+  const misses = [['a.js', 'setTimeout(run, 10);'], ['a.go', 'ctx, cancel := context.WithTimeout(ctx, d)'], ['a.py', 'runtime = compute()']];
+  for (const [file, text] of misses) assert.strictEqual(data(file, 'x = 1', text), false, `${file}: ${text}`);
 });
 
 test('ordinary logic and look-alike words do not touch data', () => {

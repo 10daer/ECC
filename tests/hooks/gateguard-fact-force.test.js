@@ -4616,6 +4616,7 @@ function runTests() {
     const entries = Array.isArray(tool_input.edits) ? tool_input.edits : [tool_input];
     const byFile = new Map();
     for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
       const rel = entry.file_path || tool_input.file_path;
       if (typeof rel !== 'string' || typeof entry.old_string !== 'string') continue;
       byFile.set(rel, [...(byFile.get(rel) || []), entry.old_string]);
@@ -4847,6 +4848,33 @@ function runTests() {
       assert.ok(twoFiles.reason.includes('src/m4.js'), 'the non-trivial file is the one denied');
       const state = b3State();
       assert.ok(!(state.checked || []).includes(b3Key('src/m3.js')), 'trivial file not marked checked');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('MultiEdit entries without their own path are gated as the call file_path', () => {
+      const sensitive = b3Run('MultiEdit', { file_path: '.env', edits: [{ old_string: 'A=1', new_string: 'A=2' }] });
+      assert.strictEqual(sensitive.decision, 'deny', sensitive.result.stdout);
+      assert.ok(sensitive.reason.includes('.env'), sensitive.reason);
+      clearState();
+      const code = b3Run('MultiEdit', { file_path: 'src/mt1.js', edits: [{ old_string: 'f(1);', new_string: 'f(2);' }] });
+      assert.strictEqual(code.decision, 'deny', code.result.stdout);
+      assert.ok(code.reason.includes('src/mt1.js'), code.reason);
+      clearState();
+      const trivial = b3Run('MultiEdit', { file_path: 'src/mt2.js', edits: [{ old_string: 'f(); // a', new_string: 'f(); // b' }] });
+      assert.ok(trivial.context.includes(`${B3_NOTE} src/mt2.js`), trivial.result.stdout);
+      clearState();
+      const input = { file_path: 'config/.env.local', edits: [{ old_string: 'A=1', new_string: 'A=2' }] };
+      b3Seed(input);
+      const result = runHook({ tool_name: 'MultiEdit', tool_input: input, agent_id: 'sub-1' }, { CLAUDE_PROJECT_DIR: b3Root });
+      const hso = (parseOutput(result.stdout) || {}).hookSpecificOutput || {};
+      assert.strictEqual(hso.permissionDecision, 'deny', `subagent: ${result.stdout}`);
+      clearState();
+      const odd = b3Run('MultiEdit', { file_path: 'src/mt3.js', edits: [null, 7, { old_string: 'g(1);', new_string: 'g(2);' }] });
+      assert.strictEqual(odd.decision, 'deny', `malformed entries: ${odd.result.stdout}`);
     })
   )
     passed++;

@@ -149,5 +149,22 @@ test('reports failure instead of throwing when the file cannot be written', () =
   }
 });
 
+test('never writes through a symlink in place of the metrics file', () => {
+  if (process.platform === 'win32') return;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gateguard-metrics-lib-'));
+  try {
+    const victim = path.join(dir, 'victim.txt');
+    fs.writeFileSync(victim, 'keep\n');
+    fs.symlinkSync(victim, path.join(dir, METRICS_FILE_NAME));
+    assert.strictEqual(appendMetrics(dir, [metricsEvent(base)]), false);
+    assert.strictEqual(fs.readFileSync(victim, 'utf8'), 'keep\n');
+    fs.writeFileSync(victim, 'x'.repeat(METRICS_MAX_BYTES));
+    assert.strictEqual(appendMetrics(dir, [metricsEvent(base)]), false);
+    assert.strictEqual(fs.statSync(victim).size, METRICS_MAX_BYTES, 'a symlink is not rotated onto');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 console.log(`\n  ${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

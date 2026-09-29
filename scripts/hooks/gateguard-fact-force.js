@@ -2151,6 +2151,13 @@ function changeProfileFor(toolName, filePath, edits, content, data) {
   return profileChange({ filePath, tool, edits, content, fileText });
 }
 
+// see docs/gateguard/design-notes.md#multiedit-paths
+function multiEditEntries(toolInput) {
+  const edits = Array.isArray(toolInput.edits) ? toolInput.edits : [];
+  const shared = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
+  return edits.map(edit => (edit && typeof edit === 'object' && !edit.file_path && shared ? { ...edit, file_path: shared } : edit));
+}
+
 function entriesFor(edits, fileKey, data) {
   return edits.filter(edit => edit && typeof edit.file_path === 'string' && canonicalPathKey(edit.file_path, data) === fileKey);
 }
@@ -2321,7 +2328,7 @@ function gate(rawInput) {
   }
 
   if (toolName === 'MultiEdit') {
-    const edits = toolInput.edits || [];
+    const edits = multiEditEntries(toolInput);
     if (inSubagent) {
       for (const edit of edits) {
         const filePath = (edit && edit.file_path) || '';
@@ -2336,7 +2343,7 @@ function gate(rawInput) {
     const notes = [];
     const trivialKeys = new Set();
     for (const edit of edits) {
-      const filePath = edit.file_path || '';
+      const filePath = (edit && edit.file_path) || '';
       const exempt = exemptReason(filePath, data);
       if (exempt) {
         recordDecision('pass-exempt', exempt, { target: filePath, key: `exempt:${filePath}` });

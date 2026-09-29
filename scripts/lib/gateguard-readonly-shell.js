@@ -57,7 +57,7 @@ const noArg = pattern => args => !args.some(arg => pattern.test(arg));
 
 const FIND_ACTIONS = /^-(exec|ok|delete|fprint|fls)/;
 const FD_EXEC = /^(--exec|-[^-]*[xX])/;
-const RG_EXEC = /^--(pre|hostname-bin)/;
+const RG_EXEC = /^(--(pre|hostname-bin|search-zip)|-[^-]*z)/;
 const TREE_WRITE = /^(-[^-]*[oR]|--o)/;
 
 const BASH_COMMANDS = new Map([

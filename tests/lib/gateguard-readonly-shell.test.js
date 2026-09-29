@@ -143,6 +143,9 @@ test('fd, rg and tree options that execute or write are not read-only', () => {
     'rg --pre ./script foo',
     'rg --pre=cat foo',
     'rg --hostname-bin=./x foo',
+    'rg -z foo',
+    'rg -iz foo',
+    'rg --search-zip foo',
     'tree -o out.txt',
     'tree -ao out.txt',
     'tree -R'
