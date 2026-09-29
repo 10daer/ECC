@@ -1,6 +1,6 @@
 # Curation
 
-pi/core includes 123 of 292 skills and 24 of 94 commands from the root of ECC.
+pi/core includes 123 of 293 skills and 24 of 94 commands from the root of ECC.
 Everything excluded is listed here with its reason.
 
 ## Rules
@@ -94,6 +94,7 @@ Exclude anything that:
 | `homelab-vlan-segmentation` | homelab niche domain pack |
 | `homelab-wireguard-vpn` | homelab niche domain pack |
 | `hookify-rules` | hookify (Claude-Code-only hooks) |
+| `i18n-sync` | built around a third-party npm CLI (locakit) with external source links; not self-contained |
 | `inventory-demand-planning` | supply chain niche domain |
 | `investor-materials` | fundraising/marketing content |
 | `investor-outreach` | fundraising outreach |
