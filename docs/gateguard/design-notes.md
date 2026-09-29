@@ -385,8 +385,43 @@ Anything the lexer cannot read with confidence makes the entry non-trivial:
 - in JS/TS, any `/` outside a comment (division and regex literals cannot be
   told apart), JSX-like `<x`, `</`, `<>`, `<!`, and `-->`;
 - a line comment ending in `\` (it continues onto the next line in C and
-  Make), the trigraph `??/`, whitespace after a line-continuation `\`, a `/*`
-  inside a block comment, and an unterminated block comment or string.
+  Make), the trigraph `??/`, a `/*` inside a block comment, and an
+  unterminated block comment or string;
+- a code line ending in a line continuation `\` (trailing blanks included):
+  a C macro, a Python explicit continuation or a string continued onto the
+  next line joins that line, so adding or removing a comment-only line after
+  it changes code.
+
+## Directive comments
+
+Some comments are read by the language, the build or a tool, so their text is
+code. A directive comment is kept in the compared code verbatim: changing,
+adding or removing one makes the entry non-trivial, while an unchanged
+directive next to an edited ordinary comment does not.
+
+- A comment whose text starts with `!` (shebangs, Rust inner docs, `/*!`),
+  `/` (`///` doc comments and TypeScript triple-slash references), `go:`,
+  `export` or `extern` followed by a blank (cgo), or `line` followed by a
+  blank (Go line directives), with no blank after the comment marker.
+- A comment whose first word, after blanks, `*` and `/`, starts with `@`, `#`,
+  `<`, `+`, `!`, `type:` or `requires`, or is `global`, `globals` or
+  `exported` followed by a blank
+  (JSDoc and TypeScript pragmas, `//# sourceMappingURL`, `// +build`, Python
+  type comments, ESLint globals, PowerShell `#Requires`).
+- A comment containing a tool or encoding marker such as `lint`, `ts-`,
+  `noqa`, `nosec`, `pragma`, `coding:`, `fmt:`, `istanbul`, `prettier-`,
+  `webpack`, `__PURE__`, `fallthrough`, `shellcheck`, `suppress`, `sonar`,
+  `gitleaks`, `allowlist`, `vim:`, `-*-`, `DO NOT EDIT`, `#compdef` or Go's
+  example `// Output:`, or a JSDoc type
+  (`@` together with `{`). The list is in `DIRECTIVE_WORDS`; matching is
+  case-insensitive and substring-based, so it over-matches prose that happens
+  to contain a marker, which only keeps an edit gated.
+- Every Rust doc comment (`///`, `//!`, `/**`, `/*!`): doc tests compile and
+  run.
+
+Suppression markers (`nosec`, `NOSONAR`, `gitleaks:allow`,
+`pragma: allowlist secret`, `eslint-disable`) matter most: removing a finding
+from a security scanner is not a comment edit.
 
 ## Shell scripts
 
@@ -399,13 +434,14 @@ is not trivial) wherever a comment could be code:
   `>` the entry is not trivial (zsh glob flags such as `(#i)`). Single quotes
   are raw and must close on the line; `$'...'` is not trivial; double quotes
   may hold `\` escapes and a `${...}` without quotes, but `$(` inside them,
-  any backtick, any `<<` (heredocs, here-strings, shifts), a `#!` line, a
+  any backtick, any `<<` (heredocs, here-strings, shifts), a
   backslash before a line break, and a lone carriage return (bash reads it
   as a word character) make the entry not trivial. Only spaces and tabs
   between words are folded; `\` escapes stay code.
 - PowerShell: `#` and `<# ... #>` are comments only at the start of a line or
   after a space, tab or `;`; elsewhere the entry is not trivial. `#Requires`
-  is a directive and never a comment. Here-strings (`@"`, `@'`), typographic
+  and `#!` are [directive comments](#directive-comments), as in every
+  language. Here-strings (`@"`, `@'`), typographic
   quotes (PowerShell accepts them as quote marks), `$(` inside a double-quoted
   string, a backtick before a line break, and a nested `<#` are not trivial.
 - Batch: only `REM` lines (after optional blanks and `@`, followed by a blank

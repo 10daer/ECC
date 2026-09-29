@@ -31,7 +31,7 @@ const C_FAMILY = { lineComment: '//', blockComment: true, quotes: '"\'', indentS
 const LEX_SPECS = {
   js: { ...C_FAMILY, forbiddenCode: '`/', jsx: true },
   go: { ...C_FAMILY, forbiddenCode: '`' },
-  rust: { ...C_FAMILY, quotes: '"', rustChars: true, rawPrefixes: 'r#' },
+  rust: { ...C_FAMILY, quotes: '"', rustChars: true, rawPrefixes: 'r#', rustDocs: true },
   java: { ...C_FAMILY, tripleQuotes: true },
   kotlin: { ...C_FAMILY, tripleQuotes: true, noDollarInStrings: true },
   csharp: { ...C_FAMILY, tripleQuotes: true, rawPrefixes: '@$' },
@@ -75,35 +75,86 @@ function stringPrefixIsUnsafe(code, spec) {
   return prefix.toLowerCase().includes('f');
 }
 
+// --- Directive comments ---
+// see docs/gateguard/design-notes.md#directive-comments
+
+const DIRECTIVE_LEADS = ['@', '#', '<', '+', '!', 'type:', 'global ', 'globals ', 'exported ', 'requires'];
+const DIRECTIVE_RAW_LEADS = ['!', '/', 'go:', 'export ', 'extern ', 'line '];
+const DIRECTIVE_WORDS = [
+  'lint', 'jshint', 'ts-', 'noqa', 'nosec', 'semgrep', 'sonar', 'noinspection', 'pragma', 'coding:', 'coding=', 'fmt:', 'isort:',
+  'mypy:', 'pyright:', 'pyre-', 'yapf:', 'ruff:', 'flake8', 'bandit', 'no cover', 'nocover', 'istanbul', 'c8 ', 'v8 ',
+  'prettier-', 'biome-', 'deno-', 'dprint-', 'rome-', 'webpack', 'vite-', '__pure__', '__no_side_effects__',
+  '__inline__', '@preserve', '@license', 'sourcemappingurl', 'sourceurl', '+build', 'cgo', 'clang-', 'cppcheck',
+  'coverity', 'iwyu', 'fallthrough', 'fall through', 'fall-through', 'fallthru', 'fall thru', 'shellcheck',
+  'psscriptanalyzer', 'suppress', 'jscs', 'checkstyle', 'spotbugs', 'findbugs', 'nopmd', 'codeql', 'lgtm', 'gitleaks',
+  'trufflehog', 'detect-secrets', 'allowlist', 'vim:', 'vi:', ' ex:', '-*-', 'code generated', 'do not edit',
+  'rubocop', 'swiftlint', 'resharper', '@ts-', '@type', '@typedef', '@template', '@satisfies', '@import', '@callback',
+  '@overload', '@enum', '@this', '@implements', '@extends', '@augments', '@jsx', '@flow', '@noflow', '@generated',
+  'compdef', 'autoload', 'output:'
+];
+
+function isDirectiveComment(body, spec) {
+  if (spec.rustDocs && (body[0] === '/' || body[0] === '!' || body[0] === '*')) return true;
+  if (DIRECTIVE_RAW_LEADS.some(lead => body.startsWith(lead))) return true;
+  const lower = body.toLowerCase();
+  let start = 0;
+  while (start < lower.length && (isSpace(lower[start]) || lower[start] === '*' || lower[start] === '/')) start++;
+  const lead = lower.slice(start);
+  if (DIRECTIVE_LEADS.some(word => lead.startsWith(word))) return true;
+  if (DIRECTIVE_WORDS.some(word => lower.includes(word))) return true;
+  return lower.includes('@') && lower.includes('{');
+}
+
+function directiveMarker(body, spec) {
+  return isDirectiveComment(body, spec) ? ` \u0001${Buffer.from(body, 'utf8').toString('hex')}\u0001 ` : '';
+}
+
+function endsWithContinuation(code) {
+  let end = code.length;
+  while (end > 0 && isSpace(code[end - 1])) end--;
+  return code[end - 1] === '\\';
+}
+
 function lexCodeLines(text, spec) {
   const lines = [];
   let code = '';
   let state = 'code';
   let quote = '';
   let stringBody = '';
-  let commentTail = '';
+  let commentStart = 0;
+  const endComment = end => {
+    const marker = directiveMarker(text.slice(commentStart, end), spec);
+    if (marker) code += marker;
+  };
   const endLine = () => {
+    if (endsWithContinuation(code)) return false;
     lines.push(code);
     code = '';
+    return true;
   };
+  if (spec.jsx !== undefined && text.startsWith('#!')) state = 'line';
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '\n' || ch === '\r') {
       if (state === 'string') return null;
       if (state === 'line') {
-        if (commentTail.endsWith('\\')) return null;
+        if (text.slice(commentStart, i).trimEnd().endsWith('\\')) return null;
+        endComment(i);
         state = 'code';
       }
-      endLine();
+      if (state === 'block') {
+        lines.push(code);
+        code = '';
+      } else if (!endLine()) {
+        return null;
+      }
       if (ch === '\r' && text[i + 1] === '\n') i++;
       continue;
     }
-    if (state === 'line') {
-      if (!isSpace(ch)) commentTail = commentTail.length > 8 ? commentTail.slice(-4) + ch : commentTail + ch;
-      continue;
-    }
+    if (state === 'line') continue;
     if (state === 'block') {
       if (ch === '*' && text[i + 1] === '/') {
+        endComment(i);
         state = 'code';
         code += ' ';
         i++;
@@ -129,23 +180,24 @@ function lexCodeLines(text, spec) {
     }
     if (spec.lineComment === '//' && ch === '/' && text[i + 1] === '/') {
       state = 'line';
-      commentTail = '';
+      commentStart = i + 2;
       i++;
       continue;
     }
     if (spec.lineComment === '#' && ch === '#') {
       state = 'line';
-      commentTail = '';
+      commentStart = i + 1;
       continue;
     }
     if (spec.blockComment && ch === '/' && text[i + 1] === '*') {
       state = 'block';
+      commentStart = i + 2;
       i++;
       continue;
     }
     if (spec.forbiddenCode && spec.forbiddenCode.includes(ch)) return null;
     if (spec.jsx && ch === '<' && (isLetter(text[i + 1]) || text[i + 1] === '/' || text[i + 1] === '>' || text[i + 1] === '!')) return null;
-    if (spec.jsx && ch === '-' && text[i + 1] === '-' && text[i + 2] === '>') return null;
+    if (spec.jsx !== undefined && ch === '-' && text[i + 1] === '-' && text[i + 2] === '>') return null;
     if (ch === "'" && spec.rustChars) {
       const end = rustCharEnd(text, i);
       code += end === -1 ? ch : text.slice(i, end + 1);
@@ -164,9 +216,11 @@ function lexCodeLines(text, spec) {
     code += ch;
   }
   if (state === 'string' || state === 'block') return null;
-  if (state === 'line' && commentTail.endsWith('\\')) return null;
-  endLine();
-  return lines;
+  if (state === 'line') {
+    if (text.slice(commentStart).trimEnd().endsWith('\\')) return null;
+    endComment(text.length);
+  }
+  return endLine() ? lines : null;
 }
 
 function normalizeCodeLine(line, spec) {
@@ -234,6 +288,8 @@ function isTrivialEdit(oldString, newString, spec) {
 
 // --- Shell lexing ---
 // see docs/gateguard/design-notes.md#shell-scripts
+
+const SHELL_SPEC = Object.freeze({});
 
 function isLineStart(text, i) {
   return i === 0 || text[i - 1] === '\n' || text[i - 1] === '\r';
@@ -319,8 +375,9 @@ function shCodeLines(text) {
       const starts = hashStartsComment(text, i);
       if (starts === null) return null;
       if (starts) {
-        if (isLineStart(text, i) && text[i + 1] === '!') return null;
+        const start = i + 1;
         while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r') i++;
+        code += directiveMarker(text.slice(start, i + 1), SHELL_SPEC);
         continue;
       }
     }
@@ -361,6 +418,7 @@ function psCodeLines(text) {
   const lines = [];
   let code = '';
   let block = false;
+  let blockStart = 0;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '\n' || ch === '\r') {
@@ -373,7 +431,7 @@ function psCodeLines(text) {
       if (ch === '<' && text[i + 1] === '#') return null;
       if (ch === '#' && text[i + 1] === '>') {
         block = false;
-        code += ' ';
+        code += directiveMarker(text.slice(blockStart, i), SHELL_SPEC) || ' ';
         i++;
       }
       continue;
@@ -395,13 +453,15 @@ function psCodeLines(text) {
     if (ch === '<' && text[i + 1] === '#') {
       if (!psHashStartsComment(text, i)) return null;
       block = true;
+      blockStart = i + 2;
       i++;
       continue;
     }
     if (ch === '#') {
       if (!psHashStartsComment(text, i)) return null;
-      if (text.slice(i + 1, i + 9).toLowerCase() === 'requires') return null;
+      const start = i + 1;
       while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r') i++;
+      code += directiveMarker(text.slice(start, i + 1), SHELL_SPEC);
       continue;
     }
     code += ch;
@@ -423,7 +483,7 @@ function batchCodeLines(text) {
     const after = line[start + 3];
     if (word === 'rem' && (after === undefined || isBlank(after))) {
       if (/[%^&|<>()]/.test(line)) return null;
-      lines.push('');
+      lines.push(directiveMarker(line.slice(start + 4), SHELL_SPEC));
     } else {
       lines.push(line.trim() ? line : '');
     }
