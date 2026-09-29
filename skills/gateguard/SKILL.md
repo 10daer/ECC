@@ -161,7 +161,10 @@ and Write unless noted. Items marked *(search)* carry the suffix
 | config | Name which process/tool reads this file and when · Describe the effect of the change · Confirm no secrets or credentials are being written in plain text |
 
 Condensed denials (after `GATEGUARD_FACT_FORCE_FULL_DENIALS`) carry a
-one-line hint for the same class. Besides the message text, the class only
+one-line hint for the same class. For code targets the hint names the same
+questions as the full denial, one short phrase each; an Edit whose change
+cannot be read keeps the fixed hint (importers/callers, affected API, data
+schemas if any). Besides the message text, the class only
 decides [sibling collapse](#same-turn-sibling-creation-collapse): which files
 may collapse, and that a sibling must share the first file's class.
 

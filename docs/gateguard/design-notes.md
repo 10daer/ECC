@@ -390,9 +390,14 @@ never profiled, so they always get the full code questions. Instruction and
 config questions carry no change-dependent item, and the test and prose items
 do not depend on what the change touches, so the profile leaves those classes
 alone. For a MultiEdit, the denied file's profile covers every entry for that
-file (same canonical key); entries for other files do not count. The condensed
-denial uses the local-callers hint when `local-callers` is asked, else the
-original code hint.
+file (same canonical key); entries for other files do not count.
+
+A condensed code denial names the same ids as a full one, one short phrase per
+id (`condensedQuestionPhrase`), so the data and duplicate checks follow the
+profile there too. The one exception is an Edit with an unknown profile, which
+keeps the original hint byte for byte ("importers/callers, affected API, data
+schemas if any"); a Write with an unknown profile, sensitive Writes included,
+names `callers`, `no-duplicate` and `data-schema` like its full denial.
 
 ## Closest search that did not count
 

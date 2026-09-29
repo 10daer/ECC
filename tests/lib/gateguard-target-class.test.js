@@ -20,6 +20,7 @@ const {
   questionIdsFor,
   questionText,
   condensedHintFor,
+  condensedQuestionPhrase,
   COLLAPSIBLE_CLASSES,
   canonicalPathKey,
   classifyTarget,
@@ -355,9 +356,69 @@ test('class question texts are unchanged by the ids', () => {
 test('condensedHintFor matches the question set', () => {
   const local = { known: true, touchesPublicSurface: false, touchesData: false };
   assert.ok(condensedHintFor('code', false, local).includes('call sites in this file or its module'));
-  assert.ok(condensedHintFor('code', false, null).startsWith('briefly state importers/callers'));
-  assert.ok(condensedHintFor('code', true, local).startsWith('briefly state importers/callers'));
   assert.strictEqual(condensedHintFor('test', false, local), CLASS_CONDENSED_HINTS.test(false));
+});
+
+test('code condensed hints name exactly the questions of the change profile', () => {
+  const known = (touchesPublicSurface, touchesData) => ({ known: true, language: 'js', touchesPublicSurface, touchesData, trivial: false });
+  const ids = ['importers', 'public-api', 'local-callers', 'callers', 'no-duplicate', 'data-schema', 'quote-instruction'];
+  for (const id of ids) assert.ok(condensedQuestionPhrase(id), `${id} has a phrase`);
+  for (const isWrite of [false, true]) {
+    for (const [s, d] of [[true, true], [true, false], [false, true], [false, false]]) {
+      const profile = known(s, d);
+      const hint = condensedHintFor('code', isWrite, profile);
+      const asked = questionIdsFor('code', isWrite, profile);
+      for (const id of ids) {
+        assert.strictEqual(hint.includes(condensedQuestionPhrase(id)), asked.includes(id), `${isWrite ? 'Write' : 'Edit'} ${s}/${d} ${id}`);
+      }
+      assert.ok(hint.startsWith('briefly state ') && hint.endsWith(', then retry.'), hint);
+    }
+  }
+});
+
+test('code condensed hints read as one sentence', () => {
+  const known = (touchesPublicSurface, touchesData) => ({ known: true, language: 'js', touchesPublicSurface, touchesData, trivial: false });
+  assert.strictEqual(
+    condensedHintFor('code', false, known(false, false)),
+    "briefly state the call sites in this file or its module that rely on the change and the user's verbatim instruction, then retry."
+  );
+  assert.strictEqual(
+    condensedHintFor('code', false, known(true, true)),
+    "briefly state the files that import this file, the public functions/classes affected, the data schemas it reads or writes, and the user's verbatim instruction, then retry."
+  );
+  assert.strictEqual(
+    condensedHintFor('code', true, known(true, false)),
+    "briefly state the file(s) and line(s) that will call it, that no existing file serves the same purpose, and the user's verbatim instruction, then retry."
+  );
+});
+
+test('code condensed hints keep the data and duplicate checks when the profile asks for them', () => {
+  const known = (touchesPublicSurface, touchesData) => ({ known: true, language: 'py', touchesPublicSurface, touchesData, trivial: false });
+  assert.ok(condensedHintFor('code', false, known(false, true)).includes(condensedQuestionPhrase('data-schema')));
+  assert.ok(condensedHintFor('code', false, known(true, false)).includes(condensedQuestionPhrase('importers')));
+  for (const profile of [known(false, false), known(true, true)]) {
+    assert.ok(condensedHintFor('code', true, profile).includes(condensedQuestionPhrase('no-duplicate')), 'Write asks for duplicates');
+    assert.ok(condensedHintFor('code', true, profile).includes(condensedQuestionPhrase('callers')), 'Write asks for callers');
+  }
+});
+
+test('code condensed Edit hint for an unknown profile is unchanged', () => {
+  const legacy = "briefly state importers/callers, affected API, data schemas if any, and the user's verbatim instruction, then retry.";
+  for (const profile of [null, undefined, { known: false, touchesPublicSurface: false, touchesData: false }, 'x']) {
+    assert.strictEqual(condensedHintFor('code', false, profile), legacy);
+    assert.strictEqual(condensedHintFor('__proto__', false, profile), legacy);
+  }
+});
+
+test('code condensed Write hint for an unknown profile asks every creation question', () => {
+  for (const profile of [null, undefined, { known: false, touchesPublicSurface: false, touchesData: false }, 'x']) {
+    assert.strictEqual(
+      condensedHintFor('code', true, profile),
+      "briefly state the file(s) and line(s) that will call it, that no existing file serves the same purpose, the data schemas it reads or writes, and the user's verbatim instruction, then retry."
+    );
+  }
+  assert.strictEqual(condensedQuestionPhrase('constructor'), '');
+  assert.strictEqual(condensedQuestionPhrase('loader'), '');
 });
 
 // ── isSensitiveTarget ──

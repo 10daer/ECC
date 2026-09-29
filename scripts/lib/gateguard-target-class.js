@@ -205,8 +205,26 @@ function questionText(id) {
 
 const CODE_CONDENSED_HINT =
   "briefly state importers/callers, affected API, data schemas if any, and the user's verbatim instruction, then retry.";
-const LOCAL_CODE_CONDENSED_HINT =
-  "briefly state the call sites in this file or its module that rely on the change, data schemas if any, and the user's verbatim instruction, then retry.";
+
+const CONDENSED_PHRASES = Object.freeze({
+  importers: 'the files that import this file',
+  'public-api': 'the public functions/classes affected',
+  'local-callers': 'the call sites in this file or its module that rely on the change',
+  callers: 'the file(s) and line(s) that will call it',
+  'no-duplicate': 'that no existing file serves the same purpose',
+  'data-schema': 'the data schemas it reads or writes',
+  'quote-instruction': "the user's verbatim instruction"
+});
+
+/** Condensed-hint phrase for a code question id, or '' when it has none. */
+function condensedQuestionPhrase(id) {
+  return Object.hasOwn(CONDENSED_PHRASES, id) ? CONDENSED_PHRASES[id] : '';
+}
+
+function joinPhrases(phrases) {
+  if (phrases.length <= 2) return phrases.join(' and ');
+  return `${phrases.slice(0, -1).join(', ')}, and ${phrases[phrases.length - 1]}`;
+}
 
 const CLASS_CONDENSED_HINTS = {
   instruction: () =>
@@ -224,7 +242,9 @@ const CLASS_CONDENSED_HINTS = {
 /** One-line condensed hint matching `questionIdsFor`. */
 function condensedHintFor(cls, isWrite, profile) {
   if (Object.hasOwn(CLASS_CONDENSED_HINTS, cls)) return CLASS_CONDENSED_HINTS[cls](Boolean(isWrite));
-  return questionIdsFor(cls, isWrite, profile).includes('local-callers') ? LOCAL_CODE_CONDENSED_HINT : CODE_CONDENSED_HINT;
+  if (!isWrite && !(profile && profile.known === true)) return CODE_CONDENSED_HINT;
+  const phrases = questionIdsFor(cls, isWrite, profile).map(condensedQuestionPhrase).filter(Boolean);
+  return `briefly state ${joinPhrases(phrases)}, then retry.`;
 }
 
 // --- Sensitive targets ---
@@ -372,6 +392,7 @@ module.exports = {
   questionIdsFor,
   questionText,
   condensedHintFor,
+  condensedQuestionPhrase,
   resolveTargetPath,
   canonicalPathKey,
   classifyTarget,

@@ -4559,6 +4559,12 @@ function runTests() {
       const local = b2Reason('Edit', { file_path: 'src/c1.js', old_string: '  return 1;', new_string: '  return 2;' }, env);
       assert.ok(local.includes('the call sites in this file or its module that rely on the change'), local);
       assert.ok(!local.includes('importers/callers'), 'no importer hint for a local change');
+      assert.ok(!local.includes('data schemas'), 'no data hint for a change without data');
+      const created = b2Reason('Write', { file_path: 'src/c3.js', content: 'export const a = 1;\n' }, env);
+      assert.ok(created.includes('that no existing file serves the same purpose'), created);
+      assert.ok(created.includes('(denial #') && created.includes('parallel batch') && created.includes('ECC_GATEGUARD=off'), 'keeps ordinal and hints');
+      const data = b2Reason('Edit', { file_path: 'src/c4.js', old_string: '  return 1;', new_string: '  return JSON.parse(raw);' }, env);
+      assert.ok(data.includes('the data schemas it reads or writes'), data);
       const full = b2Reason('Edit', { file_path: 'src/c2.rb', old_string: 'a', new_string: 'b' }, env);
       assert.ok(full.includes('briefly state importers/callers, affected API, data schemas if any'), 'unknown profile keeps the hint');
     })

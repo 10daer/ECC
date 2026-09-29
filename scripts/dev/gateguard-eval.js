@@ -40,7 +40,7 @@ const QUESTION_IDS = Object.freeze([
   'quote-instruction'
 ]);
 
-const CONDENSED_PHRASES = Object.freeze([
+const LEGACY_CONDENSED_PHRASES = Object.freeze([
   { phrase: 'call sites in this file or its module', ids: { edit: 'local-callers', creation: 'local-callers' } },
   { phrase: 'importers/callers', ids: { edit: 'importers', creation: 'callers' } },
   { phrase: 'affected API', ids: { edit: 'public-api', creation: 'public-api' } },
@@ -301,8 +301,13 @@ async function runCorpus(hookFile, scenarios) {
 // --- question mapping ---
 
 function questionTextTable() {
-  const { questionText } = require(path.join(REPO_ROOT, 'scripts', 'lib', 'gateguard-target-class'));
-  return new Map(QUESTION_IDS.map(id => [questionText(id), id]));
+  const { questionText, condensedQuestionPhrase } = require(path.join(REPO_ROOT, 'scripts', 'lib', 'gateguard-target-class'));
+  const table = new Map(QUESTION_IDS.map(id => [questionText(id), id]));
+  table.condensed = [
+    ...QUESTION_IDS.filter(id => condensedQuestionPhrase(id)).map(id => ({ phrase: condensedQuestionPhrase(id), ids: { edit: id, creation: id } })),
+    ...LEGACY_CONDENSED_PHRASES
+  ];
+  return table;
 }
 
 /** Question ids a denial asked, read from its numbered list or its condensed hint. */
@@ -315,7 +320,8 @@ function questionsAsked(reason, table) {
   if (numbered.length > 0) return numbered;
   const condensed = reason.match(CONDENSED_PREFIX);
   if (!condensed) return [];
-  return CONDENSED_PHRASES.filter(({ phrase }) => reason.includes(phrase)).map(({ ids }) => ids[condensed[1]]);
+  const phrases = table.condensed || LEGACY_CONDENSED_PHRASES;
+  return [...new Set(phrases.filter(({ phrase }) => reason.includes(phrase)).map(({ ids }) => ids[condensed[1]]))];
 }
 
 // --- metrics ---
