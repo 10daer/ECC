@@ -25,6 +25,10 @@ node scripts/uninstall.js --target grok
 rollback use the same canonical apply path; pass `--source-sha <40-hex>` to
 reapply a previous pinned commit.
 
+Fetching a pinned snapshot accepts HTTPS URLs or absolute local repository
+paths (including local `file://` URLs). SSH, relative remote names, and custom
+Git remote-helper transports are rejected before fetching.
+
 The marketplace pin advances with releases, not every source commit. Ordinary
 CI validates the SHA and its ancestry. `scripts/release.sh` commits the release
 metadata, pins that source commit in a separate catalog commit, and validates
