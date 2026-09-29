@@ -2,7 +2,9 @@
 
 const { COLLAPSIBLE_CLASSES } = require('./gateguard-target-class');
 
-/** A non-negative integer count from untrusted state; anything else is 0. */
+// --- Counters ---
+// see docs/gateguard/design-notes.md#state-file-is-untrusted
+
 function toCount(value) {
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
@@ -20,8 +22,7 @@ function getCapAllowCount(state) {
   return toCount(state && state.cap_allows);
 }
 
-// dir_gates maps `<class>\u0000<canonicalDir>` to { turn, at, first, ordinal }.
-// The state file is untrusted, so every map is null-prototype and rejects prototype keys.
+// --- Sibling dir gates ---
 
 const MAX_DIR_GATES = 50;
 const DIR_GATE_KEY_SEPARATOR = '\u0000';
@@ -103,7 +104,7 @@ function getDirGates(state) {
   return nullMap(entries);
 }
 
-/** Union by key; the newer `at` wins, so concurrent writers keep the latest gate. */
+/** Merge two dir-gate maps; the newer `at` wins per key. */
 function mergeDirGates(older, newer) {
   const merged = nullMap(Object.entries(older));
   for (const [key, entry] of Object.entries(newer)) {

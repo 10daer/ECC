@@ -5,9 +5,7 @@ const path = require('path');
 const { WINDOWS_PATH_PATTERN } = require('./gateguard-target-class');
 const { excludedBatchId } = require('./gateguard-turn-scan');
 
-// --- Prior-search credit ---
-// `Read` never counts: Claude Code already requires a Read before an Edit, so
-// crediting it would disable the Edit gate. Any ambiguity or failure means no credit.
+// --- Search commands and flags ---
 
 const SHELL_SEARCH_COMMANDS = new Set([
   'rg',
@@ -26,31 +24,23 @@ const SHELL_SEARCH_COMMANDS = new Set([
 ]);
 const GIT_SEARCH_SUBCOMMANDS = new Set(['grep', 'ls-files']);
 const DIRECTORY_CHANGE_COMMANDS = new Set(['cd', 'pushd', 'popd', 'chdir', 'set-location', 'sl', 'push-location', 'pop-location']);
-// Search kinds whose first positional argument is the pattern, not a path.
 const PATTERN_FIRST_SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'git grep', 'select-string', 'sls', 'fd']);
 const RECURSIVE_BY_DEFAULT = new Set(['rg', 'git grep', 'git ls-files', 'find', 'fd', 'tree']);
 const GREP_FAMILY = new Set(['grep', 'egrep', 'fgrep']);
 const POWERSHELL_SEARCHES = new Set(['get-childitem', 'gci', 'select-string', 'sls']);
-// Flags whose value is the search pattern (so the first positional is a path).
 const PATTERN_VALUE_FLAGS = new Set(['-e', '-f', '--regexp', '--file']);
-// Flags that consume the next argument; that argument is never a path operand.
 const VALUE_FLAGS = new Set([
   '-e', '-f', '-g', '-t', '-T', '-m', '-A', '-B', '-C',
   '--regexp', '--file', '--type', '--glob', '--iglob', '--include', '--exclude', '--exclude-dir', '--exclude-from',
   '--ignore-file', '--max-count', '--replace',
   '-name', '-iname', '-path', '-ipath', '-type', '-maxdepth', '-mindepth', '-newer', '-regex', '-size', '-user', '-group', '-perm'
 ]);
-// PowerShell parameters are case-insensitive. -Path/-LiteralPath values are paths
-// (they count as operands for the stdin/target-only checks) but never directory evidence.
 const LS_VALUE_FLAGS = new Set(['-I', '--ignore', '--hide']);
 const TREE_VALUE_FLAGS = new Set(['-L', '-P', '-I', '-o']);
-// fd: `-E/--exclude <glob>` take a value (fd's `-e` is an extension, also a value).
 const FD_VALUE_FLAGS = new Set([...VALUE_FLAGS, '-E']);
-// Only these tools take the search pattern from -e/-f (fd's -e is an extension).
 const PATTERN_FLAG_SEARCHES = new Set(['grep', 'egrep', 'fgrep', 'rg', 'git grep']);
 const POWERSHELL_VALUE_FLAGS = new Set(['-path', '-literalpath', '-depth', '-pattern']);
 const POWERSHELL_PATH_FLAGS = new Set(['-path', '-literalpath']);
-// PowerShell binds a parameter by any unambiguous prefix, `-Name:value`, and comma lists across arguments.
 const POWERSHELL_FILTER_PARAMS = new Set(['filter', 'include', 'exclude']);
 const POWERSHELL_COMMON_PARAMS = [
   'verbose', 'debug', 'erroraction', 'warningaction', 'informationaction', 'progressaction',
@@ -90,8 +80,7 @@ const GENERIC_STEMS = new Set([
 ]);
 const MIN_STEM_LENGTH = 4;
 const MAX_SEARCH_COMMAND_CHARS = 8192;
-// Command substitution, process substitution, heredocs and PowerShell
-// backtick escapes make the searched text ambiguous: never credit them.
+// see docs/gateguard/design-notes.md#ambiguous-shell-is-not-evidence
 const AMBIGUOUS_SHELL_PATTERN = /`|\$\(|[<>]\(|<</;
 const GLOB_CHARS_PATTERN = /[*?[{]/;
 
@@ -102,7 +91,7 @@ function eligibleStem(filePath) {
   return stem.length >= MIN_STEM_LENGTH && !GENERIC_STEMS.has(stem) ? stem : null;
 }
 
-/** Word-boundary stem matcher; an indexOf scan, never a RegExp built from untrusted text. */
+// see docs/gateguard/design-notes.md#stem-matching
 function stemMatcher(stem) {
   if (!stem) return null;
   return { test: text => containsWord(String(text), stem) };
@@ -119,7 +108,6 @@ function containsWord(text, word) {
   return false;
 }
 
-/** Path-resolution context for a target; relative paths resolve against the tool `cwd`. */
 function dirContext(targetPath, data) {
   const base = (data && typeof data.cwd === 'string' && data.cwd) || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const isWin = WINDOWS_PATH_PATTERN.test(base) || WINDOWS_PATH_PATTERN.test(targetPath);
@@ -158,7 +146,6 @@ function stringsOf(...values) {
   return values.filter(value => typeof value === 'string' && value);
 }
 
-/** Base for relative operands after a directory change; null unless it is a plain literal `cd <dir>`. */
 function baseAfterDirectoryChange(base, lead, tokens) {
   if (!['cd', 'chdir', 'set-location', 'sl'].includes(lead) || tokens.length !== 2) return null;
   const dir = tokens[1];
@@ -179,7 +166,6 @@ function operandScopePath(arg) {
   return literal.join('/') || '/';
 }
 
-/** Scopes a shell segment searched; unresolvable operands (variables, `~`, unknown cwd) scope nothing. */
 function shellSearchScopes(parsed, base) {
   if (parsed.operands.length === 0) return base === null ? [] : [base];
   const scopes = [];
@@ -208,7 +194,6 @@ function valueFlagsFor(kind) {
   return VALUE_FLAGS;
 }
 
-/** Arguments a flag consumes; single-dash clusters (`-rne PAT`) are read letter by letter. */
 function flagEffect(kind, args, i) {
   const arg = args[i];
   if (POWERSHELL_SEARCHES.has(kind)) {
@@ -231,7 +216,6 @@ function flagEffect(kind, args, i) {
   return { consumes: 0, patternFlag: false, pathFlag: false };
 }
 
-/** Path operands of a search command, skipping flag values and the pattern positional. */
 function parseSearchArgs(kind, args) {
   const positionals = [];
   const pathValues = [];
@@ -246,7 +230,7 @@ function parseSearchArgs(kind, args) {
       break;
     }
     if (arg.includes('<')) {
-      inputRedirect = true; // a quoted `<` cannot be told from a redirection
+      inputRedirect = true;
       break;
     }
     if (arg.length > 1 && arg.startsWith('-')) {
@@ -289,8 +273,9 @@ function evidenceInScope(item, ctx) {
     if (scope === ctx.targetKey || !isInsideDir(ctx.targetKey, scope)) return false;
     if (item.scopeExact && ctx.targetDir !== scope) return false;
   }
+  // see docs/gateguard/design-notes.md#search-scope
   if (item.operands && item.operands.length > 0 && item.operands.every(parts => ctx.resolveDir(...parts) === ctx.targetKey)) {
-    return false; // reading the target itself is not a search
+    return false;
   }
   return true;
 }
@@ -302,9 +287,7 @@ function evidenceNamesDir(item, ctx) {
 }
 
 // --- Search filters ---
-// A search that excluded the target never saw it, so exclusions are never a stem
-// source and one covering the target blocks credit; unreadable exclusion lists
-// block it too. Globs are matched without RegExp and bounded; past the bounds they cover the target.
+// see docs/gateguard/design-notes.md#search-filters
 
 const MAX_FILTER_GLOB_CHARS = 256;
 const MAX_BRACE_ALTERNATIVES = 32;
@@ -353,7 +336,7 @@ function expandBraces(glob) {
       return results;
     }
   }
-  return [glob]; // unbalanced: `{` is literal
+  return [glob];
 }
 
 function globTokens(glob) {
@@ -380,7 +363,6 @@ function globTokens(glob) {
   return tokens;
 }
 
-/** `[...]` with members, ranges, `!`/`^` negation and a leading literal `]`; null when unclosed. */
 function bracketClass(glob, open) {
   let i = open + 1;
   const negated = glob[i] === '!' || glob[i] === '^';
@@ -406,7 +388,7 @@ function classMatches(token, ch) {
   return member !== token.negated;
 }
 
-/** Glob match by dynamic programming, so a hostile glob cannot cause regex backtracking; null when malformed. */
+// see docs/gateguard/design-notes.md#glob-matching-without-regexp
 function wildcardMatch(glob, text) {
   const tokens = globTokens(glob);
   if (!tokens) return null;
@@ -416,7 +398,7 @@ function wildcardMatch(glob, text) {
   for (let t = tokens.length - 1; t >= 0; t--) {
     const token = tokens[t];
     const row = new Array(n + 1).fill(false);
-    let afterSlash = false; // for 'dirs': some k > j with text[k-1] === '/' and next[k]
+    let afterSlash = false;
     for (let j = n; j >= 0; j--) {
       if (token.type === 'lit') row[j] = j < n && text[j] === token.ch && next[j + 1];
       else if (token.type === 'one') row[j] = j < n && text[j] !== '/' && next[j + 1];
@@ -437,7 +419,6 @@ function normalizeFilterGlob(glob) {
   return String(glob).toLowerCase().replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/^\/+/, '').replace(/\/+$/, '');
 }
 
-/** Null when the glob is past the length or brace bounds; a malformed alternative counts as `malformed`. */
 function globMatches(glob, text, malformed) {
   if (glob.length > MAX_FILTER_GLOB_CHARS) return null;
   const alternatives = expandBraces(glob);
@@ -452,7 +433,6 @@ function targetSegments(ctx) {
   return ctx.targetKey.toLowerCase().split('/').filter(Boolean);
 }
 
-/** An exclusion covers the target when it names the stem or matches the file or any directory above it. */
 function exclusionCoversTarget(exclusion, segments, stem) {
   const glob = normalizeFilterGlob(exclusion);
   if (!glob) return true;
@@ -475,7 +455,7 @@ function filtersAdmitTarget(item, ctx, stem) {
   return !exclusions.some(exclusion => exclusionCoversTarget(exclusion, segments, stem));
 }
 
-/** Basename include globs that all miss the target stop its stem from crediting; oversized globs admit, malformed ones do not. */
+// see docs/gateguard/design-notes.md#include-filters
 function includesAdmitTarget(item, ctx) {
   const includes = Array.isArray(item.includes) ? item.includes : [];
   if (includes.length === 0) return true;
@@ -549,7 +529,6 @@ function applyShellFilterArg(kind, args, i, filters) {
       include(value);
       return consumed;
     }
-    // `--ignore`/`--hide` hide names only for ls (rg's `--ignore` is a switch).
     if (EXCLUDE_LONG_FLAGS.has(name) && (kind === 'ls' || !LS_ONLY_EXCLUDE_FLAGS.has(name))) {
       exclude(value, indexes);
       return consumed;
@@ -562,7 +541,6 @@ function applyShellFilterArg(kind, args, i, filters) {
   for (let k = 1; k < arg.length; k++) {
     const letter = arg[k];
     if (!letters.has(letter)) {
-      // Another value flag ends the cluster: the rest (or the next argument) is its value.
       if (valueFlags.has(`-${letter}`)) return k === arg.length - 1 ? 1 : 0;
       continue;
     }
@@ -598,7 +576,6 @@ function applyShortFilter(kind, letter, value, indexes, { filters, exclude, incl
   }
 }
 
-/** find: a negated or pruned name test is an exclusion; a plain `-name`/`-iname` is an include. */
 function findSearchFilters(args, filters) {
   let negateNext = false;
   let negatedDepth = 0;
@@ -674,7 +651,7 @@ function powershellSearchFilters(kind, args, filters) {
       }
       i = filter.end;
     } else if (/^-[A-Za-z]/.test(args[i]) && powershellParam(kind, args[i]).name === null) {
-      // An unresolvable parameter may be an exclusion in disguise: neither it nor a value it may carry is a stem source.
+      // see docs/gateguard/design-notes.md#powershell-parameter-binding
       filters.dropped.add(i);
       if (!args[i].includes(':') && i + 1 < args.length && !args[i + 1].startsWith('-')) filters.dropped.add(i + 1);
     }
@@ -682,12 +659,10 @@ function powershellSearchFilters(kind, args, filters) {
   return filters;
 }
 
+// --- Prior-search credit ---
+
 /** Build the prior-search matcher around the hook's shell segmenter. */
 function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGMENT_SEPARATORS }) {
-  /**
-   * Evidence a search offers: stem `texts`, candidate `dirs`, the `scope`/`scopes`
-   * the target must lie in, and `operands` that must not all be the target itself.
-   */
   function searchEvidence(search, shellDirsTrusted) {
     const input = search.input;
     if (search.name === 'Glob') {
@@ -696,11 +671,9 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
       const prefix = globLiteralPrefix(input.pattern);
       const scope = [explicit || '.', prefix || '.'];
       if (!GLOB_CHARS_PATTERN.test(input.pattern)) {
-        // A single-file lookup names no directory, and looking up the target itself is not a search.
         const lookup = [explicit || '.', input.pattern];
         return [{ texts: [input.pattern], dirs: [], scope, scopeExact: true, operands: [lookup], detail: input.pattern }];
       }
-      // An empty literal prefix with no explicit path names only the implicit cwd.
       const dirs = prefix || explicit ? [scope] : [];
       return [{ texts: [input.pattern], dirs, scope, detail: input.pattern }];
     }
@@ -723,10 +696,6 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     return shellSearchEvidence(input.command, shellDirsTrusted);
   }
 
-  /**
-   * Per segment, whether it reads piped input. Mirrors `quoteAwareSegments`
-   * splitting; `||` also marks the next segment, which only ever removes evidence.
-   */
   function segmentPipeFlags(input) {
     const flags = [];
     let quote = null;
@@ -759,14 +728,13 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     return flags;
   }
 
-  /** Evidence for each search segment of a shell command; ambiguous or oversized commands yield none. */
   function shellSearchEvidence(command, dirsTrusted) {
     if (typeof command !== 'string' || !command || command.length > MAX_SEARCH_COMMAND_CHARS) return [];
     if (AMBIGUOUS_SHELL_PATTERN.test(command)) return [];
     const pipeFlags = segmentPipeFlags(command);
     const evidence = [];
     let trusted = dirsTrusted;
-    // A cd in any other call of the turn leaves the cwd of this one unknown.
+    // see docs/gateguard/design-notes.md#directory-changes
     let base = dirsTrusted ? [] : null;
     quoteAwareSegments(command).forEach((tokens, index) => {
       const lead = commandBasename(tokens[0]);
@@ -784,13 +752,13 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
         args = tokens.slice(2);
       }
       const parsed = parseSearchArgs(kind, args);
-      // A segment that reads stdin (redirection, pipe, or no operand without recursion) is not a tree search.
+      // see docs/gateguard/design-notes.md#stdin-is-not-a-tree-search
       if (parsed.stdin) return;
       if (parsed.operands.length === 0 && (!parsed.recursive || pipeFlags[index] !== false)) return;
       const scopes = shellSearchScopes(parsed, base);
       if (scopes.length === 0) return;
       const filters = shellSearchFilters(kind, args);
-      // Exclusion values (and the flags that introduce them) are never a stem source.
+      // see docs/gateguard/design-notes.md#search-filters
       const stemText = tokens.slice(0, tokens.length - args.length).concat(args.filter((_, i) => !filters.dropped.has(i))).join(' ');
       const dirs = trusted ? parsed.dirOperands.map(shellDirCandidate).filter(Boolean).map(dir => [dir]) : [];
       evidence.push({
@@ -808,7 +776,6 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     return evidence;
   }
 
-  /** A directory change anywhere in the turn makes relative shell paths unreliable. */
   function turnChangesDirectory(shellCommands) {
     if (!Array.isArray(shellCommands)) return false;
     return shellCommands.some(command => {
@@ -818,11 +785,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     });
   }
 
-  /**
-   * A completed search in the current turn that names the target by stem (or by
-   * directory, for a new-file Write). Searches in the pending call's own batch
-   * never count: their results were not seen when the edit was decided.
-   */
+  /** First completed search of the current turn that credits the target, else null. */
   function findCreditingSearch(scan, targetPath, allowDirMatch, data) {
     try {
       if (!scan || !Array.isArray(scan.searches) || scan.searches.length === 0) return null;
@@ -830,6 +793,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
       const ctx = dirContext(targetPath, data);
       if (!ctx) return null;
       const stem = stemMatcher(eligibleStem(targetPath));
+      // see docs/gateguard/design-notes.md#same-batch-searches
       const excluded = excludedBatchId(scan, data);
       const shellDirsTrusted = !turnChangesDirectory(scan.shellCommands);
       for (const search of scan.searches) {

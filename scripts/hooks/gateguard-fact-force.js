@@ -9,16 +9,9 @@
  * The act of investigation creates awareness that self-evaluation never did.
  *
  * Gates:
- *   - Edit/Write/MultiEdit (first touch of each file): questions chosen by
- *     target class (code: list importers, affected API, verify data schemas,
- *     quote instruction)
+ *   - Edit/Write/MultiEdit (first touch): questions chosen by target class
  *   - Bash/PowerShell (destructive): list targets, rollback plan, quote instruction
  *   - Bash/PowerShell (routine): quote current instruction (once per session)
- *
- * A first touch already covered by a completed search in the current turn,
- * or a new sibling of a file just gated, passes with an additionalContext
- * note (never an "allow" decision). Sensitive targets are always denied, and
- * anything ambiguous falls back to the denial.
  *
  * Compatible with run-with-flags.js via module.exports.run().
  * Cross-platform (Windows, macOS, Linux).
@@ -1553,9 +1546,7 @@ function getFullDenialBudget() {
   return DEFAULT_FULL_DENIALS;
 }
 
-// --- Opt-in session cap on first-touch denials (GATEGUARD_FACT_FORCE_MAX_DENIALS) ---
-// Validated whole, not with parseInt: a prefix parse would turn '3oops' into a
-// cap. A malformed value leaves the gate uncapped and says so once on stderr.
+// --- Session cap on first-touch denials ---
 
 const MAX_DENIALS_PATTERN = /^\d+$/;
 const MAX_DENIALS_WARN_VALUE_CHARS = 64;
@@ -1589,7 +1580,6 @@ function getMaxDenialBudget() {
   return Number.POSITIVE_INFINITY;
 }
 
-/** Mark a target checked and apply `update` in one state write, so an event is never half-recorded. */
 function markCheckedWith(key, update) {
   const loaded = loadState();
   const withKey = loaded.checked.includes(key) ? loaded : { ...loaded, checked: [...loaded.checked, key] };
@@ -1597,11 +1587,6 @@ function markCheckedWith(key, update) {
   return { ok: saveState(state), value };
 }
 
-/**
- * Record a denial (returns its ordinal) or, once denials reach `cap`, a cap pass
- * (`denials` null). The cap check reads the state the write persists, so a lost
- * concurrent update can add a denial but never passes a target early.
- */
 function markCheckedAndCountDenial(key, { cls, dirGate, cap = Number.POSITIVE_INFINITY } = {}) {
   const { ok, value: denials } = markCheckedWith(key, state => {
     if (getDenialCount(state) >= cap) {
@@ -1632,7 +1617,7 @@ function markCheckedAndCountCredit(key, cls) {
   })).ok;
 }
 
-// --- Sibling gates and per-class counters ---
+// --- Sibling gates ---
 
 const SIBLING_NO_TURN_WINDOW_MS = 120 * 1000;
 
@@ -1643,10 +1628,7 @@ function markCheckedAndCountSibling(key) {
   })).ok;
 }
 
-/**
- * Open sibling gate for this key: same turn id, or (no turn id on either side)
- * within 120 s. A gate stamped in the future or without a denial is ignored.
- */
+// see docs/gateguard/design-notes.md#sibling-collapse
 function findSiblingGate(key, turnId, now = Date.now()) {
   const gates = getDirGates(loadState());
   if (!Object.hasOwn(gates, key)) return null;
@@ -1899,7 +1881,6 @@ function classGateMsg(filePath, cls, isWrite) {
   ].join('\n');
 }
 
-/** Full first-touch denial; code targets keep the editGateMsg/writeGateMsg text. */
 function firstTouchGateMsg(filePath, isWrite, cls) {
   if (!CLASS_QUESTIONS[cls]) {
     return isWrite ? writeGateMsg(filePath) : editGateMsg(filePath);
@@ -1911,7 +1892,6 @@ function firstTouchGateMsg(filePath, isWrite, cls) {
  * Condensed single-line denial used after the full-block budget is spent
  * (#2142). Carries the denial ordinal so consecutive denials differ
  * textually, and a one-line recovery hint instead of the multi-line block.
- * Non-code classes swap the middle clause for a class-specific hint.
  */
 function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = false) {
   const safe = sanitizePath(filePath);
@@ -2038,7 +2018,6 @@ function creditNote(match, filePath) {
   );
 }
 
-/** Only a positively absent target is new; any other fs error counts as existing. */
 function isMissingOnDisk(resolved) {
   try {
     fs.lstatSync(resolved);
@@ -2112,7 +2091,7 @@ function run(rawInput) {
     if (!isChecked([fileKey, filePath])) {
       const isNewFile = toolName === 'Write' && isNewFileTarget(filePath, data);
       const cls = classifyTargetFor(filePath, data);
-      // Sensitive targets skip credit, sibling collapse and the cap.
+      // see docs/gateguard/design-notes.md#sensitive-targets
       const sensitive = isSensitiveTargetFor(filePath, data);
       const credit = sensitive ? null : findCreditingSearch(getTurnScan(), filePath, isNewFile, data);
       if (credit) {
@@ -2122,7 +2101,6 @@ function run(rawInput) {
         return { additionalContext: creditNote(credit, filePath), exitCode: 0 };
       }
       const turnId = isNewFile && !sensitive ? currentTurnId(getTurnScan()) : null;
-      // The 120 s no-turn rule applies only without any transcript; an unusable one never collapses.
       const collapsible = isNewFile && !sensitive && (turnId !== null || !transcriptPathFor(data));
       const gateKey = collapsible ? newFileGateKey(filePath, data, cls) : null;
       const sibling = gateKey ? findSiblingGate(gateKey, turnId) : null;
@@ -2139,7 +2117,8 @@ function run(rawInput) {
         return allowWithStateWarning();
       }
       if (denials === null) {
-        return rawInput; // session denial cap reached (GATEGUARD_FACT_FORCE_MAX_DENIALS)
+        // see docs/gateguard/design-notes.md#denial-cap
+        return rawInput;
       }
       return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive });
     }
@@ -2175,7 +2154,8 @@ function run(rawInput) {
           return allowWithStateWarning();
         }
         if (denials === null) {
-          continue; // session denial cap reached (GATEGUARD_FACT_FORCE_MAX_DENIALS)
+          // see docs/gateguard/design-notes.md#denial-cap
+          continue;
         }
         return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive });
       }

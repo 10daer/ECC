@@ -1,11 +1,3 @@
-/**
- * GateGuard target identity and classification for first-touch
- * Edit/Write/MultiEdit targets: canonical path keys, target classes and their
- * questions, sensitive-target detection, and sibling-collapse eligibility.
- * Stateless; filesystem access is limited to worktree `.git` checks and
- * realpath/lstat of the target's parent chain.
- */
-
 'use strict';
 
 const fs = require('fs');
@@ -13,7 +5,7 @@ const path = require('path');
 
 const WINDOWS_PATH_PATTERN = /^[a-z]:[\\/]|^\\\\/i;
 
-/** Canonical checked-state key, so `a.py`, `./a.py` and the absolute path share one gate. */
+/** Canonical checked-state key for a target. */
 function canonicalPathKey(filePath, data) {
   try {
     const target = resolveTargetPath(filePath, data);
@@ -25,11 +17,8 @@ function canonicalPathKey(filePath, data) {
   }
 }
 
-/**
- * Resolve a target to the file the tool will touch. Relative paths resolve
- * against the tool's `cwd` first; this deliberately differs from
- * `isExemptPath`, whose globs are project-relative.
- */
+/** Resolve a target to the file the tool will touch. */
+// see docs/gateguard/design-notes.md#target-resolution
 function resolveTargetPath(filePath, data) {
   const base = (data && data.cwd) || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   if (typeof base !== 'string' || typeof filePath !== 'string') return null;
@@ -51,7 +40,6 @@ const INSTRUCTION_BASENAMES = new Set([
   '.cursorrules',
   '.windsurfrules'
 ]);
-// Cursor rule files are instructions wherever they live.
 const INSTRUCTION_ANYWHERE_EXTS = new Set(['.mdc']);
 const INSTRUCTION_DIRS = new Set(['.claude', 'agents', 'commands', 'skills', 'rules', 'hooks', '.cursor', '.codex', '.opencode']);
 const INSTRUCTION_EXTS = new Set(['.md', '.mdx', '.txt']);
@@ -60,7 +48,6 @@ const TEST_BASENAME_PATTERN = /\.(test|spec)\.|^test_.*\.py$|_test\.(py|go)$/;
 const PROSE_EXTS = new Set(['.md', '.mdx', '.txt', '.rst', '.adoc']);
 const CONFIG_EXTS = new Set(['.json', '.jsonc', '.yaml', '.yml', '.toml', '.ini']);
 const ENV_BASENAME_PATTERN = /^\.env($|\.)/;
-// `.env.example.ts` and friends are source files that happen to start with `.env`.
 const CODE_EXTS = new Set(['.ts', '.js', '.mjs', '.cjs', '.py', '.go', '.rs', '.java', '.rb']);
 
 /** Classify a path; first match wins: instruction, test, prose, config, code (the fallback). */
@@ -84,7 +71,6 @@ function classifyTarget(filePath) {
 
 const WORKTREE_PREFIX_PATTERN = /^\.claude\/worktrees\/([^/]+)\//;
 
-/** A Windows-style path has no real location on a POSIX host, and vice versa. */
 function isHostPathStyle(isWin) {
   return isWin === (process.platform === 'win32');
 }
@@ -94,7 +80,6 @@ function foldKey(nativePath, isWin) {
   return isWin ? key.toLowerCase() : key;
 }
 
-/** Project root, resolved the way `isExemptPath` resolves it (CLAUDE_PROJECT_DIR first). */
 function canonicalProjectRoot(data) {
   const root = process.env.CLAUDE_PROJECT_DIR || (data && data.cwd) || process.cwd();
   if (typeof root !== 'string') return null;
@@ -105,17 +90,16 @@ function canonicalProjectRoot(data) {
   return { key: foldKey(native, isWin), native, isWin };
 }
 
-/** Only a real worktree (its `.git` exists) has its prefix stripped; otherwise the path stays under `.claude`. */
+// see docs/gateguard/design-notes.md#worktree-prefix
 function isRealWorktree(rootNative, isWin, name) {
   if (!isHostPathStyle(isWin)) return false;
   const paths = isWin ? path.win32 : path.posix;
   return fs.existsSync(paths.join(rootNative, '.claude', 'worktrees', name, '.git'));
 }
 
-// Windows ignores trailing dots/spaces and treats `name:stream` as `name`.
 const STREAM_MARKER = '::$';
 
-/** Normalize segments as Windows resolves them, so `CLAUDE.md.` and `CLAUDE.md::$DATA` name `CLAUDE.md`. */
+// see docs/gateguard/design-notes.md#windows-name-normalization
 function normalizeWindowsSegments(classPath, isWin) {
   const segments = classPath.split('/');
   const last = segments.length - 1;
@@ -131,7 +115,6 @@ function normalizeWindowsSegments(classPath, isWin) {
     .join('/');
 }
 
-/** Project-relative class path for a canonical key, or null when it is outside the root. */
 function projectRelativeClassPath(key, root, isWin) {
   const target = isWin ? key.toLowerCase() : key;
   const rootKey = isWin ? root.key.toLowerCase() : root.key;
@@ -143,11 +126,7 @@ function projectRelativeClassPath(key, root, isWin) {
   return normalizeWindowsSegments(relative, isWin);
 }
 
-/**
- * The path a target is classified by: project-relative, so an ancestor such as
- * `/home/me/tests/proj` never leaks into the class, with a real worktree prefix
- * stripped. Targets outside the root keep their absolute path.
- */
+/** Project-relative path a target is classified by. */
 function classPathFor(filePath, data) {
   try {
     const key = canonicalPathKey(filePath, data);
@@ -211,8 +190,7 @@ const CLASS_CONDENSED_HINTS = {
 };
 
 // --- Sensitive targets ---
-// Secrets, keys, auth/payment code, migrations and CI workflows always draw the
-// first-touch denial. Basename and segment rules are exact, never substrings.
+// see docs/gateguard/design-notes.md#sensitive-targets
 
 const SENSITIVE_EXTS = new Set(['.pem', '.key', '.p12', '.pfx']);
 const SENSITIVE_BASENAME_PATTERN = /^(\.env($|\.)|id_rsa|id_ed25519|id_ecdsa|id_dsa|\.netrc$|\.pgpass$|credentials|secrets\.)/;
@@ -228,17 +206,13 @@ function isSensitiveTarget(classPath) {
     const base = segments[segments.length - 1] || '';
     if (SENSITIVE_BASENAME_PATTERN.test(base) || SENSITIVE_EXTS.has(path.posix.extname(base))) return true;
     if (segments.some(segment => SENSITIVE_SEGMENTS.has(segment))) return true;
-    // Also matched below an ancestor (unverified worktree, target outside the root): fail safe.
     return `/${segments.join('/')}`.includes(`/${SENSITIVE_PREFIX}`);
   } catch (_) {
     return true;
   }
 }
 
-/**
- * Sensitive on the lexical path or on the real (symlink-resolved) location, so
- * `src/tools -> ../auth` cannot launder `src/tools/login.py`. Any error is sensitive.
- */
+/** Sensitive on the lexical or the real (symlink-resolved) path; any error is sensitive. */
 function isSensitiveTargetFor(filePath, data) {
   try {
     if (typeof filePath !== 'string' || !filePath) return true;
@@ -249,7 +223,6 @@ function isSensitiveTargetFor(filePath, data) {
   }
 }
 
-/** Unresolvable real locations (dangling symlink, ENOTDIR, EACCES, loops) count as sensitive. */
 function isSensitiveRealTarget(filePath, data) {
   const target = resolveTargetPath(filePath, data);
   if (!target || !isHostPathStyle(target.isWin)) return false;
@@ -270,12 +243,11 @@ function isSensitiveRealTarget(filePath, data) {
 }
 
 // --- Sibling collapse eligibility ---
+// see docs/gateguard/design-notes.md#sibling-collapse
 
 const COLLAPSIBLE_CLASSES = new Set(['code', 'test', 'prose']);
-// 8.3 short names (`CLAUDE~1`) can alias any directory, including dot-directories.
 const SHORT_NAME_PATTERN = /~\d/;
 
-/** Harness and tooling directories are dot-directories, so any dot segment blocks collapse. */
 function isCollapsibleClassPath(classPath, cls) {
   if (!COLLAPSIBLE_CLASSES.has(cls)) return false;
   const segments = String(classPath).toLowerCase().split('/').filter(Boolean);
@@ -288,7 +260,6 @@ function isCollapsibleTarget(filePath, data, cls) {
   return isCollapsibleClassPath(classPathFor(filePath, data), cls);
 }
 
-/** Realpath of a directory via its nearest existing ancestor; null on any error but a plain missing entry. */
 function realpathOfNearestAncestor(nativePath, paths) {
   const realpath = fs.realpathSync.native || fs.realpathSync;
   const missing = [];
@@ -308,7 +279,6 @@ function realpathOfNearestAncestor(nativePath, paths) {
   }
 }
 
-/** Real path of a file target, or of its nearest existing ancestor plus the missing tail. */
 function realTargetPath(resolved, paths) {
   const realpath = fs.realpathSync.native || fs.realpathSync;
   try {
@@ -320,7 +290,6 @@ function realTargetPath(resolved, paths) {
   return realDir ? paths.join(realDir, paths.basename(resolved)) : null;
 }
 
-/** True when nothing (not even a dangling symlink) exists at the path. */
 function isMissingEntry(nativePath) {
   try {
     fs.lstatSync(nativePath);
@@ -330,11 +299,7 @@ function isMissingEntry(nativePath) {
   }
 }
 
-/**
- * Real directory a new file's sibling gate is keyed by, or null when it may not
- * collapse. A symlinked directory must keep the class and pass the same screen,
- * so `src/tools -> .claude/hooks` never collapses.
- */
+/** Real directory a new file's sibling gate is keyed by, or null when it may not collapse. */
 function collapseGateDir(filePath, data, cls) {
   try {
     if (!isCollapsibleTarget(filePath, data, cls)) return null;

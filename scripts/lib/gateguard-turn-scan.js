@@ -1,11 +1,3 @@
-/**
- * GateGuard current-turn transcript scan: one bounded tail read of a Claude
- * Code JSONL transcript, walked back to the latest human message or
- * compaction. Yields the turn id and the turn's completed, non-error search
- * calls. Shell parsing stays in the hook, which shares it with the
- * destructive-command gate.
- */
-
 'use strict';
 
 const crypto = require('crypto');
@@ -13,6 +5,7 @@ const fs = require('fs');
 const { readFileTail, DEFAULT_TRANSCRIPT_TAIL_BYTES } = require('./transcript-context');
 
 const TRANSCRIPT_SCAN_MAX_LINES = 2000;
+// see docs/gateguard/design-notes.md#read-is-not-evidence
 const SEARCH_TOOL_NAMES = new Set(['Glob', 'Grep', 'LS', 'Bash', 'PowerShell']);
 const SHELL_TOOL_NAMES = new Set(['Bash', 'PowerShell']);
 const TOOL_USE_ERROR_PREFIX = '<tool_use_error>';
@@ -21,7 +14,7 @@ function isObject(value) {
   return Boolean(value) && typeof value === 'object';
 }
 
-/** Exports never throw: an error here must not escape into the hook's credit or sibling logic. */
+// see docs/gateguard/design-notes.md#fail-to-deny
 function neverThrows(fn, fallback) {
   return (...args) => {
     try {
@@ -57,7 +50,7 @@ function isSkippedTranscriptRecord(record) {
   );
 }
 
-/** Compaction discards the earlier turn: its summary (or boundary marker) starts a new one. */
+/** True for a compaction summary or boundary record. */
 function isCompactionBoundary(record) {
   return (
     Boolean(record) &&
@@ -69,8 +62,6 @@ function isCompactionBoundary(record) {
 
 const MAX_PROMPT_ID_CHARS = 128;
 
-// Claude Code stamps every user record of a turn with the same `promptId`, so it
-// identifies the turn even when the boundary has scrolled out of the tail window.
 function recordPromptId(record) {
   const id = isObject(record) ? record.promptId : undefined;
   return typeof id === 'string' && id && id.length <= MAX_PROMPT_ID_CHARS ? id : null;
@@ -81,10 +72,8 @@ function boundaryTurnId(record, line) {
   return `h:${crypto.createHash('sha256').update(line).digest('hex').slice(0, 16)}`;
 }
 
-/**
- * Only a non-empty array of `tool_result` blocks is a tool-result record; any
- * other user record is a turn boundary, which can only shrink the credit window.
- */
+/** True for a user record made only of `tool_result` blocks. */
+// see docs/gateguard/design-notes.md#turn-boundaries
 function isToolResultRecord(record) {
   const content = recordContent(record);
   return (
@@ -107,11 +96,7 @@ function isErrorToolResult(block) {
   return toolResultText(block.content).trimStart().startsWith(TOOL_USE_ERROR_PREFIX);
 }
 
-/**
- * Scan the transcript tail back to the latest human turn. Returns null when the
- * transcript is unavailable, else the turn id, the turn's searches (newest
- * first), batch ids, and shell commands. The tail is bounded to keep the hook fast.
- */
+/** Scan the transcript tail back to the start of the current turn; null when unavailable. */
 function scanCurrentTurn(transcriptPath, pendingId = '') {
   if (typeof transcriptPath !== 'string' || !transcriptPath) return null;
   let stat;
@@ -177,15 +162,13 @@ function scanCurrentTurn(transcriptPath, pendingId = '') {
       if (messageId && typeof block.id === 'string') batchIds.set(block.id, messageId);
     }
   }
-  // No boundary: a clipped window is the current turn only if its promptIds agree;
-  // two or more mean an unrecognised turn start. An unclipped file has no turn.
+  // see docs/gateguard/design-notes.md#turn-identity
   if ((tail.truncated || firstLine > 0) && windowPromptIds.size <= 1) {
     return finish(windowPromptIds.size === 1 ? [...windowPromptIds][0] : null);
   }
   return { turnId: null, searches: [], batchIds: new Map(), newestMessageId: null, shellCommands: [] };
 }
 
-/** Completed, non-error search calls whose id occurs once, newest first. */
 function collectTurnSearches(toolUsesNewestFirst, okResultIds, pendingId) {
   const idCounts = new Map();
   for (const { block } of toolUsesNewestFirst) {
@@ -195,7 +178,8 @@ function collectTurnSearches(toolUsesNewestFirst, okResultIds, pendingId) {
   const priorCalls = toolUsesNewestFirst.filter(({ block }) => !pendingId || block.id !== pendingId);
   priorCalls.forEach(({ block, messageId }, index) => {
     if (typeof block.id !== 'string' || !okResultIds.has(block.id)) return;
-    if (idCounts.get(block.id) !== 1) return; // a reused id cannot be tied to one result
+    // see docs/gateguard/design-notes.md#tool-result-pairing
+    if (idCounts.get(block.id) !== 1) return;
     if (!SEARCH_TOOL_NAMES.has(block.name)) return;
     if (!block.input || typeof block.input !== 'object') return;
     searches.push({ name: block.name, input: block.input, callsAgo: index + 1, messageId });
@@ -209,7 +193,7 @@ function collectShellCommands(toolUses) {
     .map(({ block }) => (typeof block.input.command === 'string' ? block.input.command : ''));
 }
 
-/** Assistant message whose searches share the pending call's batch (their results were not yet seen). */
+/** Message id of the pending call's batch, whose searches never credit. */
 function excludedBatchId(scan, data) {
   if (!isObject(scan)) return null;
   const pendingId = pendingToolUseId(data);
