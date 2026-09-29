@@ -168,6 +168,7 @@ def markdown_link_targets(text: str) -> list[str]:
 
 def normalize_link_target(raw: str) -> str | None:
     target = raw.strip()
+    is_unc_path = target.startswith("\\\\")
     if target.startswith("<"):
         closing = target.find(">")
         if closing == -1:
@@ -181,7 +182,7 @@ def normalize_link_target(raw: str) -> str | None:
         if title:
             target = target[: title.start()]
     target = unquote(target.split("#", 1)[0].split("?", 1)[0]).replace("\\", "/")
-    if not target or target.startswith("//"):
+    if not target or (target.startswith("//") and not is_unc_path):
         return None
     if EXTERNAL_URI_RE.match(target):
         return None

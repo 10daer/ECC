@@ -128,6 +128,16 @@ def test_artifact_scope_ignores_protocol_relative_external_links(project: Path) 
     assert result.returncode == 0, result.stdout
 
 
+def test_artifact_scope_checks_unc_style_links(project: Path) -> None:
+    (project / "guide.md").write_text(
+        "[missing](\\\\server\\share\\missing.md)\n", encoding="utf-8"
+    )
+    result = run_audit(project, "artifacts")
+    assert result.returncode == 1
+    assert "Broken Markdown link" in result.stdout
+    assert "//server/share/missing.md" in result.stdout
+
+
 def test_artifact_scope_ignores_external_uri_schemes_case_insensitively(
     project: Path,
 ) -> None:
