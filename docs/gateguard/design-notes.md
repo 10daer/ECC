@@ -36,6 +36,9 @@ headings stable, since they are the anchors.
   [Read-only first shell command](#read-only-first-shell-command)). Built by
   `createReadOnlyShell()` from the hook's `quoteAwareSegments`, like the
   search evidence.
+- `scripts/lib/gateguard-metrics.js`: builds, validates and appends the opt-in
+  decision metrics lines (see [Metrics](#metrics)). `scripts/gateguard-report.js`
+  reads them back.
 
 ## Fail to deny
 
@@ -500,3 +503,37 @@ key, so a subagent's retry never unlocks the path for the parent, whose own
 first touch is still gated. The keys share the parent's state file when the
 subagent's call carries the parent's session id. Exempt globs and Claude
 settings files are skipped first, as at top level.
+
+## Metrics
+
+Decision metrics exist to show whether the gate asks the right question at the
+right time: how often it denies, how often prior-search credit, sibling
+collapse, trivial edits and the cap remove a denial, which questions it asks,
+and how often a denial followed a search that nearly counted.
+
+- **Opt-in.** Nothing is written unless `GATEGUARD_METRICS` is one of the
+  truthy spellings the other GateGuard switches accept. The variable is read
+  on every call, so it can be turned on for part of a session.
+- **Codes, never content.** A line holds the schema version, time, a 12-hex
+  sha256 prefix of the resolved session key (not the key itself), the tool,
+  the target class, the decision, a reason code, question ids, the sensitive
+  flag and the change-profile flags. Class, reason, question ids and language
+  must match a short lowercase code pattern or are written as `null`, so a
+  path, command, file content or transcript text cannot reach the file even
+  if a caller passed one by mistake. The session digest is one-way but not
+  secret: anyone holding the session id can link it to its lines.
+- **One write per call.** Decisions are collected while `run()` decides and
+  appended in one `appendFileSync` after it returns, including when it throws.
+  A MultiEdit call writes one line per distinct file it decided. Lazily
+  computed class and sensitivity for passes are only computed when metrics
+  are on.
+- **Never changes a decision.** Every metrics error (unwritable directory,
+  a directory in place of the file, a failed rotation) is ignored, and the
+  gate's result is returned unchanged.
+- **Bounded.** When an append would take `metrics.jsonl` past 1 MiB it is
+  renamed to `metrics.jsonl.1`, replacing the previous rotation, so the two
+  files together stay near 2 MiB. Concurrent hooks may interleave lines or
+  lose one rotation's worth of lines; the report skips anything malformed.
+- **Shell denials carry no question ids.** The destructive and routine shell
+  gates ask fixed questions that have no ids, so their lines have
+  `questions: null`, as do all passes.

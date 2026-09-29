@@ -99,7 +99,8 @@ LLM 的自我评估不起作用。问"你是否违反了任何策略？"答案�
 * **拒绝上限（可选）：** 设置 `GATEGUARD_FACT_FORCE_MAX_DENIALS` 后，会话内首次触碰的拒绝次数达到该值后，新路径直接放行（计入 `cap_allows`）。`GATEGUARD_FACT_FORCE_FULL_DENIALS` 只决定消息详略（消息预算），而此变量决定是否拦截（拒绝预算）。事先搜索抵免和同级合并先于上限判定，不消耗上限；格式错误的值视为无上限，并在 stderr 警告一次。
 * **敏感目标：** `.env`/`.env.*`、`*.pem`/`*.key`/`*.p12`/`*.pfx`、`id_rsa*`/`id_ed25519*`/`id_ecdsa*`/`id_dsa*`/`.netrc`/`.pgpass`/`credentials*`/`secrets.*`、任一路径段恰为 `auth`、`authn`、`authz`、`security`、`secrets`、`payment`、`payments`、`billing`、`migrations`，以及 `.github/workflows/` 下的文件，不适用抵免、合并和上限，首次触碰总是拒绝。按字面路径和解析符号链接后的真实位置同时判定（`src/tools -> ../auth` 时 `src/tools/login.py` 也是敏感目标），真实位置无法解析时视为敏感。判定顺序：exempt → subagent → checked → 敏感? → 抵免 → 同级合并 → 上限 → 拒绝。
 * **例行 shell 门控与会话：** 门控触发前，只读命令（`ls`、`cat`、`rg`、`git status`/`log`/`diff`、`Get-ChildItem` 等，不含重定向、替换、`tee`、`xargs` 或未知命令）直接放行且不消耗门控，计入 `routine_readonly_passes`；以会话 ID 或 transcript 路径为键的状态空闲 8 小时失效，项目目录回退键仍为 30 分钟；子代理对敏感目标每个路径拒绝一次（不会为父会话解锁）。
-* **兼容性：** 唯一新增的环境变量是可选的 `GATEGUARD_FACT_FORCE_MAX_DENIALS`；除子代理首次触碰敏感目标外，以前允许的操作不会变为拒绝，且从不返回 `permissionDecision: "allow"`。
+* **判定指标（可选）：** 设置 `GATEGUARD_METRICS=1` 后，每次判定向 `<GATEGUARD_STATE_DIR>/metrics.jsonl` 追加一行（不记录路径、命令或内容，超过 1 MiB 轮转为 `.1`）；用 `node scripts/gateguard-report.js [--dir <path>] [--json]` 汇总。
+* **兼容性：** 新增的环境变量只有可选的 `GATEGUARD_FACT_FORCE_MAX_DENIALS` 和 `GATEGUARD_METRICS`；除子代理首次触碰敏感目标外，以前允许的操作不会变为拒绝，且从不返回 `permissionDecision: "allow"`。
 
 ## 快速开始
 

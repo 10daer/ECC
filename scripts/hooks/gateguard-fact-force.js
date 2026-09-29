@@ -44,6 +44,7 @@ const { scanCurrentTurn, createTurnScanner, currentTurnId, transcriptPathFor } =
 const { createSearchEvidence } = require('../lib/gateguard-search-evidence');
 const { profileChange } = require('../lib/gateguard-change-profile');
 const { createReadOnlyShell } = require('../lib/gateguard-readonly-shell');
+const { appendMetrics, metricsEvent } = require('../lib/gateguard-metrics');
 const {
   getDenialCount,
   getCreditedCount,
@@ -64,6 +65,7 @@ const {
 // Session state — scoped per session to avoid cross-session races.
 const STATE_DIR = process.env.GATEGUARD_STATE_DIR || path.join(process.env.HOME || process.env.USERPROFILE || '/tmp', '.gateguard');
 let activeStateFile = null;
+let activeSessionKey = '';
 
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const SESSION_ID_TIMEOUT_MS = 8 * 60 * 60 * 1000;
@@ -1404,6 +1406,7 @@ function idleWindowForKey(sessionKey) {
 function getStateFile(data) {
   if (!activeStateFile) {
     const sessionKey = resolveSessionKey(data);
+    activeSessionKey = sessionKey;
     activeStateFile = path.join(STATE_DIR, `state-${sessionKey}.json`);
     activeIdleWindowMs = idleWindowForKey(sessionKey);
   }
@@ -1914,8 +1917,20 @@ function withNoteBeforeRetry(message, note) {
   return `${message.slice(0, at)}${note}\n\n${message.slice(at)}`;
 }
 
-function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile, miss }) {
+function denialReason(sensitive, missNote, miss) {
+  if (sensitive) return 'sensitive';
+  return missNote ? `near-miss:${miss.reason}` : 'first-touch';
+}
+
+function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile, miss, reason }) {
   const missNote = sensitive ? '' : closestMissNote(miss);
+  recordDecision('deny', reason || denialReason(sensitive, missNote, miss), {
+    target: filePath,
+    cls,
+    sensitive,
+    profile,
+    questions: questionIdsFor(cls, isWrite, profile)
+  });
   if (denials > getFullDenialBudget()) {
     const action = isWrite ? 'creation' : 'edit';
     return denyResult(condensedGateMsg(action, filePath, denials, cls, sensitive, profile, missNote), { includeRecoveryHint: false });
@@ -1996,6 +2011,7 @@ function denyResult(reason, options = {}) {
 }
 
 function allowWithStateWarning() {
+  recordDecision('pass', 'state-error');
   return {
     stderr: '[Fact-Forcing Gate] GateGuard state could not be persisted; allowing this operation to avoid a permanent retry loop. Check GATEGUARD_STATE_DIR or filesystem permissions.',
     exitCode: 0
@@ -2092,7 +2108,7 @@ function subagentSensitiveDenial(filePath, data, isWrite) {
   const cls = classifyTargetFor(filePath, data);
   const { ok, denials } = markCheckedAndCountDenial(subKey, { cls });
   if (!ok) return allowWithStateWarning();
-  return firstTouchDenial(filePath, { isWrite, denials, cls, sensitive: true, profile: null, miss: null });
+  return firstTouchDenial(filePath, { isWrite, denials, cls, sensitive: true, profile: null, miss: null, reason: 'subagent-sensitive' });
 }
 
 // --- Change profile ---
@@ -2105,9 +2121,80 @@ function entriesFor(edits, fileKey, data) {
   return edits.filter(edit => edit && typeof edit.file_path === 'string' && canonicalPathKey(edit.file_path, data) === fileKey);
 }
 
+// --- Metrics ---
+// see docs/gateguard/design-notes.md#metrics
+
+let pendingMetrics = null;
+
+function isMetricsEnabled() {
+  return ECC_ENABLE_VALUES.has(normalizeEnvValue(process.env.GATEGUARD_METRICS));
+}
+
+function recordDecision(decision, reason, fields = {}) {
+  if (!pendingMetrics) return;
+  if (fields.key !== undefined) {
+    if (pendingMetrics.keys.has(fields.key)) return;
+    pendingMetrics.keys.add(fields.key);
+  }
+  pendingMetrics.entries.push({ ...fields, decision, reason });
+}
+
+function targetFacts(entry, data) {
+  if (!entry.target) {
+    return { cls: entry.cls === undefined ? null : entry.cls, sensitive: entry.sensitive === true };
+  }
+  try {
+    return {
+      cls: entry.cls === undefined ? classifyTargetFor(entry.target, data) : entry.cls,
+      sensitive: entry.sensitive === undefined ? isSensitiveTargetFor(entry.target, data) : entry.sensitive
+    };
+  } catch (_) {
+    return { cls: null, sensitive: false };
+  }
+}
+
+function flushMetrics() {
+  const batch = pendingMetrics;
+  pendingMetrics = null;
+  if (!batch || batch.entries.length === 0) return;
+  try {
+    const now = Date.now();
+    const events = batch.entries.map(entry =>
+      metricsEvent({
+        sessionKey: activeSessionKey,
+        tool: batch.tool,
+        ...targetFacts(entry, batch.data),
+        decision: entry.decision,
+        reason: entry.reason,
+        questions: entry.questions,
+        profile: entry.profile,
+        now
+      })
+    );
+    appendMetrics(STATE_DIR, events);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+function exemptReason(filePath, data) {
+  if (!filePath) return 'no-path';
+  if (isClaudeSettingsPath(filePath)) return 'claude-settings';
+  return isExemptPath(filePath, data) ? 'exempt-glob' : '';
+}
+
 // --- Core logic (exported for run-with-flags.js) ---
 
 function run(rawInput) {
+  pendingMetrics = null;
+  try {
+    return gate(rawInput);
+  } finally {
+    flushMetrics();
+  }
+}
+
+function gate(rawInput) {
   let data;
   try {
     data = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
@@ -2127,17 +2214,24 @@ function run(rawInput) {
   // Normalize: case-insensitive matching via lookup map
   const TOOL_MAP = { edit: 'Edit', write: 'Write', multiedit: 'MultiEdit', bash: 'Bash', powershell: 'PowerShell' };
   const toolName = TOOL_MAP[rawToolName.toLowerCase()] || rawToolName;
+  if (isMetricsEnabled()) {
+    pendingMetrics = { tool: toolName, data, entries: [], keys: new Set() };
+  }
   const inSubagent = isSubagentInvocation(data);
   const getTurnScan = createTurnScanner(data);
 
   if (toolName === 'Edit' || toolName === 'Write') {
     const filePath = toolInput.file_path || '';
-    if (!filePath || isClaudeSettingsPath(filePath) || isExemptPath(filePath, data)) {
+    const exempt = exemptReason(filePath, data);
+    if (exempt) {
+      recordDecision('pass-exempt', exempt, { target: filePath });
       return rawInput; // allow
     }
 
     if (inSubagent) {
-      return subagentSensitiveDenial(filePath, data, toolName === 'Write') || rawInput;
+      const denial = subagentSensitiveDenial(filePath, data, toolName === 'Write');
+      if (!denial) recordDecision('pass-subagent', 'subagent', { target: filePath });
+      return denial || rawInput;
     }
 
     const fileKey = canonicalPathKey(filePath, data);
@@ -2151,6 +2245,7 @@ function run(rawInput) {
         if (!markCheckedAndCountCredit(fileKey, cls)) {
           return allowWithStateWarning();
         }
+        recordDecision('credit', 'prior-search', { target: filePath, cls, sensitive });
         return { additionalContext: creditNote(credit, filePath), exitCode: 0 };
       }
       const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content);
@@ -2158,6 +2253,7 @@ function run(rawInput) {
         if (!countTrivialAllow()) {
           return allowWithStateWarning();
         }
+        recordDecision('trivial', 'comment-whitespace', { target: filePath, cls, sensitive, profile });
         return { additionalContext: trivialNote(filePath), exitCode: 0 };
       }
       const turnId = isNewFile && !sensitive ? currentTurnId(getTurnScan()) : null;
@@ -2168,6 +2264,7 @@ function run(rawInput) {
         if (!markCheckedAndCountSibling(fileKey)) {
           return allowWithStateWarning();
         }
+        recordDecision('sibling', 'same-turn-dir', { target: filePath, cls, sensitive, profile });
         return { additionalContext: siblingNote(sibling), exitCode: 0 };
       }
       const dirGate = gateKey ? { key: gateKey, turn: turnId, first: sanitizePath(filePath) } : undefined;
@@ -2178,12 +2275,14 @@ function run(rawInput) {
       }
       if (denials === null) {
         // see docs/gateguard/design-notes.md#denial-cap
+        recordDecision('cap', 'max-denials', { target: filePath, cls, sensitive, profile });
         return rawInput;
       }
       const miss = sensitive ? null : findClosestMiss(getTurnScan(), filePath, isNewFile, data);
       return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, profile, miss });
     }
 
+    recordDecision('pass-checked', 'checked', { target: filePath });
     return rawInput; // allow
   }
 
@@ -2196,6 +2295,7 @@ function run(rawInput) {
         const denial = subagentSensitiveDenial(filePath, data, false);
         if (denial) return denial;
       }
+      recordDecision('pass-subagent', 'subagent');
       return rawInput;
     }
 
@@ -2203,7 +2303,11 @@ function run(rawInput) {
     const trivialKeys = new Set();
     for (const edit of edits) {
       const filePath = edit.file_path || '';
-      if (!filePath || isClaudeSettingsPath(filePath) || isExemptPath(filePath, data)) continue;
+      const exempt = exemptReason(filePath, data);
+      if (exempt) {
+        recordDecision('pass-exempt', exempt, { target: filePath, key: `exempt:${filePath}` });
+        continue;
+      }
       const fileKey = canonicalPathKey(filePath, data);
       if (trivialKeys.has(fileKey)) continue;
       if (!isChecked([fileKey, filePath])) {
@@ -2214,6 +2318,7 @@ function run(rawInput) {
           if (!markCheckedAndCountCredit(fileKey, cls)) {
             return allowWithStateWarning();
           }
+          recordDecision('credit', 'prior-search', { target: filePath, cls, sensitive, key: fileKey });
           notes.push(creditNote(credit, filePath));
           continue;
         }
@@ -2223,6 +2328,7 @@ function run(rawInput) {
             return allowWithStateWarning();
           }
           trivialKeys.add(fileKey);
+          recordDecision('trivial', 'comment-whitespace', { target: filePath, cls, sensitive, profile, key: fileKey });
           notes.push(trivialNote(filePath));
           continue;
         }
@@ -2233,11 +2339,13 @@ function run(rawInput) {
         }
         if (denials === null) {
           // see docs/gateguard/design-notes.md#denial-cap
+          recordDecision('cap', 'max-denials', { target: filePath, cls, sensitive, profile, key: fileKey });
           continue;
         }
         const miss = sensitive ? null : findClosestMiss(getTurnScan(), filePath, false, data);
         return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, profile, miss });
       }
+      recordDecision('pass-checked', 'checked', { target: filePath, key: fileKey });
     }
     if (notes.length > 0) {
       return { additionalContext: notes, exitCode: 0 };
@@ -2248,6 +2356,7 @@ function run(rawInput) {
   if (toolName === 'Bash' || toolName === 'PowerShell') {
     const command = toolInput.command || '';
     if (isReadOnlyGitIntrospection(command)) {
+      recordDecision('pass', 'readonly-git');
       return rawInput;
     }
 
@@ -2258,8 +2367,10 @@ function run(rawInput) {
         if (!markChecked(key)) {
           return allowWithStateWarning();
         }
+        recordDecision('destructive-deny', 'destructive');
         return denyResult(destructiveBashMsg(), { includeRecoveryHint: false });
       }
+      recordDecision('pass-checked', 'destructive-retry');
       return rawInput; // allow retry after facts presented
     }
 
@@ -2268,16 +2379,22 @@ function run(rawInput) {
     // (Cursor, OpenCode, etc.) where the once-per-session routine gate is
     // friction without signal.
     if (isRoutineBashGateDisabled()) {
+      recordDecision('pass-exempt', 'routine-disabled');
       return rawInput; // routine gate opted out via env
     }
 
     if (!isChecked(ROUTINE_BASH_SESSION_KEY)) {
       if (isReadOnlyShellCommand(toolName, command)) {
-        return countRoutineReadonlyPass() ? rawInput : allowWithStateWarning();
+        if (!countRoutineReadonlyPass()) {
+          return allowWithStateWarning();
+        }
+        recordDecision('routine-readonly', 'readonly');
+        return rawInput;
       }
       if (!markChecked(ROUTINE_BASH_SESSION_KEY)) {
         return allowWithStateWarning();
       }
+      recordDecision('routine-deny', 'first-command');
       const hookId = toolName === 'PowerShell' ? POWERSHELL_HOOK_ID : BASH_HOOK_ID;
       const narrowRecoveryHint = toolName === 'PowerShell'
         ? ROUTINE_POWERSHELL_NARROW_RECOVERY_HINT
@@ -2288,6 +2405,7 @@ function run(rawInput) {
       });
     }
 
+    recordDecision('pass-checked', 'routine-checked');
     return rawInput; // allow
   }
 
