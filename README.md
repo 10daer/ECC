@@ -174,6 +174,31 @@ For Claude Code plugin setup, updates, scope changes, and hook-profile changes:
 npx ecc-universal@2.2.2 setup
 ```
 
+#### Windows first-time walkthrough
+
+If you are new to command-line tools, use this copy-and-paste path:
+
+1. Install Node.js 18 or newer, Git, and Claude Code.
+2. Open **PowerShell** from the Windows Start menu.
+3. Confirm that each prerequisite is available:
+
+   ```powershell
+   node --version
+   git --version
+   claude --version
+   ```
+
+4. Run the guided installer:
+
+   ```powershell
+   npx ecc-universal@2.2.2 setup
+   ```
+
+5. For a typical personal setup, choose **Global user**, choose **Standard** hooks, and confirm.
+6. Start a new Claude Code session and run `/plugin list` to verify that `ecc@ecc` is enabled.
+
+This path does not require cloning the repository. If any prerequisite command is not found, install or repair that prerequisite before rerunning ECC setup.
+
 If npm reports a version or cache error, confirm the registry version before retrying:
 
 ```bash
@@ -379,7 +404,7 @@ cd ECC
 | Qwen CLI | `./install.sh --profile minimal --target qwen` | See the [Qwen guide](docs/QWEN-GUIDE.md) |
 | Hermes | `./install.sh --profile minimal --target hermes` | See the [Hermes setup guide](docs/HERMES-SETUP.md) |
 | OpenClaw | `./install.sh --profile minimal --target openclaw` | Managed home-directory install |
-| Kimi Code CLI | `./install.sh --profile minimal --target kimi` | Project-local `.kimi-code/` install · [Get Kimi Code](https://www.kimi.com/code?aff=ecc) |
+| Kimi Code CLI | `./install.sh --profile minimal --target kimi` | Project-local `.kimi-code/` install · [Get Kimi Code](https://www.kimi.ai/code?aff=ecc) |
 | CodeBuddy | `./install.sh --profile minimal --target codebuddy` | Project-local `.codebuddy/` install |
 | JoyCode | `./install.sh --profile minimal --target joycode` | Project-local `.joycode/` install |
 
