@@ -286,8 +286,9 @@ extension, a non-string side, no entries or more than 64, a side over 64 KiB
 (UTF-8), more than 256 KiB in total, or any exception. Supported languages, by
 extension: JS/TS (`.js .mjs .cjs .jsx .ts .tsx .mts .cts`), Python
 (`.py .pyi`), Go, Rust, Java, Kotlin (`.kt .kts`), C# and C/C++ (`.c .h .cc
-.cpp .cxx .hpp .hh .hxx`). Shell, Ruby, Makefiles, Swift and everything else
-are unknown.
+.cpp .cxx .hpp .hh .hxx`), and shell scripts: POSIX shells (`.sh .bash .zsh`),
+PowerShell (`.ps1 .psm1`) and batch (`.bat .cmd`). Ruby, Makefiles, Swift,
+fish, PowerShell data files and everything else are unknown.
 
 ## Public surface
 
@@ -301,16 +302,26 @@ around a public declaration means the edit is inside that symbol.
   `.d.mts` and `.d.cts` files are all surface.
 - Python: `def`, `async def` or `class` whose name does not start with `_`
   (dunders such as `__init__` are public), any `__all__`, and a column-0
-  assignment or annotation of a public name on a line after the first (the
-  first line of a snippet may start mid-line). `__init__.py` is all surface.
+  assignment or annotation of a public name (a module constant or variable
+  that importers can read). The first line of a snippet may start mid-line
+  (an Edit's `old_string` can begin after the indentation), so there only an
+  all-uppercase name counts, the constant convention that function locals
+  rarely use. `__init__.py` is all surface.
 - Go: `func` (after an optional receiver), `type`, `var` or `const` with a
   capitalised name, a `package` line, and any line that starts with a
   capital letter (exported fields, interface methods, grouped declarations).
 - Rust: lines starting with `pub` (any `pub(...)`), `impl`, `trait`, or
   `#[macro_export`.
-- Java, Kotlin, C#, C and C++ always touch the surface: package-private Java,
-  Kotlin's public default, C# partial classes and C linkage make a lexical
-  answer unreliable.
+- POSIX shells: a function definition (`name() {`, `function name`), an
+  `export`, or `declare -x`/`typeset -x`, at any indentation. A sourced
+  script's functions and exported variables are what other scripts use.
+- PowerShell (case-insensitive): lines starting with `function`, `filter`,
+  `workflow`, `class`, `enum`, `param` (a script's parameters are its
+  interface), `Export-ModuleMember`, `[CmdletBinding` or `$global:`.
+- Java, Kotlin, C#, C, C++ and batch files always touch the surface:
+  package-private Java, Kotlin's public default, C# partial classes, C linkage
+  and batch labels reachable by `call :label` make a lexical answer
+  unreliable.
 
 An Edit that changes a function body without its declaration line in the
 snippet reads as not touching the surface; the local question still asks for
@@ -328,6 +339,16 @@ for `open(`, for adjacent pairs such as `read file`,
 `write text`, `read to`, and for SQL keyword pairs anywhere in the text
 (`select`+`from`, `insert`+`into`, `create`+`table`, ...). Over-matching only
 keeps the data question.
+
+Shell scripts also touch data with a file redirection (`>`, `>>`, `>|`, `&>`
+or `<` followed by a target other than `/dev/null`, `/dev/stdout`,
+`/dev/stderr`, `$null` or `nul`; descriptor duplication such as `2>&1` and
+`>&2`, heredocs and process substitution do not count), an HTTP or document
+tool (`curl`, `wget`, `jq`, `yq`, `xmllint`, `psql`, `tee`, `iwr`, `irm`),
+or a PowerShell file or web cmdlet (`Out-File`, `Get-Content`,
+`Set-Content`, `Add-Content`, `Invoke-WebRequest`, `Invoke-RestMethod`,
+`*-Clixml`; `Import-Csv` matches `csv`). Redirection is found without
+reading quotes, so a `>` inside a string also counts.
 
 ## Trivial edits
 
@@ -352,6 +373,32 @@ Anything the lexer cannot read with confidence makes the entry non-trivial:
 - a line comment ending in `\` (it continues onto the next line in C and
   Make), the trigraph `??/`, whitespace after a line-continuation `\`, a `/*`
   inside a block comment, and an unterminated block comment or string.
+
+## Shell scripts
+
+Shell comments are lexed by their own rules, and the lexer gives up (the entry
+is not trivial) wherever a comment could be code:
+
+- POSIX shells: `#` starts a comment only at the start of a line or after a
+  space, tab or `;`; after a letter, `$`, `{`, `=` and the like it is a word
+  character (`a#b`, `$#`, `${#x}`, `${x#y}`). After `(`, `)`, `|`, `&`, `<` or
+  `>` the entry is not trivial (zsh glob flags such as `(#i)`). Single quotes
+  are raw and must close on the line; `$'...'` is not trivial; double quotes
+  may hold `\` escapes and a `${...}` without quotes, but `$(` inside them,
+  any backtick, any `<<` (heredocs, here-strings, shifts), a `#!` line, a
+  backslash before a line break, and a lone carriage return (bash reads it
+  as a word character) make the entry not trivial. Only spaces and tabs
+  between words are folded; `\` escapes stay code.
+- PowerShell: `#` and `<# ... #>` are comments only at the start of a line or
+  after a space, tab or `;`; elsewhere the entry is not trivial. `#Requires`
+  is a directive and never a comment. Here-strings (`@"`, `@'`), typographic
+  quotes (PowerShell accepts them as quote marks), `$(` inside a double-quoted
+  string, a backtick before a line break, and a nested `<#` are not trivial.
+- Batch: only `REM` lines (after optional blanks and `@`, followed by a blank
+  or the end of the line) are comments; `::` labels are code, since they
+  change the parser's behaviour inside blocks. A `REM` line holding `%`, `^`,
+  `&`, `|`, `<`, `>`, `(` or `)`, and any line ending in `^`, are not trivial.
+  Code lines are compared exactly: `echo` keeps its spacing.
 
 Write is never trivial. In the hook, a trivial Edit (or a MultiEdit whose
 entries for that file are all trivial) of an unchecked code, test or prose

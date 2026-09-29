@@ -17,7 +17,10 @@ const LANGUAGE_BY_EXT = new Map([
   ['.kt', 'kotlin'], ['.kts', 'kotlin'],
   ['.cs', 'csharp'],
   ['.c', 'c'], ['.h', 'c'],
-  ['.cc', 'cpp'], ['.cpp', 'cpp'], ['.cxx', 'cpp'], ['.hpp', 'cpp'], ['.hh', 'cpp'], ['.hxx', 'cpp']
+  ['.cc', 'cpp'], ['.cpp', 'cpp'], ['.cxx', 'cpp'], ['.hpp', 'cpp'], ['.hh', 'cpp'], ['.hxx', 'cpp'],
+  ['.sh', 'shell'], ['.bash', 'shell'], ['.zsh', 'shell'],
+  ['.ps1', 'powershell'], ['.psm1', 'powershell'],
+  ['.bat', 'batch'], ['.cmd', 'batch']
 ]);
 
 // --- Lexing ---
@@ -34,7 +37,10 @@ const LEX_SPECS = {
   csharp: { ...C_FAMILY, tripleQuotes: true, rawPrefixes: '@$' },
   c: { ...C_FAMILY, rawPrefixes: 'R' },
   cpp: { ...C_FAMILY, rawPrefixes: 'R' },
-  python: { lineComment: '#', blockComment: false, quotes: '"\'', indentSensitive: true, tripleQuotes: true, fStrings: true }
+  python: { lineComment: '#', blockComment: false, quotes: '"\'', indentSensitive: true, tripleQuotes: true, fStrings: true },
+  shell: { lexer: shCodeLines, normalize: line => normalizeShellLine(line, '\\') },
+  powershell: { lexer: psCodeLines, normalize: line => normalizeShellLine(line, '`') },
+  batch: { lexer: batchCodeLines, normalize: line => line }
 };
 
 function isSpace(ch) {
@@ -205,12 +211,13 @@ function hasSpaceAfterContinuation(line) {
 }
 
 function codeSignature(text, spec) {
-  const lines = lexCodeLines(text, spec);
+  const lines = spec.lexer ? spec.lexer(text) : lexCodeLines(text, spec);
   if (lines === null) return null;
   const signature = [];
   for (const line of lines) {
     if (hasSpaceAfterContinuation(line)) return null;
-    const normalized = normalizeCodeLine(line, spec);
+    const normalized = spec.normalize ? spec.normalize(line) : normalizeCodeLine(line, spec);
+    if (normalized === null) return null;
     if (normalized) signature.push(normalized);
   }
   return signature;
@@ -223,6 +230,230 @@ function isTrivialEdit(oldString, newString, spec) {
   const after = codeSignature(newString, spec);
   if (after === null || before.length !== after.length) return false;
   return before.every((line, index) => line === after[index]);
+}
+
+// --- Shell lexing ---
+// see docs/gateguard/design-notes.md#shell-scripts
+
+function isLineStart(text, i) {
+  return i === 0 || text[i - 1] === '\n' || text[i - 1] === '\r';
+}
+
+function hashStartsComment(text, i) {
+  if (isLineStart(text, i)) return true;
+  const prev = text[i - 1];
+  if (prev === ' ' || prev === '\t' || prev === ';') return true;
+  return '()|&<>'.includes(prev) ? null : false;
+}
+
+function shDoubleQuoteEnd(text, i) {
+  for (let j = i + 1; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '"') return j;
+    if (ch === '\n' || ch === '\r' || ch === '`') return -1;
+    if (ch === '\\') {
+      if (j + 1 >= text.length || text[j + 1] === '\n' || text[j + 1] === '\r') return -1;
+      j++;
+    } else if (ch === '$' && text[j + 1] === '(') {
+      return -1;
+    } else if (ch === '$' && text[j + 1] === '{') {
+      const close = text.indexOf('}', j + 2);
+      if (close === -1) return -1;
+      for (let k = j + 2; k < close; k++) {
+        if ('"\'\n\r'.includes(text[k])) return -1;
+      }
+      j = close;
+    }
+  }
+  return -1;
+}
+
+function hasLoneCarriageReturn(text) {
+  for (let at = text.indexOf('\r'); at !== -1; at = text.indexOf('\r', at + 1)) {
+    if (text[at + 1] !== '\n') return true;
+  }
+  return false;
+}
+
+function isBlank(ch) {
+  return ch === ' ' || ch === '\t';
+}
+
+function shCodeLines(text) {
+  if (text.includes('<<') || text.includes('`') || hasLoneCarriageReturn(text)) return null;
+  const lines = [];
+  let code = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '\r') {
+      lines.push(code);
+      code = '';
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      continue;
+    }
+    if (ch === '\\') {
+      const next = text[i + 1];
+      if (next === undefined || next === '\n' || next === '\r') return null;
+      code += ch + next;
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      if (text[i - 1] === '$') return null;
+      const end = text.indexOf("'", i + 1);
+      if (end === -1) return null;
+      const body = text.slice(i, end + 1);
+      if (body.includes('\n') || body.includes('\r')) return null;
+      code += body;
+      i = end;
+      continue;
+    }
+    if (ch === '"') {
+      const end = shDoubleQuoteEnd(text, i);
+      if (end === -1) return null;
+      code += text.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === '#') {
+      const starts = hashStartsComment(text, i);
+      if (starts === null) return null;
+      if (starts) {
+        if (isLineStart(text, i) && text[i + 1] === '!') return null;
+        while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r') i++;
+        continue;
+      }
+    }
+    code += ch;
+  }
+  lines.push(code);
+  return lines;
+}
+
+const PS_SMART_QUOTES = /[\u2018\u2019\u201a\u201b\u201c\u201d\u201e]/;
+
+function psHashStartsComment(text, i) {
+  if (isLineStart(text, i)) return true;
+  const prev = text[i - 1];
+  return prev === ' ' || prev === '\t' || prev === ';';
+}
+
+function psQuoteEnd(text, i) {
+  const quote = text[i];
+  for (let j = i + 1; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '\n' || ch === '\r') return -1;
+    if (quote === '"' && ch === '`') {
+      if (j + 1 >= text.length || text[j + 1] === '\n' || text[j + 1] === '\r') return -1;
+      j++;
+    } else if (quote === '"' && ch === '$' && text[j + 1] === '(') {
+      return -1;
+    } else if (ch === quote) {
+      if (text[j + 1] !== quote) return j;
+      j++;
+    }
+  }
+  return -1;
+}
+
+function psCodeLines(text) {
+  if (text.includes('@"') || text.includes("@'") || PS_SMART_QUOTES.test(text)) return null;
+  const lines = [];
+  let code = '';
+  let block = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '\n' || ch === '\r') {
+      lines.push(code);
+      code = '';
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      continue;
+    }
+    if (block) {
+      if (ch === '<' && text[i + 1] === '#') return null;
+      if (ch === '#' && text[i + 1] === '>') {
+        block = false;
+        code += ' ';
+        i++;
+      }
+      continue;
+    }
+    if (ch === '`') {
+      const next = text[i + 1];
+      if (next === undefined || next === '\n' || next === '\r') return null;
+      code += ch + next;
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      const end = psQuoteEnd(text, i);
+      if (end === -1) return null;
+      code += text.slice(i, end + 1);
+      i = end;
+      continue;
+    }
+    if (ch === '<' && text[i + 1] === '#') {
+      if (!psHashStartsComment(text, i)) return null;
+      block = true;
+      i++;
+      continue;
+    }
+    if (ch === '#') {
+      if (!psHashStartsComment(text, i)) return null;
+      if (text.slice(i + 1, i + 9).toLowerCase() === 'requires') return null;
+      while (i + 1 < text.length && text[i + 1] !== '\n' && text[i + 1] !== '\r') i++;
+      continue;
+    }
+    code += ch;
+  }
+  if (block) return null;
+  lines.push(code);
+  return lines;
+}
+
+function batchCodeLines(text) {
+  const lines = [];
+  for (const line of text.split(/\r\n|\r|\n/)) {
+    if (line.endsWith('^')) return null;
+    let start = 0;
+    while (isBlank(line[start])) start++;
+    if (line[start] === '@') start++;
+    while (isBlank(line[start])) start++;
+    const word = line.slice(start, start + 3).toLowerCase();
+    const after = line[start + 3];
+    if (word === 'rem' && (after === undefined || isBlank(after))) {
+      if (/[%^&|<>()]/.test(line)) return null;
+      lines.push('');
+    } else {
+      lines.push(line.trim() ? line : '');
+    }
+  }
+  return lines;
+}
+
+function normalizeShellLine(line, escape) {
+  let out = '';
+  let pendingSpace = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (isBlank(ch)) {
+      pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace && out) out += ' ';
+    pendingSpace = false;
+    if (ch === escape && i + 1 < line.length) {
+      out += ch + line[++i];
+    } else if (ch === "'" || ch === '"') {
+      const end = escape === '`' ? psQuoteEnd(line, i) : ch === "'" ? line.indexOf("'", i + 1) : shDoubleQuoteEnd(line, i);
+      if (end === -1) return null;
+      out += line.slice(i, end + 1);
+      i = end;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
 }
 
 // --- Public surface ---
@@ -274,14 +505,13 @@ function pythonLineIsSurface(line, index) {
     const rest = t.slice(skipSpaces(t, 5));
     if (leadingWord(rest, 'def')) return pythonNameIsPublic(identifierAt(rest, skipSpaces(rest, 3)));
   }
-  if (index > 0 && start === 0) {
-    const name = identifierAt(t, 0);
-    const after = t[skipSpaces(t, name.length)];
-    const rest = skipSpaces(t, name.length);
-    const assigned = (after === '=' && t[rest + 1] !== '=') || (after === ':' && skipSpaces(t, rest + 1) < t.length);
-    return Boolean(name) && isLetter(name[0]) && assigned && pythonNameIsPublic(name);
-  }
-  return false;
+  if (start !== 0) return false;
+  const name = identifierAt(t, 0);
+  const rest = skipSpaces(t, name.length);
+  const after = t[rest];
+  const assigned = (after === '=' && t[rest + 1] !== '=') || (after === ':' && skipSpaces(t, rest + 1) < t.length);
+  if (!name || !isLetter(name[0]) || !assigned) return false;
+  return index > 0 ? pythonNameIsPublic(name) : name === name.toUpperCase();
 }
 
 function goLineIsSurface(line) {
@@ -306,11 +536,38 @@ function rustLineIsSurface(line) {
   return leadingWord(t, 'pub') || leadingWord(t, 'impl') || leadingWord(t, 'trait') || t.startsWith('#[macro_export');
 }
 
+function shellFunctionName(t) {
+  let end = 0;
+  while (end < t.length && (isIdentChar(t[end]) || t[end] === '-' || t[end] === ':' || t[end] === '.')) end++;
+  if (end === 0) return false;
+  const open = skipSpaces(t, end);
+  return t[open] === '(' && t[skipSpaces(t, open + 1)] === ')';
+}
+
+function shellLineIsSurface(line) {
+  const t = line.slice(skipSpaces(line, 0));
+  if (leadingWord(t, 'export') || leadingWord(t, 'function')) return true;
+  if (leadingWord(t, 'declare') || leadingWord(t, 'typeset')) {
+    const flags = t.slice(skipSpaces(t, 7));
+    return flags[0] === '-' && identifierAt(flags, 1).includes('x');
+  }
+  return shellFunctionName(t);
+}
+
+const POWERSHELL_SURFACE_WORDS = ['function', 'filter', 'workflow', 'class', 'enum', 'param', 'export-modulemember', '[cmdletbinding', '$global:'];
+
+function powershellLineIsSurface(line) {
+  const t = line.slice(skipSpaces(line, 0)).toLowerCase();
+  return POWERSHELL_SURFACE_WORDS.some(word => t.startsWith(word) && (word.endsWith(':') || !isIdentChar(t[word.length])));
+}
+
 const SURFACE_BY_LANGUAGE = {
   js: jsLineIsSurface,
   python: pythonLineIsSurface,
   go: goLineIsSurface,
-  rust: rustLineIsSurface
+  rust: rustLineIsSurface,
+  shell: shellLineIsSurface,
+  powershell: powershellLineIsSurface
 };
 
 function baseName(filePath) {
@@ -375,11 +632,46 @@ function* words(text) {
   }
 }
 
-function textTouchesData(text) {
+const SHELL_LANGUAGES = new Set(['shell', 'powershell', 'batch']);
+const SHELL_DATA_WORDS = new Set(['curl', 'wget', 'jq', 'yq', 'xmllint', 'psql', 'tee', 'iwr', 'irm', 'clixml']);
+const SHELL_DATA_PAIRS = [['out', 'file'], ['get', 'content'], ['set', 'content'], ['add', 'content'], ['web', 'request'], ['rest', 'method']];
+const NULL_TARGETS = ['/dev/null', '/dev/stdout', '/dev/stderr', '$null', 'nul'];
+
+function redirectTargetIsFile(text, at) {
+  const start = skipSpaces(text, at);
+  const ch = text[start];
+  if (ch === undefined || ch === '\n' || ch === '\r' || ch === '&') return false;
+  const rest = text.slice(start, start + 12).toLowerCase();
+  return !NULL_TARGETS.some(target => rest.startsWith(target) && !isIdentChar(rest[target.length]) && rest[target.length] !== '.');
+}
+
+function shellRedirectsFile(text) {
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '>') {
+      const prev = text[i - 1];
+      if (prev === '-' || prev === '=' || prev === '>') continue;
+      let at = i + 1;
+      if (text[at] === '>' || text[at] === '|') at++;
+      if (text[at] === '=' || text[at] === '&') continue;
+      if (redirectTargetIsFile(text, at)) return true;
+    } else if (ch === '<') {
+      const next = text[i + 1];
+      if (text[i - 1] === '<' || next === '<' || next === '(' || next === '&' || next === '#' || next === '=') continue;
+      if (redirectTargetIsFile(text, i + 1)) return true;
+    }
+  }
+  return false;
+}
+
+function textTouchesData(text, language) {
+  const shell = SHELL_LANGUAGES.has(language);
+  if (shell && shellRedirectsFile(text)) return true;
   const seen = new Set();
   let previous = '';
   for (const { word, call } of words(text)) {
     if (DATA_WORDS.has(word)) return true;
+    if (shell && (SHELL_DATA_WORDS.has(word) || SHELL_DATA_PAIRS.some(([a, b]) => previous === a && word === b))) return true;
     if (word === 'open' && call) return true;
     if (DATA_PAIRS.some(([a, b]) => previous === a && word === b)) return true;
     seen.add(word);
@@ -438,7 +730,7 @@ function profileChange(input) {
     const lineIsSurface = SURFACE_BY_LANGUAGE[language];
     const touchesPublicSurface = input.tool === 'Write' || !lineIsSurface || wholeFileIsSurface(input.filePath, language) ||
       texts.sides.some(side => textTouchesSurface(side, lineIsSurface));
-    const touchesData = texts.sides.some(textTouchesData);
+    const touchesData = texts.sides.some(side => textTouchesData(side, language));
     const spec = LEX_SPECS[language];
     const trivial = input.tool === 'Edit' && texts.pairs.every(([oldString, newString]) => isTrivialEdit(oldString, newString, spec));
     return Object.freeze({ known: true, language, touchesPublicSurface, touchesData, trivial });

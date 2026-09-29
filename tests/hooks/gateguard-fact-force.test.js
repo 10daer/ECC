@@ -4554,6 +4554,44 @@ function runTests() {
 
   clearState();
   if (
+    test('shell scripts ask the questions their change warrants', () => {
+      const local = b2Reason('Edit', { file_path: 'scripts/q1.sh', old_string: '  echo "a"', new_string: '  echo "b"' });
+      assert.deepStrictEqual(b2Questions(local), [B2_TEXT.localCallers, B2_TEXT.quote]);
+      clearState();
+      const fn = b2Reason('Edit', { file_path: 'scripts/q2.sh', old_string: 'deploy() {', new_string: 'deploy_all() {' });
+      assert.deepStrictEqual(b2Questions(fn), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote]);
+      clearState();
+      const exported = b2Reason('Edit', { file_path: 'scripts/q3.sh', old_string: 'export MODE=a', new_string: 'export MODE=b' });
+      assert.deepStrictEqual(b2Questions(exported), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote]);
+      clearState();
+      const fetch = b2Reason('Edit', { file_path: 'scripts/q4.sh', old_string: '  run', new_string: '  curl -s "$URL" > out.json' });
+      assert.deepStrictEqual(b2Questions(fetch), [B2_TEXT.localCallers, B2_TEXT.dataSchema, B2_TEXT.quote]);
+      clearState();
+      const ps = b2Reason('Edit', { file_path: 'scripts/q5.ps1', old_string: 'function Get-A {', new_string: 'function Get-B {' });
+      assert.deepStrictEqual(b2Questions(ps), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote]);
+      clearState();
+      const bat = b2Reason('Edit', { file_path: 'scripts/q6.bat', old_string: 'echo a', new_string: 'echo b' });
+      assert.deepStrictEqual(b2Questions(bat), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote], 'batch always counts as surface');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('a one-line edit of a Python module constant asks for importers', () => {
+      const reason = b2Reason('Edit', { file_path: 'tools/q7.py', old_string: 'BASE = "https://a.test/#home"', new_string: 'BASE = "https://a.test/#admin"' });
+      assert.deepStrictEqual(b2Questions(reason), [B2_TEXT.importers, B2_TEXT.publicApi, B2_TEXT.quote]);
+      clearState();
+      const local = b2Reason('Edit', { file_path: 'tools/q8.py', old_string: 'result = compute(a)', new_string: 'result = compute(b)' });
+      assert.deepStrictEqual(b2Questions(local), [B2_TEXT.localCallers, B2_TEXT.quote]);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
     test('condensed denials follow the change profile', () => {
       const env = { GATEGUARD_FACT_FORCE_FULL_DENIALS: '0' };
       const local = b2Reason('Edit', { file_path: 'src/c1.js', old_string: '  return 1;', new_string: '  return 2;' }, env);
@@ -4628,6 +4666,26 @@ function runTests() {
 
   clearState();
   if (
+    test('comment-only edits of shell, PowerShell and batch scripts pass without marking them checked', () => {
+      const cases = [
+        { file_path: 'scripts/s1.sh', old_string: '# build\n', new_string: '# Build all targets.\n' },
+        { file_path: 'scripts/s2.ps1', old_string: '<# old #>\nGet-Item a', new_string: '<# new #>\nGet-Item a' },
+        { file_path: 'scripts/s3.cmd', old_string: 'REM old\necho a', new_string: 'REM new\necho a' }
+      ];
+      for (const input of cases) {
+        const out = b3Run('Edit', input);
+        assert.notStrictEqual(out.decision, 'deny', out.result.stdout);
+        assert.ok(out.context.includes(`${B3_NOTE} ${input.file_path}`), out.context);
+        assert.ok(!(b3State().checked || []).includes(b3Key(input.file_path)), 'not marked checked');
+      }
+      assert.strictEqual(b3State().trivial_allows, 3);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
     test('trivial-looking edits are still denied where the pass does not apply', () => {
       const cases = [
         ['sensitive target', { file_path: 'src/auth/session.js', old_string: '// old\nfoo();', new_string: '// new\nfoo();' }],
@@ -4639,7 +4697,14 @@ function runTests() {
         ['instruction code file', { file_path: '.claude/hooks/d5.md', old_string: '// old', new_string: '// new' }],
         ['template literal', { file_path: 'src/d6.js', old_string: '// old\n`;', new_string: '// new\n`;' }],
         ['over the bound', { file_path: 'src/d7.js', old_string: `// ${'x'.repeat(70 * 1024)}`, new_string: '// y' }],
-        ['missing new_string', { file_path: 'src/d8.js', old_string: '// old' }]
+        ['missing new_string', { file_path: 'src/d8.js', old_string: '// old' }],
+        ['sensitive shell script', { file_path: 'scripts/auth/rotate.sh', old_string: '# old\nrun', new_string: '# new\nrun' }],
+        ['workflow shell script', { file_path: '.github/workflows/d9.sh', old_string: '# old', new_string: '# new' }],
+        ['shell heredoc', { file_path: 'scripts/d10.sh', old_string: 'cat <<EOF\n# old\nEOF', new_string: 'cat <<EOF\n# new\nEOF' }],
+        ['shell quoted hash', { file_path: 'scripts/d11.sh', old_string: 'echo "a # old"', new_string: 'echo "a # new"' }],
+        ['shell shebang', { file_path: 'scripts/d12.sh', old_string: '#!/bin/bash', new_string: '#!/bin/sh' }],
+        ['powershell requires', { file_path: 'scripts/d13.ps1', old_string: '#Requires -Version 5', new_string: '#Requires -Version 7' }],
+        ['powershell here-string', { file_path: 'scripts/d14.ps1', old_string: '@"\n# old\n"@', new_string: '@"\n# new\n"@' }]
       ];
       for (const [label, input] of cases) {
         clearState();

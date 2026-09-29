@@ -95,19 +95,24 @@ For **code** targets the gate reads the change it is about to allow (Edit
 - **Public surface:** a line on either side declares or exposes a public name.
   JS/TS: `export`, `exports`, `public`, `declare` (`.d.ts` files always); Python:
   `def`/`class` not starting with `_`, dunders, `__all__`, a module-level public
-  assignment (`__init__.py` always); Go: capitalised `func`/`type`/`var`/`const`
-  names, `package`, lines starting with a capital; Rust: `pub`, `impl`, `trait`,
-  `#[macro_export]`. Java, Kotlin, C#, C and C++, and every Write, always count
-  as touching it. Touching it keeps questions 1 and 2; otherwise both are
+  assignment such as `BASE_URL = ...` (`__init__.py` always); Go: capitalised
+  `func`/`type`/`var`/`const` names, `package`, lines starting with a capital;
+  Rust: `pub`, `impl`, `trait`, `#[macro_export]`; shell: function definitions,
+  `export`, `declare -x`; PowerShell: `function`, `filter`, `param`,
+  `Export-ModuleMember`, `[CmdletBinding`. Java, Kotlin, C#, C, C++ and batch
+  files, and every Write, always count as touching it. Touching it keeps questions 1 and 2; otherwise both are
   replaced by "List the call sites in this file or its module that rely on the
   changed behaviour".
 - **Data:** words for file I/O, formats (`json`, `csv`, `yaml`, …),
-  serialisation, schemas, SQL and dates on either side. Without them the data
+  serialisation, schemas, SQL and dates on either side; in shell scripts also
+  redirection to a file, `curl`, `wget`, `jq` and PowerShell file and web
+  cmdlets. Without them the data
   question is dropped.
 - **Trivial:** see [Comment and whitespace-only edits](#comment-and-whitespace-only-edits).
 
 Supported extensions: `.js .mjs .cjs .jsx .ts .tsx .mts .cts .py .pyi .go .rs
-.java .kt .kts .cs .c .h .cc .cpp .cxx .hpp .hh .hxx`. Any other extension, a
+.java .kt .kts .cs .c .h .cc .cpp .cxx .hpp .hh .hxx .sh .bash .zsh .ps1 .psm1
+.bat .cmd`. Any other extension, a
 missing or non-string field, more than 64 MultiEdit entries, a side over
 64 KiB, or 256 KiB in total means the full questions, word for word. Sensitive
 targets always get the full questions. Other classes keep their class
@@ -404,8 +409,10 @@ It applies only to the extensions listed in
 [Questions fit the change](#questions-fit-the-change), and only when every
 entry reads cleanly:
 
-- comments are `//` and `/* */` (C family) or `#` (Python); C preprocessor
-  lines are code; whitespace inside strings, line breaks between code, and
+- comments are `//` and `/* */` (C family), `#` (Python), `#` at the start of
+  a word (shell), `#` and `<# #>` (PowerShell, not `#Requires`), or `REM`
+  lines (batch); C preprocessor lines, shebang lines and batch `::` labels
+  are code; whitespace inside strings, line breaks between code, and
   the presence of whitespace between tokens are code (`a+b` → `a + b` is not
   trivial);
 - Python indentation of code lines is code;
@@ -413,7 +420,9 @@ entry reads cleanly:
   quotes, `r"`, `R"`, `@"`, `$"`, f-strings, Kotlin `$`), a string running to
   the end of a line, a line comment ending in `\`, `??/`, a nested or
   unterminated block comment; in JS/TS any `/` outside a comment (regex versus
-  division), JSX-like tags, and `-->`;
+  division), JSX-like tags, and `-->`; in shell scripts heredocs, backticks,
+  `$(` inside double quotes, `$'...'`, line continuations and here-strings
+  (see the design notes for the full list);
 - config, instruction, and sensitive targets never pass this way.
 
 Only the snippet is read, so a comment-looking line inside a multi-line string

@@ -344,7 +344,7 @@
     },
     {
       "id": "unknown-extension-comment",
-      "note": "Shell has no change profile, so it is never trivial.",
+      "note": "A comment-only change to a shell script; # starts a comment only at the start of a word.",
       "transcript": [
         {
           "type": "user",
@@ -402,9 +402,9 @@
         },
         "tool_use_id": "toolu_commentonlyedits_006"
       },
-      "expect": "deny",
+      "expect": "allow",
       "mustDeny": false,
-      "redundant": false,
+      "redundant": true,
       "relevantQuestions": [
         "quote-instruction"
       ]

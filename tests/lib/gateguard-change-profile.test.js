@@ -42,10 +42,11 @@ test('supported extensions map to a language; others do not', () => {
     'a.js': 'js', 'a.mjs': 'js', 'a.cjs': 'js', 'a.jsx': 'js', 'a.ts': 'js', 'a.tsx': 'js', 'a.mts': 'js', 'a.cts': 'js',
     'a.py': 'python', 'a.pyi': 'python', 'a.go': 'go', 'a.rs': 'rust', 'a.java': 'java', 'a.kt': 'kotlin', 'a.kts': 'kotlin',
     'a.cs': 'csharp', 'a.c': 'c', 'a.h': 'c', 'a.cc': 'cpp', 'a.cpp': 'cpp', 'a.cxx': 'cpp', 'a.hpp': 'cpp', 'a.hh': 'cpp',
-    'SRC\\A.PY': 'python'
+    'SRC\\A.PY': 'python', 'a.sh': 'shell', 'a.bash': 'shell', 'a.zsh': 'shell', 'a.ps1': 'powershell', 'a.psm1': 'powershell',
+    'a.bat': 'batch', 'a.cmd': 'batch', 'B.CMD': 'batch'
   };
   for (const [file, lang] of Object.entries(expected)) assert.strictEqual(languageFor(file), lang, file);
-  for (const file of ['a.rb', 'a.sh', 'Makefile', 'a.mk', 'a.yaml', 'a.md', 'a', 'a.swift', '', null]) {
+  for (const file of ['a.rb', 'a.fish', 'a.psd1', 'Makefile', 'a.mk', 'a.yaml', 'a.md', 'a', 'a.swift', '', null]) {
     assert.strictEqual(languageFor(file), null, String(file));
   }
 });
@@ -110,6 +111,21 @@ test('Python: public def/class, dunders, __all__ and __init__.py touch the surfa
   assert.strictEqual(surface('a.py', 'x = 1\nLIMIT = 3', 'x = 1\nLIMIT = 4'), true, 'module-level public name');
 });
 
+test('Python: a column-0 constant touches the surface even on the first line of a snippet', () => {
+  assert.strictEqual(surface('a.py', 'BASE = "https://a.test/#home"', 'BASE = "https://a.test/#admin"'), true);
+  assert.strictEqual(surface('a.py', 'MAX_RETRIES = 3', 'MAX_RETRIES = 4'), true);
+  assert.strictEqual(surface('a.py', 'TIMEOUT: float = 1.5', 'TIMEOUT: float = 2.5'), true);
+  assert.strictEqual(surface('a.py', 'x = 1\nretries = 3', 'x = 1\nretries = 4'), true, 'public name after the first line');
+});
+
+test('Python: private, indented, lowercase first-line and comparison lines stay local', () => {
+  assert.strictEqual(surface('a.py', '_BASE = 1', '_BASE = 2'), false, 'private constant');
+  assert.strictEqual(surface('a.py', '    LIMIT = 3', '    LIMIT = 4'), false, 'indented');
+  assert.strictEqual(surface('a.py', 'result = compute(a)', 'result = compute(b)'), false, 'first line may start mid-line');
+  assert.strictEqual(surface('a.py', 'LIMIT == 3', 'LIMIT == 4'), false, 'comparison');
+  assert.strictEqual(surface('a.py', 'X1 = 1', 'X1 = 2'), true, 'digits allowed after the first letter');
+});
+
 test('Python: private definitions and bodies do not touch the surface', () => {
   assert.strictEqual(surface('a.py', 'def _helper(a):', 'def _helper(a, b):'), false);
   assert.strictEqual(surface('a.py', '    return a + 1', '    return a + 2'), false);
@@ -150,6 +166,150 @@ test('Write always touches the surface', () => {
   assert.strictEqual(profile.known, true);
   assert.strictEqual(profile.touchesPublicSurface, true);
   assert.strictEqual(profile.trivial, false);
+});
+
+// ── shell scripts ──
+console.log('\nshell scripts:');
+
+test('shell: function definitions and exported variables touch the surface', () => {
+  const hits = [
+    ['a.sh', 'deploy() {', 'deploy() {\n  set -e'],
+    ['a.sh', 'function deploy {', 'function deploy_all {'],
+    ['a.bash', 'function deploy() {', 'function deploy(){'],
+    ['a.zsh', 'my-helper () {', 'my-helper () { :'],
+    ['a.sh', 'export PATH="$HOME/bin:$PATH"', 'export PATH="$HOME/.local/bin:$PATH"'],
+    ['a.sh', 'declare -x MODE=a', 'declare -x MODE=b'],
+    ['a.ps1', 'function Get-Item2 {', 'function Get-Item2 { param($x)'],
+    ['a.psm1', 'Export-ModuleMember -Function Get-A', 'Export-ModuleMember -Function Get-A, Get-B'],
+    ['a.ps1', 'param([string]$Path)', 'param([string]$Path, [switch]$Force)'],
+    ['a.ps1', '[CmdletBinding()]', '[CmdletBinding(SupportsShouldProcess)]'],
+    ['a.ps1', 'FILTER Only-Odd { }', 'FILTER Only-Odd { $_ }'],
+    ['a.bat', 'set X=1', 'set X=2']
+  ];
+  for (const [file, before, after] of hits) assert.strictEqual(surface(file, before, after), true, `${file}: ${before}`);
+});
+
+test('shell: bodies and local variables do not touch the surface', () => {
+  const misses = [
+    ['a.sh', '  echo "building"', '  echo "building all"'],
+    ['a.sh', '  local dir=$1', '  local dir=$2'],
+    ['a.sh', 'count=1', 'count=2'],
+    ['a.sh', '  exporter --run', '  exporter --run --fast'],
+    ['a.ps1', '  Write-Output $x', '  Write-Output $y'],
+    ['a.ps1', '  $functionName = 1', '  $functionName = 2']
+  ];
+  for (const [file, before, after] of misses) assert.strictEqual(surface(file, before, after), false, `${file}: ${before}`);
+});
+
+test('shell: redirection to files, HTTP clients, jq and CSV touch data', () => {
+  const hits = [
+    ['a.sh', 'echo "$line" >> "$OUT"'],
+    ['a.sh', 'sort < input.txt'],
+    ['a.sh', 'cmd &> run.log'],
+    ['a.sh', 'curl -s "$URL"'],
+    ['a.sh', 'wget -q "$URL"'],
+    ['a.sh', "jq -r '.items[]'"],
+    ['a.sh', 'cut -d, -f2 report.csv'],
+    ['a.ps1', '$r = Invoke-RestMethod $u'],
+    ['a.ps1', 'Get-Content $p | Out-File out.txt'],
+    ['a.ps1', 'Import-Csv rows.csv'],
+    ['a.ps1', 'Set-Content -Path $p -Value $v'],
+    ['a.bat', 'type a.txt > b.txt']
+  ];
+  for (const [file, text] of hits) assert.strictEqual(data(file, 'x=1', text), true, `${file}: ${text}`);
+});
+
+test('shell: descriptor duplication and null devices do not touch data', () => {
+  const misses = [
+    ['a.sh', 'make build 2>&1'],
+    ['a.sh', 'command -v git >/dev/null 2>&1'],
+    ['a.sh', 'echo "done" >&2'],
+    ['a.sh', 'if [ "$a" -gt 1 ]; then echo hi; fi'],
+    ['a.ps1', 'git fetch > $null'],
+    ['a.ps1', 'Write-Output ($a -gt 1)'],
+    ['a.bat', 'del tmp >nul 2>&1']
+  ];
+  for (const [file, text] of misses) assert.strictEqual(data(file, 'x=1', text), false, `${file}: ${text}`);
+});
+
+test('shell: comment-only and whitespace-only edits are trivial', () => {
+  const cases = [
+    ['a.sh', '# build\n', '# Build all targets.\n'],
+    ['a.sh', 'make all  # old', 'make all  # new'],
+    ['a.sh', 'make   all', 'make all'],
+    ['a.bash', 'n=${#arr[@]} # old', 'n=${#arr[@]} # new'],
+    ['a.sh', 'echo "$#" ; # old', 'echo "$#" ; # new'],
+    ['a.sh', 'echo "${name}" # old', 'echo "${name}" # new'],
+    ['a.zsh', 'if true; then\n  x\nfi', 'if true; then\n    x\nfi'],
+    ['a.ps1', '# old\nGet-Item a', '# new\nGet-Item a'],
+    ['a.ps1', '<# old\nhelp #>\nGet-Item a', '<# new\nhelp #>\nGet-Item a'],
+    ['a.ps1', "Write-Output 'a''b' # old", "Write-Output 'a''b' # new"],
+    ['a.bat', 'REM old\necho a', 'REM new\necho a'],
+    ['a.cmd', '@rem old\necho a', '@REM new\necho a'],
+    ['a.bat', 'echo a\n\necho b', 'echo a\necho b']
+  ];
+  for (const [file, before, after] of cases) {
+    assert.strictEqual(trivial(file, before, after), true, `${file}: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+  }
+});
+
+test('shell: # inside strings, words, heredocs and substitutions is never a comment', () => {
+  const cases = [
+    ['a.sh', 'echo "a # b"', 'echo "a # c"'],
+    ['a.sh', "echo 'a # b'", "echo 'a # c'"],
+    ['a.sh', 'echo a#b', 'echo a#c'],
+    ['a.sh', 'x=#old', 'x=#new'],
+    ['a.sh', 'cat <<EOF\n# a\nEOF', 'cat <<EOF\n# b\nEOF'],
+    ['a.sh', 'cat <<-EOF\n\t# a\n\tEOF', 'cat <<-EOF\n\t# b\n\tEOF'],
+    ['a.sh', "cat <<'EOF'\n# a\nEOF", "cat <<'EOF'\n# b\nEOF"],
+    ['a.bash', 'grep x <<< "# a"', 'grep x <<< "# b"'],
+    ['a.sh', 'echo "$(printf " #a")"', 'echo "$(printf " #b")"'],
+    ['a.sh', 'echo "${x:-" #a"}"', 'echo "${x:-" #b"}"'],
+    ['a.sh', 'echo `echo #a`', 'echo `echo #b`'],
+    ['a.bash', "echo $'it\\'s' # a", "echo $'it\\'s' # b"],
+    ['a.sh', "echo 'a\\' '  x  '", "echo 'a\\' ' x '"],
+    ['a.sh', 'echo a\\  b', 'echo a\\ b'],
+    ['a.zsh', 'print -l *(#q.) # a', 'print -l *(#q.) # b'],
+    ['a.sh', 'echo "multi\n# a"', 'echo "multi\n# b"'],
+    ['a.ps1', 'Write-Output "a # b"', 'Write-Output "a # c"'],
+    ['a.ps1', "Write-Output 'a # b'", "Write-Output 'a # c'"],
+    ['a.ps1', 'Write-Output a#b', 'Write-Output a#c'],
+    ['a.ps1', '$s = @"\n# a\n"@', '$s = @"\n# b\n"@'],
+    ['a.ps1', "$s = @'\n# a\n'@", "$s = @'\n# b\n'@"],
+    ['a.ps1', 'Write-Output "$(Get-X " #a")"', 'Write-Output "$(Get-X " #b")"'],
+    ['a.ps1', 'Write-Output \u201ca # b\u201d', 'Write-Output \u201ca # c\u201d']
+  ];
+  for (const [file, before, after] of cases) {
+    assert.strictEqual(trivial(file, before, after), false, `${file}: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+  }
+});
+
+test('shell: directives, continuations and significant whitespace are never trivial', () => {
+  const cases = [
+    ['a.sh', '#!/bin/bash\nset -e', '#!/bin/sh\nset -e'],
+    ['a.sh', 'make \\\n  all', 'make \\\n# note\n  all'],
+    ['a.sh', 'echo a  # old', 'echo a\\ # new'],
+    ['a.ps1', '#Requires -Version 5\nGet-Item a', '#Requires -Version 7\nGet-Item a'],
+    ['a.ps1', '#requires -RunAsAdministrator', '# requires nothing'],
+    ['a.ps1', 'Get-Item `\n  a', 'Get-Item `\n# note\n  a'],
+    ['a.ps1', '<# a <# b #> #>', '<# a <# c #> #>'],
+    ['a.ps1', 'Get-Item a <# old #>', 'Get-Item a<# new #>'],
+    ['a.bat', 'echo a  b', 'echo a b'],
+    ['a.bat', ':: old\necho a', ':: new\necho a'],
+    ['a.bat', 'REM 100%\necho a', 'REM 50%\necho a'],
+    ['a.bat', 'echo a ^\nREM old', 'echo a ^\nREM new'],
+    ['a.bat', 'echo a & REM old', 'echo a & REM new'],
+    ['a.bat', 'REMARK old', 'REMARK new'],
+    ['a.sh', 'echo a\r#b', 'echo a\r#c'],
+    ['a.sh', 'echo a\vb', 'echo a b'],
+    ['a.ps1', 'Write-Output a\u00a0#b', 'Write-Output a\u00a0#c'],
+    ['a.bat', '\vREM old\necho a', '\vREM new\necho a'],
+    ['a.bat', '(\n  REM old)\n  echo a\n)', '(\n  REM new)\n  echo a\n)'],
+    ['a.bat', 'REM a > b', 'REM a > c']
+  ];
+  for (const [file, before, after] of cases) {
+    assert.strictEqual(trivial(file, before, after), false, `${file}: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+  }
 });
 
 // ── data ──
@@ -299,7 +459,7 @@ test('comment tricks that can hide code are never trivial', () => {
 test('Write, unknown languages and MultiEdit with any non-trivial entry are not trivial', () => {
   assert.strictEqual(write('a.js', '// only a comment\n').trivial, false);
   assert.strictEqual(trivial('a.rb', '# a', '# b'), false);
-  assert.strictEqual(trivial('a.sh', '# a', '# b'), false);
+  assert.strictEqual(trivial('a.fish', '# a', '# b'), false);
   const multi = edits => profileChange({ filePath: 'a.js', tool: 'Edit', edits });
   assert.strictEqual(multi([{ old_string: '// a', new_string: '// b' }, { old_string: '// c', new_string: '// d' }]).trivial, true);
   assert.strictEqual(multi([{ old_string: '// a', new_string: '// b' }, { old_string: 'f(1)', new_string: 'f(2)' }]).trivial, false);
@@ -330,10 +490,14 @@ test('64 KiB adversarial inputs profile in linear time', () => {
     'aA'.repeat(size / 2),
     '# \\'.repeat(Math.floor(size / 3)),
     'func ('.repeat(Math.floor(size / 6)),
-    'select from '.repeat(Math.floor(size / 12))
+    'select from '.repeat(Math.floor(size / 12)),
+    '"${'.repeat(Math.floor(size / 3)) + '}',
+    '<# '.repeat(Math.floor(size / 3)),
+    "'' ".repeat(Math.floor(size / 3)),
+    '> '.repeat(size / 2)
   ];
   for (const [index, input] of inputs.entries()) {
-    for (const file of ['a.js', 'a.py', 'a.go', 'a.rs', 'a.c']) {
+    for (const file of ['a.js', 'a.py', 'a.go', 'a.rs', 'a.c', 'a.sh', 'a.ps1', 'a.bat']) {
       const start = process.hrtime.bigint();
       edit(file, input, `${input} `);
       write(file, input);
