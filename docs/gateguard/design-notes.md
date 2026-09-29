@@ -27,6 +27,9 @@ headings stable, since they are the anchors.
 - `scripts/lib/gateguard-state.js`: pure helpers for the session-state fields
   (counters, per-class counts, sibling dir gates). Reading and writing the
   state file, and the one-write event helpers built on it, stay in the hook.
+- `scripts/lib/gateguard-change-profile.js`: pure analysis of the change text
+  of an Edit/Write/MultiEdit into a bounded change profile (see
+  [Change profile](#change-profile)).
 
 ## Fail to deny
 
@@ -254,3 +257,90 @@ old-shape entries are dropped. `dir_gates` maps `<class>\u0000<canonicalDir>` to
 writers are merged on save (checked keys by union, counts by maximum, gates by
 newest `at`). Marking a target checked and recording its event happen in one
 state write, so an event is never half-recorded.
+
+## Change profile
+
+`scripts/lib/gateguard-change-profile.js` reads the change the hook already
+receives (Edit `old_string`/`new_string`, each MultiEdit entry for the target,
+Write `content`) and derives three booleans: `touchesPublicSurface`,
+`touchesData` and `trivial`. It is pure string analysis: no file or transcript
+reads, no `RegExp` built from input, and every loop is a single linear pass.
+
+The profile only ever removes questions, so anything uncertain yields the
+unknown profile (every question asked, never trivial): an unsupported
+extension, a non-string side, no entries or more than 64, a side over 64 KiB
+(UTF-8), more than 256 KiB in total, or any exception. Supported languages, by
+extension: JS/TS (`.js .mjs .cjs .jsx .ts .tsx .mts .cts`), Python
+(`.py .pyi`), Go, Rust, Java, Kotlin (`.kt .kts`), C# and C/C++ (`.c .h .cc
+.cpp .cxx .hpp .hh .hxx`). Shell, Ruby, Makefiles, Swift and everything else
+are unknown.
+
+## Public surface
+
+A Write always touches the public surface (a new or rewritten module's
+surface is all new). For an Edit, any line on either side that declares or
+exposes a public name counts, whether it changed or is only context: context
+around a public declaration means the edit is inside that symbol.
+
+- JS/TS: a line starting with the word `export`, `public` or `declare`, or
+  containing the word `exports` (`module.exports`, `exports.x`). `.d.ts`,
+  `.d.mts` and `.d.cts` files are all surface.
+- Python: `def`, `async def` or `class` whose name does not start with `_`
+  (dunders such as `__init__` are public), any `__all__`, and a column-0
+  assignment or annotation of a public name on a line after the first (the
+  first line of a snippet may start mid-line). `__init__.py` is all surface.
+- Go: `func` (after an optional receiver), `type`, `var` or `const` with a
+  capitalised name, a `package` line, and any line that starts with a
+  capital letter (exported fields, interface methods, grouped declarations).
+- Rust: lines starting with `pub` (any `pub(...)`), `impl`, `trait`, or
+  `#[macro_export`.
+- Java, Kotlin, C#, C and C++ always touch the surface: package-private Java,
+  Kotlin's public default, C# partial classes and C linkage make a lexical
+  answer unreliable.
+
+An Edit that changes a function body without its declaration line in the
+snippet reads as not touching the surface; the local question still asks for
+the call sites that rely on the behaviour.
+
+## Data handling
+
+`touchesData` looks at every side (both sides of an Edit) as words: identifiers
+are split on non-alphanumerics, `_` and camelCase boundaries and lowercased,
+so `validate` and `updated` never match `date`. It is true for a data word
+(formats such as `json`, `csv`, `yaml`, `parquet`; serialisation; `schema`;
+SQL and database words; date/time words such as `date`, `datetime`,
+`timestamp`, `strftime`, `utc`; file I/O such as `fs`, `fopen`, `pathlib`),
+for `open(`, for adjacent pairs such as `read file`,
+`write text`, `read to`, and for SQL keyword pairs anywhere in the text
+(`select`+`from`, `insert`+`into`, `create`+`table`, ...). Over-matching only
+keeps the data question.
+
+## Trivial edits
+
+An Edit is trivial when, for every entry, old and new have the same code once
+comments are removed, blank and comment-only lines are dropped, and runs of
+whitespace between tokens are folded to one space. Line structure, whitespace
+inside strings, and the presence of whitespace between tokens stay code
+(`a+b` to `a + b` is not trivial). For Python, leading whitespace of each code
+line is code; comment-only lines carry no indentation.
+
+Comments are `//` and non-nesting `/* */` in the C family and `#` in Python;
+C preprocessor lines are code. Strings are single-line `"..."` and `'...'`
+(Rust: `"..."` only, with `'x'` char literals told apart from lifetimes).
+Anything the lexer cannot read with confidence makes the entry non-trivial:
+
+- any multi-line string form: JS/Go backticks, Python/Java/Kotlin/C# triple
+  quotes, Rust raw strings (`r"`, `r#"`), C++ raw strings (`R"`), C# verbatim
+  and interpolated strings (`@"`, `$"`), Kotlin strings containing `$`, Python
+  f-strings, and any string that runs to the end of a line;
+- in JS/TS, any `/` outside a comment (division and regex literals cannot be
+  told apart), JSX-like `<x`, `</`, `<>`, `<!`, and `-->`;
+- a line comment ending in `\` (it continues onto the next line in C and
+  Make), the trigraph `??/`, whitespace after a line-continuation `\`, a `/*`
+  inside a block comment, and an unterminated block comment or string.
+
+Write is never trivial. The profile sees only the snippet, so a comment-looking
+line inside a multi-line string that opens and closes outside the snippet
+reads as a comment; the trivial pass never marks the target checked and never
+applies to sensitive, instruction or config targets, so the next non-trivial
+change still meets the full gate.
