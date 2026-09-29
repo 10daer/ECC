@@ -434,9 +434,7 @@ test('isSensitiveTarget matches every listed basename, segment and prefix rule',
     'src/secrets/vault.py', 'src/payment/charge.py', 'src/payments/x.py', 'app/billing/invoice.rb',
     'db/migrations/0001_init.sql', 'auth/readme.md', 'src/auth',
     '.github/workflows/ci.yml', '.github/workflows/sub/x.yaml', './.github/workflows/ci.yml',
-    // Below an ancestor (a fake worktree prefix, or an absolute path outside the root).
     '.claude/worktrees/fake/.github/workflows/ci.yml', '/elsewhere/repo/.github/workflows/ci.yml',
-    // Case-insensitive, and Windows-style separators.
     'SRC/Auth/Login.py', '.ENV', 'Certs/Server.PEM', 'src\\billing\\x.py'
   ];
   for (const p of sensitive) assert.strictEqual(isSensitiveTarget(p), true, p);
@@ -471,12 +469,10 @@ test('isSensitiveTargetFor uses the project-relative class path', () => {
       assert.strictEqual(isSensitiveTargetFor(`${proj}/src/auth/app.py`, data), true);
       assert.strictEqual(isSensitiveTargetFor('src/billing/x.py', data), true, 'relative to cwd');
       assert.strictEqual(isSensitiveTargetFor(`${proj}/.github/workflows/ci.yml`, data), true);
-      // A real worktree mirrors the project: its prefix is stripped before the rules apply.
       fs.mkdirSync(path.join(proj, '.claude', 'worktrees', 'w1'), { recursive: true });
       fs.writeFileSync(path.join(proj, '.claude', 'worktrees', 'w1', '.git'), 'gitdir: x\n');
       assert.strictEqual(isSensitiveTargetFor(`${proj}/.claude/worktrees/w1/.github/workflows/ci.yml`, data), true);
       assert.strictEqual(isSensitiveTargetFor(`${proj}/.claude/worktrees/w1/src/app.py`, data), false);
-      // Windows spellings that name the same file are normalized first.
       assert.strictEqual(isSensitiveTargetFor(`${proj}/.env.`, data), true);
     });
   } finally {
@@ -486,7 +482,7 @@ test('isSensitiveTargetFor uses the project-relative class path', () => {
 
 test('isSensitiveTargetFor also judges the real (symlink-resolved) path', () => {
   const root = tempProject();
-  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gateguard-r1-outside-')));
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gateguard-outside-')));
   try {
     withProjectDir(root, () => {
       const data = { cwd: root };

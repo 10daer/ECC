@@ -92,7 +92,6 @@ const filler = prefix => {
 // ── turn id ──
 console.log('turn id:');
 
-// Every user record of a turn (prompt and tool_results) carries the same promptId.
 test('boundary in window with promptId -> turnId is the promptId', () => {
   const t = writeTranscript([
     human('old', { promptId: 'prompt-old' }),
@@ -208,7 +207,6 @@ test('no transcript, a directory, or a whole file without a boundary -> no searc
   assert.strictEqual(noBoundary.turnId, null);
 });
 
-// The turn id is the boundary's own promptId; a clipped window needs agreeing promptIds.
 test('boundary in window -> the boundary record\'s own promptId, not a newer record\'s', () => {
   const late = { ...toolResult('toolu_n3a'), promptId: 'P1' };
   const t = writeTranscript([human('one', { promptId: 'P1' }), human('two', { promptId: 'P2' }), toolUse('toolu_n3a', 'Bash', { command: 'true' }), late]);
@@ -248,7 +246,6 @@ test('clipped window without a boundary -> promptId only when all user records a
   assert.strictEqual(scanCurrentTurn(partial).turnId, 'PA', 'records without a promptId do not disagree');
 });
 
-// Malformed records and inputs never throw; the record is skipped.
 const MALFORMED_RECORDS = [
   '{"type":"assistant"}',
   '{"type":"assistant","message":null}',
@@ -315,7 +312,6 @@ test('scanCurrentTurn skips each malformed record and keeps the rest of the turn
     assert.strictEqual(scan.turnId, 'PM', `${bad}: turn id`);
     assert.deepStrictEqual(scan.searches.map(s => s.name), ['Grep'], `${bad}: search kept`);
   }
-  // A user record without usable content is a turn boundary, which can only shrink the window.
   for (const bad of ['{"type":"user"}', '{"type":"user","message":null}', '{"type":"user","message":{"content":{}}}']) {
     const t = writeTranscript([human('go', { promptId: 'PM' }), ...search('toolu_m2', 'Grep', { pattern: 'payment' }), bad]);
     const scan = scanCurrentTurn(t, `toolu_pending_${seq}`);
