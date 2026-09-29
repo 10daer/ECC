@@ -501,7 +501,8 @@
     "build:opencode": "node scripts/build-opencode.js",
     "prepack": "npm run build:opencode",
     "dashboard": "python3 ./ecc_dashboard.py",
-    "dashboard:web": "node scripts/dashboard-web.js"
+    "dashboard:web": "node scripts/dashboard-web.js",
+    "meal-planner": "node scripts/meal-planner-web.js"
   },
   "dependencies": {
     "@iarna/toml": "2.2.5",

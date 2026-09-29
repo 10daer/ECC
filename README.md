@@ -1069,6 +1069,19 @@ python3 ./ecc_dashboard.py
 - Search and filter across all components
 </details>
 
+<details>
+<summary><strong>Meal planning MVP</strong></summary>
+
+This repository also includes a dependency-free local meal-planning assistant for tracking pantry inventory, generating preference-aware recipe suggestions, building a seven-day plan, calculating grocery deficits, and recording meal consumption/restocking.
+
+```bash
+npm run meal-planner
+# Open http://127.0.0.1:3460
+```
+
+The planner keeps state in memory for the running session and exposes the same workflows through its local browser UI and JSON endpoints under `/api`.
+</details>
+
 ## Key Concepts
 
 <details>
