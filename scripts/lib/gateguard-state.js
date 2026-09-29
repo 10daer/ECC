@@ -22,6 +22,10 @@ function getCapAllowCount(state) {
   return toCount(state && state.cap_allows);
 }
 
+function getTrivialAllowCount(state) {
+  return toCount(state && state.trivial_allows);
+}
+
 // --- Sibling dir gates ---
 
 const MAX_DIR_GATES = 50;
@@ -123,6 +127,7 @@ module.exports = {
   getDenialCount,
   getCreditedCount,
   getCapAllowCount,
+  getTrivialAllowCount,
   getSiblingAllowCount,
   getClassCounts,
   mergeClassCounts,

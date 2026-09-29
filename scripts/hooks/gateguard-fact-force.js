@@ -47,6 +47,7 @@ const {
   getDenialCount,
   getCreditedCount,
   getCapAllowCount,
+  getTrivialAllowCount,
   getSiblingAllowCount,
   getClassCounts,
   mergeClassCounts,
@@ -1451,6 +1452,7 @@ function saveState(state) {
     let mergedCreditedByClass = getClassCounts(state, 'credited_by_class');
     let mergedSiblingAllows = getSiblingAllowCount(state);
     let mergedCapAllows = getCapAllowCount(state);
+    let mergedTrivialAllows = getTrivialAllowCount(state);
 
     try {
       if (fs.existsSync(stateFile)) {
@@ -1468,6 +1470,7 @@ function saveState(state) {
         mergedCreditedByClass = mergeClassCounts(getClassCounts(diskState, 'credited_by_class'), mergedCreditedByClass);
         mergedSiblingAllows = Math.max(mergedSiblingAllows, getSiblingAllowCount(diskState));
         mergedCapAllows = Math.max(mergedCapAllows, getCapAllowCount(diskState));
+        mergedTrivialAllows = Math.max(mergedTrivialAllows, getTrivialAllowCount(diskState));
       }
     } catch (_) {
       /* ignore malformed or transient disk state */
@@ -1482,7 +1485,8 @@ function saveState(state) {
       denials_by_class: mergedDenialsByClass,
       credited_by_class: mergedCreditedByClass,
       sibling_allows: mergedSiblingAllows,
-      cap_allows: mergedCapAllows
+      cap_allows: mergedCapAllows,
+      trivial_allows: mergedTrivialAllows
     };
 
     // Atomic write: temp file + rename prevents partial reads
@@ -1616,6 +1620,20 @@ function markCheckedAndCountCredit(key, cls) {
     },
     value: undefined
   })).ok;
+}
+
+// --- Trivial edits ---
+// see docs/gateguard/design-notes.md#trivial-edits
+
+const TRIVIAL_CLASSES = new Set(['code', 'test', 'prose']);
+
+function countTrivialAllow() {
+  const state = loadState();
+  return saveState({ ...state, trivial_allows: getTrivialAllowCount(state) + 1 });
+}
+
+function isTrivialChange(cls, sensitive, profile) {
+  return !sensitive && TRIVIAL_CLASSES.has(cls) && Boolean(profile) && profile.known === true && profile.trivial === true;
 }
 
 // --- Sibling gates ---
@@ -2001,6 +2019,13 @@ function newFileGateKey(filePath, data, cls) {
   }
 }
 
+function trivialNote(filePath) {
+  return (
+    `[Fact-Forcing Gate] Comment or whitespace-only change to ${sanitizePath(filePath)}; no first-touch check needed. ` +
+    'The next change to this file that alters code is still checked.'
+  );
+}
+
 function siblingNote(gate) {
   return (
     `[Fact-Forcing Gate] Sibling of ${sanitizePath(gate.first)} (gated earlier at denial #${gate.ordinal} this session); ` +
@@ -2066,6 +2091,13 @@ function run(rawInput) {
         }
         return { additionalContext: creditNote(credit, filePath), exitCode: 0 };
       }
+      const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content);
+      if (toolName === 'Edit' && isTrivialChange(cls, sensitive, profile)) {
+        if (!countTrivialAllow()) {
+          return allowWithStateWarning();
+        }
+        return { additionalContext: trivialNote(filePath), exitCode: 0 };
+      }
       const turnId = isNewFile && !sensitive ? currentTurnId(getTurnScan()) : null;
       const collapsible = isNewFile && !sensitive && (turnId !== null || !transcriptPathFor(data));
       const gateKey = collapsible ? newFileGateKey(filePath, data, cls) : null;
@@ -2086,7 +2118,6 @@ function run(rawInput) {
         // see docs/gateguard/design-notes.md#denial-cap
         return rawInput;
       }
-      const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content);
       return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, profile });
     }
 
@@ -2099,11 +2130,13 @@ function run(rawInput) {
     }
 
     const edits = toolInput.edits || [];
-    const creditNotes = [];
+    const notes = [];
+    const trivialKeys = new Set();
     for (const edit of edits) {
       const filePath = edit.file_path || '';
       if (!filePath || isClaudeSettingsPath(filePath) || isExemptPath(filePath, data)) continue;
       const fileKey = canonicalPathKey(filePath, data);
+      if (trivialKeys.has(fileKey)) continue;
       if (!isChecked([fileKey, filePath])) {
         const cls = classifyTargetFor(filePath, data);
         const sensitive = isSensitiveTargetFor(filePath, data);
@@ -2112,7 +2145,16 @@ function run(rawInput) {
           if (!markCheckedAndCountCredit(fileKey, cls)) {
             return allowWithStateWarning();
           }
-          creditNotes.push(creditNote(credit, filePath));
+          notes.push(creditNote(credit, filePath));
+          continue;
+        }
+        const profile = sensitive ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data));
+        if (isTrivialChange(cls, sensitive, profile)) {
+          if (!countTrivialAllow()) {
+            return allowWithStateWarning();
+          }
+          trivialKeys.add(fileKey);
+          notes.push(trivialNote(filePath));
           continue;
         }
         const cap = sensitive ? Number.POSITIVE_INFINITY : getMaxDenialBudget();
@@ -2124,12 +2166,11 @@ function run(rawInput) {
           // see docs/gateguard/design-notes.md#denial-cap
           continue;
         }
-        const profile = sensitive ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data));
         return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, profile });
       }
     }
-    if (creditNotes.length > 0) {
-      return { additionalContext: creditNotes, exitCode: 0 };
+    if (notes.length > 0) {
+      return { additionalContext: notes, exitCode: 0 };
     }
     return rawInput; // allow
   }

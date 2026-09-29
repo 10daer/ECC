@@ -4560,6 +4560,160 @@ function runTests() {
     passed++;
   else failed++;
 
+  // --- Comment and whitespace-only edits ---
+  const b3Run = (toolName, tool_input, env = {}) => {
+    const result = runHook({ tool_name: toolName, tool_input }, { ...B2_ENV, ...env });
+    const output = parseOutput(result.stdout);
+    const hso = output && output.hookSpecificOutput ? output.hookSpecificOutput : {};
+    const context = Array.isArray(hso.additionalContext) ? hso.additionalContext.join('\n') : String(hso.additionalContext || '');
+    return { result, decision: hso.permissionDecision, context, reason: hso.permissionDecisionReason || '' };
+  };
+  const b3State = () => (fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : {});
+  const b3Key = rel => `/proj-b2/${rel}`;
+  const B3_NOTE = 'Comment or whitespace-only change to';
+
+  clearState();
+  if (
+    test('a comment-only Edit of an unchecked code file passes with a note and is not marked checked', () => {
+      const out = b3Run('Edit', { file_path: 'src/t1.js', old_string: '// old note\nfoo();', new_string: '// new note\nfoo();' });
+      assert.notStrictEqual(out.decision, 'deny', out.result.stdout);
+      assert.ok(out.context.includes(`${B3_NOTE} src/t1.js`), out.context);
+      assert.strictEqual(out.result.code, 0);
+      const state = b3State();
+      assert.ok(!(state.checked || []).includes(b3Key('src/t1.js')), 'not marked checked');
+      assert.strictEqual(state.trivial_allows, 1);
+      assert.strictEqual(state.fact_force_denials || 0, 0, 'denial count untouched');
+      assert.ok(!out.result.stdout.includes('"allow"'), 'never an allow decision');
+    })
+  )
+    passed++;
+  else failed++;
+
+  if (
+    test('a later code change to the same file is still gated', () => {
+      const out = b3Run('Edit', { file_path: 'src/t1.js', old_string: 'foo();', new_string: 'bar();' });
+      assert.strictEqual(out.decision, 'deny', out.result.stdout);
+      const state = b3State();
+      assert.strictEqual(state.fact_force_denials, 1);
+      assert.strictEqual(state.trivial_allows, 1, 'trivial counter kept');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('whitespace-only reindents and trivial test-file edits pass', () => {
+      const js = b3Run('Edit', { file_path: 'src/t2.js', old_string: 'if (x) {\n  foo();\n}', new_string: 'if (x) {\n    foo();\n}' });
+      assert.ok(js.context.includes(B3_NOTE), js.result.stdout);
+      const spec = b3Run('Edit', { file_path: 'src/t2.test.js', old_string: "it('a', () => {}); // old", new_string: "it('a', () => {}); // new" });
+      assert.ok(spec.context.includes(B3_NOTE), spec.result.stdout);
+      assert.strictEqual(b3State().trivial_allows, 2);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('trivial-looking edits are still denied where the pass does not apply', () => {
+      const cases = [
+        ['sensitive target', { file_path: 'src/auth/session.js', old_string: '// old\nfoo();', new_string: '// new\nfoo();' }],
+        ['comment plus code', { file_path: 'src/d1.js', old_string: '// old\nfoo(1);', new_string: '// new\nfoo(2);' }],
+        ['python indentation', { file_path: 'src/d2.py', old_string: 'if x:\n    y()', new_string: 'if x:\n        y()' }],
+        ['unknown extension', { file_path: 'src/d3.rb', old_string: '# old', new_string: '# new' }],
+        ['config target', { file_path: 'config/d4.yaml', old_string: '# old', new_string: '# new' }],
+        ['instruction target', { file_path: 'CLAUDE.md', old_string: '<!-- old -->', new_string: '<!-- new -->' }],
+        ['instruction code file', { file_path: '.claude/hooks/d5.md', old_string: '// old', new_string: '// new' }],
+        ['template literal', { file_path: 'src/d6.js', old_string: '// old\n`;', new_string: '// new\n`;' }],
+        ['over the bound', { file_path: 'src/d7.js', old_string: `// ${'x'.repeat(70 * 1024)}`, new_string: '// y' }],
+        ['missing new_string', { file_path: 'src/d8.js', old_string: '// old' }]
+      ];
+      for (const [label, input] of cases) {
+        clearState();
+        const out = b3Run('Edit', input);
+        assert.strictEqual(out.decision, 'deny', `${label}: ${out.result.stdout}`);
+        assert.ok(!out.context.includes(B3_NOTE), `${label}: no trivial note`);
+        assert.strictEqual(b3State().trivial_allows || 0, 0, `${label}: no trivial count`);
+      }
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('a Write is never a trivial edit', () => {
+      const out = b3Run('Write', { file_path: 'src/w1.js', content: '// only a comment\n' });
+      assert.strictEqual(out.decision, 'deny', out.result.stdout);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('MultiEdit passes a file only when all of its entries are trivial', () => {
+      const allTrivial = b3Run('MultiEdit', {
+        edits: [
+          { file_path: 'src/m1.js', old_string: '// a', new_string: '// b' },
+          { file_path: 'src/m1.js', old_string: 'foo(); // c', new_string: 'foo(); // d' }
+        ]
+      });
+      assert.notStrictEqual(allTrivial.decision, 'deny', allTrivial.result.stdout);
+      assert.ok(allTrivial.context.includes(`${B3_NOTE} src/m1.js`), allTrivial.context);
+      assert.strictEqual(b3State().trivial_allows, 1, 'one pass per file');
+      clearState();
+      const mixed = b3Run('MultiEdit', {
+        edits: [
+          { file_path: 'src/m2.js', old_string: '// a', new_string: '// b' },
+          { file_path: 'src/m2.js', old_string: 'foo(1);', new_string: 'foo(2);' }
+        ]
+      });
+      assert.strictEqual(mixed.decision, 'deny', 'a non-trivial entry for the file denies it');
+      clearState();
+      const twoFiles = b3Run('MultiEdit', {
+        edits: [
+          { file_path: 'src/m3.js', old_string: '// a', new_string: '// b' },
+          { file_path: 'src/m4.js', old_string: 'foo(1);', new_string: 'foo(2);' }
+        ]
+      });
+      assert.strictEqual(twoFiles.decision, 'deny');
+      assert.ok(twoFiles.reason.includes('src/m4.js'), 'the non-trivial file is the one denied');
+      const state = b3State();
+      assert.ok(!(state.checked || []).includes(b3Key('src/m3.js')), 'trivial file not marked checked');
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('the trivial pass comes before the denial cap and never consumes it', () => {
+      const out = b3Run('Edit', { file_path: 'src/cap1.js', old_string: '// a', new_string: '// b' }, { GATEGUARD_FACT_FORCE_MAX_DENIALS: '0' });
+      assert.ok(out.context.includes(B3_NOTE), out.result.stdout);
+      const state = b3State();
+      assert.strictEqual(state.cap_allows || 0, 0);
+      assert.strictEqual(state.trivial_allows, 1);
+    })
+  )
+    passed++;
+  else failed++;
+
+  clearState();
+  if (
+    test('trivial_allows merges by maximum with a concurrent state file', () => {
+      writeState({ checked: [], last_active: Date.now(), trivial_allows: 5 });
+      b3Run('Edit', { file_path: 'src/merge1.js', old_string: '// a', new_string: '// b' });
+      assert.strictEqual(b3State().trivial_allows, 6);
+      writeState({ checked: [], last_active: Date.now(), trivial_allows: 'junk' });
+      b3Run('Edit', { file_path: 'src/merge2.js', old_string: '// a', new_string: '// b' });
+      assert.strictEqual(b3State().trivial_allows, 1, 'malformed counter reads as zero');
+    })
+  )
+    passed++;
+  else failed++;
+
   clearState();
   if (
     test('scripts/hooks/x.js is code, not instruction', () => {

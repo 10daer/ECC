@@ -34,14 +34,14 @@ headings stable, since they are the anchors.
 ## Fail to deny
 
 Every allowance other than a retry of an already-gated target (prior-search
-credit, sibling collapse, the denial cap) is an exception to the first-touch
+credit, the trivial-edit pass, sibling collapse, the denial cap) is an exception to the first-touch
 denial, so each one falls back to the denial on any doubt: an unreadable
 transcript, a parse failure, an unresolvable path, or an exception. The lib
 exports that feed those decisions never throw (they catch and return a
 fallback that denies, or no scan at all), so an error cannot escape into credit or
-sibling logic. Allowances are never an `allow` permission decision: credit and
-sibling passes return `additionalContext`, and the cap pass returns the input
-unchanged.
+sibling logic. Allowances are never an `allow` permission decision: credit,
+trivial and sibling passes return `additionalContext`, and the cap pass returns
+the input unchanged.
 
 ## Read is not evidence
 
@@ -52,8 +52,10 @@ Only `Glob`, `Grep`, `LS` and shell search commands count.
 ## Sensitive targets
 
 Secrets, keys, auth/payment code, migrations and CI workflows always draw the
-first-touch denial: prior-search credit, sibling collapse and the denial cap do
-not apply to them, and the denial says so.
+first-touch denial with the full questions: prior-search credit, the change
+profile, the trivial-edit pass, sibling collapse and the denial cap do not
+apply to them, and the denial says so (its note names the three older
+exceptions).
 
 - Basename, extension and segment rules are exact, never substrings.
 - `.github/workflows/` is also matched below an ancestor (an unverified
@@ -341,7 +343,13 @@ Anything the lexer cannot read with confidence makes the entry non-trivial:
   Make), the trigraph `??/`, whitespace after a line-continuation `\`, a `/*`
   inside a block comment, and an unterminated block comment or string.
 
-Write is never trivial. The profile sees only the snippet, so a comment-looking
+Write is never trivial. In the hook, a trivial Edit (or a MultiEdit whose
+entries for that file are all trivial) of an unchecked code, test or prose
+target passes with an `additionalContext` note after prior-search credit and
+before sibling collapse and the denial cap. It is not marked checked and does
+not touch the denial count or ordinal, so the next change that alters code is
+gated as a first touch; `trivial_allows` counts the passes (merged by maximum
+like the other counters). The profile sees only the snippet, so a comment-looking
 line inside a multi-line string that opens and closes outside the snippet
 reads as a comment; the trivial pass never marks the target checked and never
 applies to sensitive, instruction or config targets, so the next non-trivial

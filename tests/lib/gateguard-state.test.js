@@ -11,6 +11,7 @@ const path = require('path');
 const {
   getDenialCount,
   getCapAllowCount,
+  getTrivialAllowCount,
   getClassCounts,
   mergeClassCounts,
   incrementClassCount,
@@ -35,6 +36,14 @@ function test(desc, fn) {
     failed++;
   }
 }
+
+test('trivial_allows reads as a non-negative integer', () => {
+  assert.strictEqual(getTrivialAllowCount({ trivial_allows: 3 }), 3);
+  for (const bad of [undefined, null, -1, 'x', NaN, Infinity, {}]) {
+    assert.strictEqual(getTrivialAllowCount({ trivial_allows: bad }), 0, String(bad));
+  }
+  assert.strictEqual(getTrivialAllowCount(null), 0);
+});
 
 test('malformed or missing counters read as zero', () => {
   assert.strictEqual(getDenialCount(null), 0);

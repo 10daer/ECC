@@ -90,7 +90,7 @@ Item 3 is dropped when the new content handles no data.
 
 For **code** targets the gate reads the change it is about to allow (Edit
 `old_string`/`new_string`, every MultiEdit entry for the file, Write
-`content`) and decides two things:
+`content`) and decides three things:
 
 - **Public surface:** a line on either side declares or exposes a public name.
   JS/TS: `export`, `exports`, `public`, `declare` (`.d.ts` files always); Python:
@@ -104,6 +104,7 @@ For **code** targets the gate reads the change it is about to allow (Edit
 - **Data:** words for file I/O, formats (`json`, `csv`, `yaml`, …),
   serialisation, schemas, SQL and dates on either side. Without them the data
   question is dropped.
+- **Trivial:** see [Comment and whitespace-only edits](#comment-and-whitespace-only-edits).
 
 Supported extensions: `.js .mjs .cjs .jsx .ts .tsx .mts .cts .py .pyi .go .rs
 .java .kt .kts .cs .c .h .cc .cpp .cxx .hpp .hh .hxx`. Any other extension, a
@@ -217,19 +218,22 @@ this order; the first rule that applies wins:
 1. **Exempt** (`GATEGUARD_EXEMPT_GLOBS`, Claude settings files) — allowed.
 2. **Subagent** call — allowed (the parent session was already gated).
 3. **Already checked** this session — allowed.
-4. **Sensitive target?** — if so, skip straight to the denial (step 8).
+4. **Sensitive target?** — if so, skip straight to the denial (step 9).
 5. **Prior-search credit** — allowed with a note.
-6. **Sibling collapse** — allowed with a note.
-7. **Denial cap** (`GATEGUARD_FACT_FORCE_MAX_DENIALS`, opt-in) — passes
+6. **Comment or whitespace-only Edit** — allowed with a note, not marked
+   checked.
+7. **Sibling collapse** — allowed with a note.
+8. **Denial cap** (`GATEGUARD_FACT_FORCE_MAX_DENIALS`, opt-in) — passes
    through once the session's denials have reached the cap.
-8. **Deny** — counted in `fact_force_denials`.
+9. **Deny** — counted in `fact_force_denials`.
 
-Credit and sibling allows never consume the denial cap.
+Credit, trivial and sibling allows never consume the denial cap.
 
 ### Sensitive targets
 
 Some files are too costly to change without the full check, so prior-search
-credit, sibling collapse, and the denial cap never apply to them: they are
+credit, the comment or whitespace-only pass, the change profile, sibling
+collapse, and the denial cap never apply to them: they are
 denied on first touch exactly as without these rules, and the denial counts
 as usual. The denial carries one extra line: "Sensitive target: prior-search
 credit, sibling collapse, and the denial cap do not apply." A target is
@@ -355,6 +359,36 @@ An Edit, Write, or MultiEdit entry is allowed, with an
 - **Falls back to deny:** a missing, unreadable, or non-file transcript,
   garbage records, or any internal error mean no credit.
 
+### Comment and whitespace-only edits
+
+An Edit whose old and new text differ only in comments and whitespace changes
+no behaviour, so the first-touch questions carry no signal. Such an Edit (or a
+MultiEdit whose entries for that file are all such changes) of a `code`,
+`test`, or `prose` target that is not sensitive passes with the note "Comment
+or whitespace-only change to `<file>`". The file is **not** marked checked:
+the next change to it that alters code meets the normal first-touch gate. The
+pass is counted in `trivial_allows` and never touches the denial count.
+
+It applies only to the extensions listed in
+[Questions fit the change](#questions-fit-the-change), and only when every
+entry reads cleanly:
+
+- comments are `//` and `/* */` (C family) or `#` (Python); C preprocessor
+  lines are code; whitespace inside strings, line breaks between code, and
+  the presence of whitespace between tokens are code (`a+b` → `a + b` is not
+  trivial);
+- Python indentation of code lines is code;
+- never trivial: a Write; any multi-line or raw string form (backticks, triple
+  quotes, `r"`, `R"`, `@"`, `$"`, f-strings, Kotlin `$`), a string running to
+  the end of a line, a line comment ending in `\`, `??/`, a nested or
+  unterminated block comment; in JS/TS any `/` outside a comment (regex versus
+  division), JSX-like tags, and `-->`;
+- config, instruction, and sensitive targets never pass this way.
+
+Only the snippet is read, so a comment-looking line inside a multi-line string
+that opens and closes outside the snippet reads as a comment; because the
+file stays unchecked, the next real change is still gated.
+
 ### Same-turn sibling creation collapse
 
 When several new files are created in one directory, the answers for each
@@ -412,6 +446,7 @@ the sanitized first file per directory):
 | `sibling_allows` | Number of Writes allowed by sibling collapse |
 | `dir_gates` | Per class and directory, the denial that opened a sibling window (turn, time, first file, ordinal); capped at 50 entries |
 | `cap_allows` | Number of first touches passed through by the denial cap (`GATEGUARD_FACT_FORCE_MAX_DENIALS`); these never count as denials |
+| `trivial_allows` | Number of comment or whitespace-only edits passed without the first-touch check; these never mark the file checked |
 
 Missing or malformed fields load as empty or zero, so older state files keep
 working.
