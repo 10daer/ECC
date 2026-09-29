@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(rm -rf *)",
+      "Bash(sudo *)",
+      "Bash(chmod 777 *)",
+      "Bash(ssh *)",
+      "Bash(* > /dev/*)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CLAUDE_PLUGIN_ROOT=\"$CLAUDE_PROJECT_DIR\" node \"$CLAUDE_PROJECT_DIR/scripts/hooks/run-with-flags.js\" stop:verify-gate scripts/hooks/stop-verify-gate.js standard,strict",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
