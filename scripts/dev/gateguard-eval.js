@@ -161,6 +161,12 @@ function createSymlink(root, link, target) {
   else fs.symlinkSync(target, linkPath, isDir ? 'dir' : 'file');
 }
 
+function createHardLink(root, link, target) {
+  const linkPath = path.join(root, ...link.split('/'));
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  fs.linkSync(path.join(root, ...target.split('/')), linkPath);
+}
+
 function prepareScenario(scenario, workDir) {
   const root = scenario.root || fs.realpathSync(fs.mkdtempSync(path.join(workDir, 'project-')));
   if (!scenario.root) {
@@ -174,6 +180,11 @@ function prepareScenario(scenario, workDir) {
       for (const [link, target] of Object.entries(scenario.symlinks || {})) createSymlink(root, link, target);
     } catch (error) {
       return { skipped: `symlinks unavailable: ${error.code || error.message}` };
+    }
+    try {
+      for (const [link, target] of Object.entries(scenario.hardlinks || {})) createHardLink(root, link, target);
+    } catch (error) {
+      return { skipped: `hard links unavailable: ${error.code || error.message}` };
     }
   }
   const stateDir = fs.mkdtempSync(path.join(workDir, 'state-'));

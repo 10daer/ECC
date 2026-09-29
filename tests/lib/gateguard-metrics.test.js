@@ -81,6 +81,14 @@ test('drops any class, reason, question or language that is not a short code', (
   assert.strictEqual(event.profile.language, null);
 });
 
+test('records NotebookEdit decisions and the hard-linked reason codes', () => {
+  const event = metricsEvent({ ...base, tool: 'NotebookEdit', reason: 'hard-linked' });
+  assert.strictEqual(event.tool, 'NotebookEdit');
+  assert.strictEqual(event.reason, 'hard-linked');
+  assert.ok(isMetricsEvent(event));
+  assert.strictEqual(metricsEvent({ ...base, reason: 'subagent-hard-linked' }).reason, 'subagent-hard-linked');
+});
+
 test('keeps near-miss reason codes', () => {
   assert.strictEqual(metricsEvent({ ...base, reason: 'near-miss:out-of-scope' }).reason, 'near-miss:out-of-scope');
 });

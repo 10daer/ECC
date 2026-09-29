@@ -28,7 +28,8 @@ const {
   isCollapsibleTarget,
   collapseGateDir,
   isSensitiveTarget,
-  isSensitiveTargetFor
+  isSensitiveTargetFor,
+  isHardLinkedTargetFor
 } = require(libPath);
 
 console.log('=== Testing gateguard-target-class.js ===\n');
@@ -537,6 +538,74 @@ test('collapseGateDir never keys a gate for a sensitive real location', () => {
 test('isSensitiveTargetFor fails safe on bad input', () => {
   assert.strictEqual(isSensitiveTargetFor(undefined, undefined), true);
   assert.strictEqual(isSensitiveTargetFor({ toString() { throw new Error('x'); } }, {}), true);
+});
+
+function tryHardLink(existing, link) {
+  try {
+    fs.linkSync(existing, link);
+    return true;
+  } catch (e) {
+    if (['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS', 'EOPNOTSUPP'].includes(e.code)) return false;
+    throw e;
+  }
+}
+
+test('isHardLinkedTargetFor is true for a file with more than one link', () => {
+  const root = tempProject();
+  try {
+    withProjectDir(root, () => {
+      const data = { cwd: root };
+      const at = rel => path.join(root, rel);
+      fs.mkdirSync(at('src/lib'), { recursive: true });
+      fs.writeFileSync(at('src/lib/report.py'), 'x');
+      fs.writeFileSync(at('src/lib/single.py'), 'x');
+      if (!tryHardLink(at('src/lib/report.py'), at('src/report_alias.py'))) return;
+      assert.strictEqual(isHardLinkedTargetFor(at('src/lib/report.py'), data), true, 'original name');
+      assert.strictEqual(isHardLinkedTargetFor('src/report_alias.py', data), true, 'second name, relative spelling');
+      assert.strictEqual(isHardLinkedTargetFor(at('src/lib/single.py'), data), false, 'single link');
+      assert.strictEqual(isHardLinkedTargetFor(at('src/lib/new_file.py'), data), false, 'a missing new file');
+      assert.strictEqual(isHardLinkedTargetFor(at('src/lib'), data), false, 'a directory');
+      fs.writeFileSync(at('src/plainfile'), 'x');
+      assert.strictEqual(isHardLinkedTargetFor(at('src/plainfile/a.py'), data), false, 'ENOTDIR is a missing file');
+      if (trySymlink(at('src/lib/report.py'), at('src/report_symlink.py'))) {
+        assert.strictEqual(isHardLinkedTargetFor(at('src/report_symlink.py'), data), true, 'symlink to a hard-linked file');
+      }
+      if (trySymlink(at('src/lib/single.py'), at('src/single_symlink.py'))) {
+        assert.strictEqual(isHardLinkedTargetFor(at('src/single_symlink.py'), data), false, 'symlink to a single-link file');
+      }
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('isHardLinkedTargetFor fails closed on stat errors other than a missing file', () => {
+  const root = tempProject();
+  const savedLstat = fs.lstatSync;
+  try {
+    withProjectDir(root, () => {
+      const data = { cwd: root };
+      const target = path.join(root, 'src', 'a.py');
+      for (const code of ['EACCES', 'EIO', 'ELOOP', 'EPERM']) {
+        fs.lstatSync = () => {
+          const error = new Error(code);
+          error.code = code;
+          throw error;
+        };
+        assert.strictEqual(isHardLinkedTargetFor(target, data), true, code);
+      }
+      fs.lstatSync = () => {
+        throw new Error('no code');
+      };
+      assert.strictEqual(isHardLinkedTargetFor(target, data), true, 'error without a code');
+      fs.lstatSync = savedLstat;
+      assert.strictEqual(isHardLinkedTargetFor(undefined, data), true, 'non-string path');
+      assert.strictEqual(isHardLinkedTargetFor(target, { cwd: 'relative/dir' }), true, 'unresolvable target');
+    });
+  } finally {
+    fs.lstatSync = savedLstat;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('the hook re-exports the lib classification functions', () => {

@@ -7089,6 +7089,213 @@ function runTests() {
     assert.strictEqual(roDecision(capped), 'deny');
   });
 
+  // --- NotebookEdit ---
+  const notebookInput = (rel, extra = {}) => ({ notebook_path: sensAbs(rel), new_source: 'x = 1', cell_id: 'c1', ...extra });
+  const notebookRun = (rel, transcriptPath, env, extra) => projectRun('NotebookEdit', notebookInput(rel, extra), transcriptPath, env);
+  const FULL_CODE_QUESTIONS = [
+    'List ALL files that import/require this file',
+    'List the public functions/classes affected by this change',
+    'If this file reads/writes data files',
+    "Quote the user's current instruction verbatim"
+  ];
+
+  gateCase('a first NotebookEdit is denied with the full code questions, then its retry passes', () => {
+    const first = notebookRun('nb/analysis.ipynb');
+    assert.strictEqual(first.decision, 'deny', first.result.stdout);
+    assert.ok(first.reason.includes(`Before editing ${sensAbs('nb/analysis.ipynb')}`), first.reason);
+    for (const line of FULL_CODE_QUESTIONS) assert.ok(first.reason.includes(line), `${line}: ${first.reason}`);
+    assert.ok(!first.reason.includes(sensLine), 'ordinary notebook has no sensitive line');
+    const retry = notebookRun('nb/analysis.ipynb');
+    assert.strictEqual(retry.decision, undefined, retry.result.stdout);
+    assert.strictEqual(readState().fact_force_denials, 1);
+  });
+
+  gateCase('NotebookEdit and Edit share one checked key for a notebook', () => {
+    assert.strictEqual(notebookRun('nb/shared.ipynb').decision, 'deny');
+    assert.strictEqual(projectEdit(sensAbs('nb/shared.ipynb')).decision, undefined, 'Edit after a NotebookEdit denial passes');
+    assert.strictEqual(projectEdit(sensAbs('nb/other.ipynb')).decision, 'deny');
+    assert.strictEqual(notebookRun('nb/other.ipynb').decision, undefined, 'NotebookEdit after an Edit denial passes');
+  });
+
+  gateCase('NotebookEdit is gated by notebook_path, not by a file_path field', () => {
+    projectEdit(sensAbs('src/checked.py'));
+    const out = notebookRun('nb/target.ipynb', undefined, {}, { file_path: sensAbs('src/checked.py') });
+    assert.strictEqual(out.decision, 'deny', out.result.stdout);
+    assert.ok(out.reason.includes('target.ipynb'), out.reason);
+    const exempt = notebookRun('nb/exempt-by-file-path.ipynb', undefined, { GATEGUARD_EXEMPT_GLOBS: '**/other.py' }, { file_path: sensAbs('src/other.py') });
+    assert.strictEqual(exempt.decision, 'deny', 'an exempt file_path does not exempt the notebook');
+  });
+
+  gateCase('a NotebookEdit is never a trivial pass', () => {
+    const out = notebookRun('nb/comment.ipynb', undefined, {}, { new_source: '# just a comment', edit_mode: 'replace' });
+    assert.strictEqual(out.decision, 'deny', out.result.stdout);
+    assert.ok(!out.context.includes('Comment or whitespace-only'), out.context);
+    assert.ok(!readState().trivial_allows, 'no trivial pass counted');
+  });
+
+  gateCase('a notebook under tests/ gets the test questions', () => {
+    const out = notebookRun('tests/notebooks/check.ipynb');
+    assert.strictEqual(out.decision, 'deny');
+    assert.ok(out.reason.includes('Name what behaviour is under test'), out.reason);
+  });
+
+  gateCase('a search naming the notebook credits its first NotebookEdit', () => {
+    const t = writeTranscript([humanRecord('update the notebook'), ...searchRecords('toolu_nb1', 'Grep', { pattern: 'forecast', path: projectRoot })]);
+    const out = notebookRun('nb/forecast.ipynb', t);
+    assert.notStrictEqual(out.decision, 'deny', out.result.stdout);
+    assert.ok(out.context.includes('Prior search seen in this turn'), out.result.stdout);
+  });
+
+  gateCase('a sensitive notebook is denied despite a crediting search and past the denial cap', () => {
+    const t = writeTranscript([humanRecord('update it'), ...searchRecords('toolu_nb2', 'Grep', { pattern: 'tokens', path: projectRoot })]);
+    sensAssertDenied(notebookRun('src/auth/tokens.ipynb', t), 'credited sensitive notebook');
+    clearState();
+    sensAssertDenied(notebookRun('src/auth/tokens.ipynb', undefined, { GATEGUARD_FACT_FORCE_MAX_DENIALS: '0' }), 'sensitive notebook past cap 0');
+    const control = notebookRun('nb/capped.ipynb', undefined, { GATEGUARD_FACT_FORCE_MAX_DENIALS: '0' });
+    assert.strictEqual(control.decision, undefined, 'ordinary notebook passes the cap like Edit');
+  });
+
+  gateCase('NotebookEdit honours exempt globs', () => {
+    const out = notebookRun('scratch/play.ipynb', undefined, { GATEGUARD_EXEMPT_GLOBS: '**/scratch/**' });
+    assert.strictEqual(out.decision, undefined, out.result.stdout);
+    assert.strictEqual(out.context, '');
+  });
+
+  gateCase('a subagent NotebookEdit passes for an ordinary notebook and is denied for a sensitive one', () => {
+    const agent = { agent_id: 'agent-notebook' };
+    assert.strictEqual(roDecision(subRun('NotebookEdit', { notebook_path: '/src/nb/plain.ipynb', new_source: 'x' }, agent)), undefined);
+    const sensitive = subRun('NotebookEdit', { notebook_path: '/src/payments/ledger.ipynb', new_source: 'x' }, agent);
+    assert.strictEqual(roDecision(sensitive), 'deny');
+    assert.ok(roReason(sensitive).includes(sensLine));
+  });
+
+  gateCase('a lower-case notebookedit tool name is gated the same way', () => {
+    assert.strictEqual(projectRun('notebookedit', notebookInput('nb/lower.ipynb')).decision, 'deny');
+  });
+
+  // --- Hard-linked targets ---
+  const linkedLine = 'Hard-linked target: prior-search credit, sibling collapse, and the denial cap do not apply.';
+  const linkPair = (rel, alias, content = '// old\nfoo();\n') => {
+    fs.mkdirSync(path.dirname(sensAbs(rel)), { recursive: true });
+    fs.mkdirSync(path.dirname(sensAbs(alias)), { recursive: true });
+    fs.writeFileSync(sensAbs(rel), content);
+    try {
+      fs.linkSync(sensAbs(rel), sensAbs(alias));
+      return true;
+    } catch (e) {
+      if (['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS', 'EOPNOTSUPP'].includes(e.code)) return false;
+      throw e;
+    }
+  };
+  const linksReady = linkPair('linked/src/report.js', 'linked/vendor/report.js')
+    && linkPair('linked/src/auth/token.js', 'linked/vendor/token.js')
+    && linkPair('linked/src/sub.js', 'linked/vendor/sub.js')
+    && linkPair('linked/scratch/tmp.js', 'linked/vendor/tmp.js');
+  for (const rel of ['linked/src/plain.js', 'linked/src/plain_two.js']) fs.writeFileSync(sensAbs(rel), '// old\nfoo();\n');
+  const assertLinkedDenied = (out, label) => {
+    assert.strictEqual(out.decision, 'deny', `${label}: expected deny, got ${out.result.stdout}`);
+    assert.ok(!out.context, `${label}: no credit, trivial or sibling note`);
+    assert.ok(out.reason.includes(linkedLine), `${label}: hard-link line expected: ${out.reason}`);
+    assert.ok(!out.reason.includes(sensLine), `${label}: no sensitive wording`);
+  };
+  const linkedSearch = n => writeTranscript([
+    humanRecord('update the report'),
+    ...searchRecords(`toolu_linked_${n}`, 'Grep', { pattern: 'report|plain|tmp', path: projectRoot })
+  ]);
+
+  gateCase('an Edit of a hard-linked file is denied despite a crediting search (control credited)', () => {
+    if (!linksReady) return;
+    const t = linkedSearch(1);
+    assertLinkedDenied(projectEdit(sensAbs('linked/src/report.js'), t), 'original name');
+    assertLinkedDenied(projectEdit(sensAbs('linked/vendor/report.js'), t), 'second name');
+    assertCredited(projectEdit(sensAbs('linked/src/plain.js'), t), 'single-link control');
+    const state = readState();
+    assert.strictEqual(state.fact_force_denials, 2);
+    assert.strictEqual(state.fact_force_credited, 1);
+  });
+
+  gateCase('the full code questions are asked for a hard-linked file', () => {
+    if (!linksReady) return;
+    const out = projectRun('Edit', { file_path: sensAbs('linked/src/report.js'), old_string: 'foo();', new_string: 'bar();' });
+    assertLinkedDenied(out, 'body-only change');
+    for (const line of FULL_CODE_QUESTIONS) assert.ok(out.reason.includes(line), `${line}: ${out.reason}`);
+  });
+
+  gateCase('a comment-only Edit of a hard-linked file is denied (control passes as trivial)', () => {
+    if (!linksReady) return;
+    const input = rel => ({ file_path: sensAbs(rel), old_string: '// old', new_string: '// new' });
+    assertLinkedDenied(projectRun('Edit', input('linked/src/report.js')), 'Edit');
+    const multi = projectRun('MultiEdit', { file_path: sensAbs('linked/vendor/tmp.js'), edits: [{ old_string: '// old', new_string: '// new' }] });
+    assertLinkedDenied(multi, 'MultiEdit');
+    const control = projectRun('Edit', input('linked/src/plain_two.js'));
+    assert.notStrictEqual(control.decision, 'deny', control.result.stdout);
+    assert.ok(control.context.includes('Comment or whitespace-only change'), control.context);
+  });
+
+  gateCase('a hard-linked file is denied past the denial cap (control passes)', () => {
+    if (!linksReady) return;
+    const env = { GATEGUARD_FACT_FORCE_MAX_DENIALS: '0' };
+    assertLinkedDenied(projectEdit(sensAbs('linked/src/report.js'), undefined, env), 'Edit past cap 0');
+    const multi = projectRun('MultiEdit', { edits: [
+      { file_path: sensAbs('linked/src/plain.js'), old_string: 'foo();', new_string: 'bar();' },
+      { file_path: sensAbs('linked/vendor/tmp.js'), old_string: 'foo();', new_string: 'bar();' }
+    ] }, undefined, env);
+    assertLinkedDenied(multi, 'MultiEdit entry past cap 0');
+    assert.ok(multi.reason.includes('tmp.js'), multi.reason);
+    const control = projectEdit(sensAbs('linked/src/plain_two.js'), undefined, env);
+    assert.strictEqual(control.decision, undefined, control.result.stdout);
+  });
+
+  gateCase('a MultiEdit with a hard-linked entry is denied despite a crediting search', () => {
+    if (!linksReady) return;
+    const t = linkedSearch(2);
+    const multi = projectRun('MultiEdit', { edits: [
+      { file_path: sensAbs('linked/src/plain.js'), old_string: 'foo();', new_string: 'bar();' },
+      { file_path: sensAbs('linked/src/report.js'), old_string: 'foo();', new_string: 'bar();' }
+    ] }, t);
+    assertLinkedDenied(multi, 'MultiEdit');
+    assert.ok(multi.reason.includes('report.js'), multi.reason);
+  });
+
+  gateCase('a subagent Edit of a hard-linked file is denied once; single-link targets still pass', () => {
+    if (!linksReady) return;
+    const agent = { agent_id: 'agent-linked', cwd: projectRoot };
+    const first = subEdit(sensAbs('linked/vendor/sub.js'), agent);
+    assert.strictEqual(roDecision(first), 'deny', first.stdout);
+    assert.ok(roReason(first).includes(linkedLine), roReason(first));
+    assert.strictEqual(roDecision(subEdit(sensAbs('linked/vendor/sub.js'), agent)), undefined, 'subagent retry passes');
+    assert.strictEqual(roDecision(subEdit(sensAbs('linked/src/plain.js'), agent)), undefined);
+  });
+
+  gateCase('a hard-linked sensitive file carries the sensitive wording', () => {
+    if (!linksReady) return;
+    const out = projectEdit(sensAbs('linked/src/auth/token.js'));
+    sensAssertDenied(out, 'sensitive and hard-linked');
+    assert.ok(!out.reason.includes(linkedLine), out.reason);
+    const alias = projectEdit(sensAbs('linked/vendor/token.js'));
+    assertLinkedDenied(alias, 'ordinary name of a hard link into auth/');
+  });
+
+  gateCase('a new file next to a hard-linked file keeps its allowances', () => {
+    if (!linksReady) return;
+    const t = writeTranscript([humanRecord('add a module'), ...searchRecords('toolu_linked_ls', 'LS', { path: sensAbs('linked/src') })]);
+    const out = projectWrite(sensAbs('linked/src/new_module.js'), t);
+    assertCredited(out, 'missing new file');
+  });
+
+  gateCase('an exempt glob still exempts a hard-linked file', () => {
+    if (!linksReady) return;
+    const out = projectEdit(sensAbs('linked/scratch/tmp.js'), undefined, { GATEGUARD_EXEMPT_GLOBS: 'linked/scratch/**' });
+    assert.strictEqual(out.decision, undefined, out.result.stdout);
+  });
+
+  gateCase('no hard-link output carries permissionDecision "allow"', () => {
+    for (const stdout of siblingOutputs) {
+      const output = parseOutput(stdout);
+      assert.notStrictEqual(output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined, 'allow', stdout);
+    }
+  });
+
   fs.rmSync(classBase, { recursive: true, force: true });
   fs.rmSync(scopeRoot, { recursive: true, force: true });
 

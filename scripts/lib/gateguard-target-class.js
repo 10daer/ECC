@@ -300,6 +300,29 @@ function isSensitiveRealTarget(filePath, data) {
   return isSensitiveTarget(normalizeWindowsSegments(realKey, target.isWin));
 }
 
+// --- Hard-linked targets ---
+// see docs/gateguard/design-notes.md#hard-linked-targets
+
+const MISSING_TARGET_CODES = new Set(['ENOENT', 'ENOTDIR']);
+
+function hasOtherLinks(stat) {
+  return !stat.isDirectory() && stat.nlink > 1;
+}
+
+/** True when the target file has more than one hard link; a stat error other than a missing file counts as linked. */
+function isHardLinkedTargetFor(filePath, data) {
+  try {
+    const target = resolveTargetPath(filePath, data);
+    if (!target) return true;
+    if (!isHostPathStyle(target.isWin)) return false;
+    const stat = fs.lstatSync(target.resolved);
+    if (!stat.isSymbolicLink()) return hasOtherLinks(stat);
+    return hasOtherLinks(fs.statSync(target.resolved));
+  } catch (error) {
+    return !(error && MISSING_TARGET_CODES.has(error.code));
+  }
+}
+
 // --- Sibling collapse eligibility ---
 // see docs/gateguard/design-notes.md#sibling-collapse
 
@@ -401,5 +424,6 @@ module.exports = {
   isCollapsibleTarget,
   collapseGateDir,
   isSensitiveTarget,
-  isSensitiveTargetFor
+  isSensitiveTargetFor,
+  isHardLinkedTargetFor
 };

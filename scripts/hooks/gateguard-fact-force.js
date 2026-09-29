@@ -9,7 +9,7 @@
  * The act of investigation creates awareness that self-evaluation never did.
  *
  * Gates:
- *   - Edit/Write/MultiEdit (first touch): questions chosen by target class
+ *   - Edit/Write/MultiEdit/NotebookEdit (first touch): questions chosen by target class
  *   - Bash/PowerShell (destructive): list targets, rollback plan, quote instruction
  *   - Bash/PowerShell (routine): quote current instruction (once per session)
  *
@@ -38,7 +38,8 @@ const {
   classifyTarget,
   classifyTargetFor,
   collapseGateDir,
-  isSensitiveTargetFor
+  isSensitiveTargetFor,
+  isHardLinkedTargetFor
 } = require('../lib/gateguard-target-class');
 const { scanCurrentTurn, createTurnScanner, currentTurnId, transcriptPathFor } = require('../lib/gateguard-turn-scan');
 const { createSearchEvidence } = require('../lib/gateguard-search-evidence');
@@ -146,7 +147,7 @@ function getExtraDestructiveRegex() {
 // Operator-supplied path exemptions. Comma-separated globs (`GATEGUARD_EXEMPT_GLOBS`)
 // matched against the normalized project-relative path (or full path for an
 // explicitly absolute glob). First-touch
-// fact-forcing is skipped for a matching Edit/Write/MultiEdit target — intended for
+// fact-forcing is skipped for a matching Edit/Write/MultiEdit/NotebookEdit target — intended for
 // low-import-value trees (tests, generated artifacts, scratch dirs) where "who imports
 // this / what schema" carries no signal. Memoized on the env value; malformed
 // patterns are dropped without granting exemptions. `*` matches within a path segment,
@@ -1648,8 +1649,8 @@ function countTrivialAllow() {
   return saveState({ ...state, trivial_allows: getTrivialAllowCount(state) + 1 });
 }
 
-function isTrivialChange(cls, sensitive, profile) {
-  return !sensitive && TRIVIAL_CLASSES.has(cls) && Boolean(profile) && profile.known === true && profile.trivial === true;
+function isTrivialChange(cls, restricted, profile) {
+  return !restricted && TRIVIAL_CLASSES.has(cls) && Boolean(profile) && profile.known === true && profile.trivial === true;
 }
 
 // --- Read-only first shell command ---
@@ -1894,7 +1895,7 @@ function firstTouchGateMsg(filePath, isWrite, cls, profile) {
  * (#2142). Carries the denial ordinal so consecutive denials differ
  * textually, and a one-line recovery hint instead of the multi-line block.
  */
-function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = false, profile = null, missNote = '') {
+function condensedGateMsg(action, filePath, ordinal, cls = 'code', targetNote = '', profile = null, missNote = '') {
   const safe = sanitizePath(filePath);
   const hint = condensedHintFor(cls, action === 'creation', profile);
   return (
@@ -1902,12 +1903,13 @@ function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = f
     `${hint} ` +
     `${batchSiblingWarning(safe)} ` +
     (missNote ? `${missNote} ` : '') +
-    (sensitive ? `${SENSITIVE_TARGET_NOTE} ` : '') +
+    (targetNote ? `${targetNote} ` : '') +
     '(Use GATEGUARD_EXEMPT_GLOBS for path-scoped exemptions; GATEGUARD_FACT_FORCE_MAX_DENIALS caps denials per session; ECC_GATEGUARD=off disables this gate.)'
   );
 }
 
 const SENSITIVE_TARGET_NOTE = 'Sensitive target: prior-search credit, sibling collapse, and the denial cap do not apply.';
+const HARD_LINKED_TARGET_NOTE = 'Hard-linked target: prior-search credit, sibling collapse, and the denial cap do not apply.';
 const RETRY_LINE = 'Present the facts, then retry the same operation.';
 
 function withNoteBeforeRetry(message, note) {
@@ -1917,14 +1919,21 @@ function withNoteBeforeRetry(message, note) {
   return `${message.slice(0, at)}${note}\n\n${message.slice(at)}`;
 }
 
-function denialReason(sensitive, missNote, miss) {
+function restrictedTargetNote(sensitive, linked) {
+  if (sensitive) return SENSITIVE_TARGET_NOTE;
+  return linked ? HARD_LINKED_TARGET_NOTE : '';
+}
+
+function denialReason(sensitive, linked, missNote, miss) {
   if (sensitive) return 'sensitive';
+  if (linked) return 'hard-linked';
   return missNote ? `near-miss:${miss.reason}` : 'first-touch';
 }
 
-function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile, miss, reason }) {
-  const missNote = sensitive ? '' : closestMissNote(miss);
-  recordDecision('deny', reason || denialReason(sensitive, missNote, miss), {
+function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, linked = false, profile, miss, reason }) {
+  const targetNote = restrictedTargetNote(sensitive, linked);
+  const missNote = targetNote ? '' : closestMissNote(miss);
+  recordDecision('deny', reason || denialReason(sensitive, linked, missNote, miss), {
     target: filePath,
     cls,
     sensitive,
@@ -1933,10 +1942,10 @@ function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile,
   });
   if (denials > getFullDenialBudget()) {
     const action = isWrite ? 'creation' : 'edit';
-    return denyResult(condensedGateMsg(action, filePath, denials, cls, sensitive, profile, missNote), { includeRecoveryHint: false });
+    return denyResult(condensedGateMsg(action, filePath, denials, cls, targetNote, profile, missNote), { includeRecoveryHint: false });
   }
   const message = withNoteBeforeRetry(firstTouchGateMsg(filePath, isWrite, cls, profile), missNote);
-  return denyResult(sensitive ? withNoteBeforeRetry(message, SENSITIVE_TARGET_NOTE) : message, {
+  return denyResult(targetNote ? withNoteBeforeRetry(message, targetNote) : message, {
     narrowRecoveryHint: EDIT_WRITE_NARROW_RECOVERY_HINT
   });
 }
@@ -2093,6 +2102,15 @@ function siblingNote(gate) {
   );
 }
 
+// --- Allowance eligibility ---
+// see docs/gateguard/design-notes.md#hard-linked-targets
+
+function allowanceFacts(filePath, data) {
+  const sensitive = isSensitiveTargetFor(filePath, data);
+  const linked = !sensitive && isHardLinkedTargetFor(filePath, data);
+  return { sensitive, linked, restricted: sensitive || linked };
+}
+
 // --- Subagents ---
 // see docs/gateguard/design-notes.md#subagents
 
@@ -2100,15 +2118,17 @@ function subagentGateKey(fileKey) {
   return `__subagent__${crypto.createHash('sha256').update(fileKey).digest('hex').slice(0, 16)}`;
 }
 
-function subagentSensitiveDenial(filePath, data, isWrite) {
-  if (!isSensitiveTargetFor(filePath, data)) return null;
+function subagentRestrictedDenial(filePath, data, isWrite) {
+  const { sensitive, linked, restricted } = allowanceFacts(filePath, data);
+  if (!restricted) return null;
   const fileKey = canonicalPathKey(filePath, data);
   const subKey = subagentGateKey(fileKey);
   if (isChecked([fileKey, filePath, subKey])) return null;
   const cls = classifyTargetFor(filePath, data);
   const { ok, denials } = markCheckedAndCountDenial(subKey, { cls });
   if (!ok) return allowWithStateWarning();
-  return firstTouchDenial(filePath, { isWrite, denials, cls, sensitive: true, profile: null, miss: null, reason: 'subagent-sensitive' });
+  const reason = sensitive ? 'subagent-sensitive' : 'subagent-hard-linked';
+  return firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, linked, profile: null, miss: null, reason });
 }
 
 // --- Change profile ---
@@ -2253,7 +2273,7 @@ function gate(rawInput) {
   const rawToolName = data.tool_name || '';
   const toolInput = data.tool_input || {};
   // Normalize: case-insensitive matching via lookup map
-  const TOOL_MAP = { edit: 'Edit', write: 'Write', multiedit: 'MultiEdit', bash: 'Bash', powershell: 'PowerShell' };
+  const TOOL_MAP = { edit: 'Edit', write: 'Write', multiedit: 'MultiEdit', notebookedit: 'NotebookEdit', bash: 'Bash', powershell: 'PowerShell' };
   const toolName = TOOL_MAP[rawToolName.toLowerCase()] || rawToolName;
   if (isMetricsEnabled()) {
     pendingMetrics = { tool: toolName, data, entries: [], keys: new Set() };
@@ -2261,8 +2281,8 @@ function gate(rawInput) {
   const inSubagent = isSubagentInvocation(data);
   const getTurnScan = createTurnScanner(data);
 
-  if (toolName === 'Edit' || toolName === 'Write') {
-    const filePath = toolInput.file_path || '';
+  if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
+    const filePath = (toolName === 'NotebookEdit' ? toolInput.notebook_path : toolInput.file_path) || '';
     const exempt = exemptReason(filePath, data);
     if (exempt) {
       recordDecision('pass-exempt', exempt, { target: filePath });
@@ -2270,7 +2290,7 @@ function gate(rawInput) {
     }
 
     if (inSubagent) {
-      const denial = subagentSensitiveDenial(filePath, data, toolName === 'Write');
+      const denial = subagentRestrictedDenial(filePath, data, toolName === 'Write');
       if (!denial) recordDecision('pass-subagent', 'subagent', { target: filePath });
       return denial || rawInput;
     }
@@ -2280,8 +2300,8 @@ function gate(rawInput) {
       const isNewFile = toolName === 'Write' && isNewFileTarget(filePath, data);
       const cls = classifyTargetFor(filePath, data);
       // see docs/gateguard/design-notes.md#sensitive-targets
-      const sensitive = isSensitiveTargetFor(filePath, data);
-      const credit = sensitive ? null : findCreditingSearch(getTurnScan(), filePath, isNewFile, data);
+      const { sensitive, linked, restricted } = allowanceFacts(filePath, data);
+      const credit = restricted ? null : findCreditingSearch(getTurnScan(), filePath, isNewFile, data);
       if (credit) {
         if (!markCheckedAndCountCredit(fileKey, cls)) {
           return allowWithStateWarning();
@@ -2289,16 +2309,16 @@ function gate(rawInput) {
         recordDecision('credit', 'prior-search', { target: filePath, cls, sensitive });
         return { additionalContext: creditNote(credit, filePath), exitCode: 0 };
       }
-      const profile = sensitive ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content, data);
-      if (toolName === 'Edit' && isTrivialChange(cls, sensitive, profile)) {
+      const profile = restricted || toolName === 'NotebookEdit' ? null : changeProfileFor(toolName, filePath, [toolInput], toolInput.content, data);
+      if (toolName === 'Edit' && isTrivialChange(cls, restricted, profile)) {
         if (!countTrivialAllow()) {
           return allowWithStateWarning();
         }
         recordDecision('trivial', 'comment-whitespace', { target: filePath, cls, sensitive, profile });
         return { additionalContext: trivialNote(filePath), exitCode: 0 };
       }
-      const turnId = isNewFile && !sensitive ? currentTurnId(getTurnScan()) : null;
-      const collapsible = isNewFile && !sensitive && (turnId !== null || !transcriptPathFor(data));
+      const turnId = isNewFile && !restricted ? currentTurnId(getTurnScan()) : null;
+      const collapsible = isNewFile && !restricted && (turnId !== null || !transcriptPathFor(data));
       const gateKey = collapsible ? newFileGateKey(filePath, data, cls) : null;
       const sibling = gateKey ? findSiblingGate(gateKey, turnId) : null;
       if (sibling) {
@@ -2309,7 +2329,7 @@ function gate(rawInput) {
         return { additionalContext: siblingNote(sibling), exitCode: 0 };
       }
       const dirGate = gateKey ? { key: gateKey, turn: turnId, first: sanitizePath(filePath) } : undefined;
-      const cap = sensitive ? Number.POSITIVE_INFINITY : getMaxDenialBudget();
+      const cap = restricted ? Number.POSITIVE_INFINITY : getMaxDenialBudget();
       const { ok, denials } = markCheckedAndCountDenial(fileKey, { cls, dirGate, cap });
       if (!ok) {
         return allowWithStateWarning();
@@ -2319,8 +2339,8 @@ function gate(rawInput) {
         recordDecision('cap', 'max-denials', { target: filePath, cls, sensitive, profile });
         return rawInput;
       }
-      const miss = sensitive ? null : findClosestMiss(getTurnScan(), filePath, isNewFile, data);
-      return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, profile, miss });
+      const miss = restricted ? null : findClosestMiss(getTurnScan(), filePath, isNewFile, data);
+      return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, linked, profile, miss });
     }
 
     recordDecision('pass-checked', 'checked', { target: filePath });
@@ -2333,7 +2353,7 @@ function gate(rawInput) {
       for (const edit of edits) {
         const filePath = (edit && edit.file_path) || '';
         if (!filePath || isClaudeSettingsPath(filePath) || isExemptPath(filePath, data)) continue;
-        const denial = subagentSensitiveDenial(filePath, data, false);
+        const denial = subagentRestrictedDenial(filePath, data, false);
         if (denial) return denial;
       }
       recordDecision('pass-subagent', 'subagent');
@@ -2353,8 +2373,8 @@ function gate(rawInput) {
       if (trivialKeys.has(fileKey)) continue;
       if (!isChecked([fileKey, filePath])) {
         const cls = classifyTargetFor(filePath, data);
-        const sensitive = isSensitiveTargetFor(filePath, data);
-        const credit = sensitive ? null : findCreditingSearch(getTurnScan(), filePath, false, data);
+        const { sensitive, linked, restricted } = allowanceFacts(filePath, data);
+        const credit = restricted ? null : findCreditingSearch(getTurnScan(), filePath, false, data);
         if (credit) {
           if (!markCheckedAndCountCredit(fileKey, cls)) {
             return allowWithStateWarning();
@@ -2363,8 +2383,8 @@ function gate(rawInput) {
           notes.push(creditNote(credit, filePath));
           continue;
         }
-        const profile = sensitive ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data), undefined, data);
-        if (isTrivialChange(cls, sensitive, profile)) {
+        const profile = restricted ? null : changeProfileFor('Edit', filePath, entriesFor(edits, fileKey, data), undefined, data);
+        if (isTrivialChange(cls, restricted, profile)) {
           if (!countTrivialAllow()) {
             return allowWithStateWarning();
           }
@@ -2373,7 +2393,7 @@ function gate(rawInput) {
           notes.push(trivialNote(filePath));
           continue;
         }
-        const cap = sensitive ? Number.POSITIVE_INFINITY : getMaxDenialBudget();
+        const cap = restricted ? Number.POSITIVE_INFINITY : getMaxDenialBudget();
         const { ok, denials } = markCheckedAndCountDenial(fileKey, { cls, cap });
         if (!ok) {
           return allowWithStateWarning();
@@ -2383,8 +2403,8 @@ function gate(rawInput) {
           recordDecision('cap', 'max-denials', { target: filePath, cls, sensitive, profile, key: fileKey });
           continue;
         }
-        const miss = sensitive ? null : findClosestMiss(getTurnScan(), filePath, false, data);
-        return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, profile, miss });
+        const miss = restricted ? null : findClosestMiss(getTurnScan(), filePath, false, data);
+        return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, linked, profile, miss });
       }
       recordDecision('pass-checked', 'checked', { target: filePath, key: fileKey });
     }

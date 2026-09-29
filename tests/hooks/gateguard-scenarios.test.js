@@ -66,8 +66,8 @@ async function main() {
     assert.strictEqual(summary.totals.unmappedQuestions, 0);
   });
 
-  test('only scenarios that need symlinks may be skipped', () => {
-    const skipped = runs.filter(run => run.skipped && !run.scenario.symlinks).map(run => run.scenario.name);
+  test('only scenarios that need symlinks or hard links may be skipped', () => {
+    const skipped = runs.filter(run => run.skipped && !run.scenario.symlinks && !run.scenario.hardlinks).map(run => run.scenario.name);
     assert.deepStrictEqual(skipped, []);
   });
 

@@ -28,7 +28,7 @@ const DECISIONS = Object.freeze([
   'pass'
 ]);
 const DECISION_SET = new Set(DECISIONS);
-const TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'Bash', 'PowerShell']);
+const TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell']);
 
 function isCode(value) {
   return typeof value === 'string' && value.length <= CODE_MAX_LENGTH && CODE_PATTERN.test(value);
