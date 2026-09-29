@@ -201,6 +201,14 @@
       },
       "description": "Confluence Cloud integration — search pages, retrieve content, explore spaces"
     },
+    "omniroute": {
+      "type": "http",
+      "url": "http://127.0.0.1:20128/api/mcp/stream",
+      "headers": {
+        "Authorization": "Bearer YOUR_OMNIROUTE_API_KEY_HERE"
+      },
+      "description": "OmniRoute — self-hosted AI gateway/router (357+ providers, 1200+ models via one OpenAI-compatible endpoint) with an MCP server exposing routing, cost, and provider-management tools. Not bundled or maintained by ECC. Requires the omniroute server running locally (npm install -g omniroute && omniroute serve --daemon) and an OmniRoute API key from its dashboard or `omniroute keys`. For safety bind it to loopback (OMNIROUTE_SERVER_HOST=127.0.0.1 in ~/.omniroute/.env) or set REQUIRE_API_KEY=true — by default it listens on 0.0.0.0 with no API key. Not enabled by default. Repo: https://github.com/diegosouzapw/OmniRoute"
+    },
     "evalview": {
       "command": "python3",
       "args": ["-m", "evalview", "mcp", "serve"],
