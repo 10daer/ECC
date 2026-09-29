@@ -5,6 +5,42 @@ Rationale for the decisions in the GateGuard fact-forcing gate
 Code comments point here as `docs/gateguard/design-notes.md#<anchor>`; keep
 headings stable, since they are the anchors.
 
+## Index
+
+- Structure: [Module layout](#module-layout), [Fail to deny](#fail-to-deny).
+- Which targets are gated and how strictly:
+  [Exempt globs](#exempt-globs), [NotebookEdit](#notebookedit),
+  [MultiEdit paths](#multiedit-paths), [Sensitive targets](#sensitive-targets),
+  [Hard-linked targets](#hard-linked-targets),
+  [Target resolution](#target-resolution), [Target classes](#target-classes),
+  [Worktree prefix](#worktree-prefix),
+  [Windows name normalization](#windows-name-normalization).
+- Right question: [Change profile](#change-profile),
+  [Public surface](#public-surface), [Data handling](#data-handling),
+  [Shell scripts](#shell-scripts), [File context](#file-context),
+  [Questions from the change profile](#questions-from-the-change-profile),
+  [Trivial edits](#trivial-edits), [Directive comments](#directive-comments),
+  [Closest search that did not count](#closest-search-that-did-not-count).
+- Right time, prior-search credit: [Read is not evidence](#read-is-not-evidence),
+  [Turn boundaries](#turn-boundaries), [Turn identity](#turn-identity),
+  [Tool result pairing](#tool-result-pairing),
+  [Same-batch searches](#same-batch-searches),
+  [Ambiguous shell is not evidence](#ambiguous-shell-is-not-evidence),
+  [Directory changes](#directory-changes),
+  [Stdin is not a tree search](#stdin-is-not-a-tree-search),
+  [Search scope](#search-scope), [Stem matching](#stem-matching),
+  [Test stems](#test-stems), [Search filters](#search-filters),
+  [Include filters](#include-filters),
+  [Glob matching without RegExp](#glob-matching-without-regexp),
+  [Flag parsing](#flag-parsing),
+  [PowerShell parameter binding](#powershell-parameter-binding).
+- Right time, other allowances: [New-file detection](#new-file-detection),
+  [Sibling collapse](#sibling-collapse), [Denial cap](#denial-cap),
+  [Read-only first shell command](#read-only-first-shell-command),
+  [Idle window](#idle-window), [Subagents](#subagents).
+- State and measurement: [State file is untrusted](#state-file-is-untrusted),
+  [Metrics](#metrics).
+
 ## Module layout
 
 - `scripts/hooks/gateguard-fact-force.js`: the hook. Owns the shell parser
@@ -12,10 +48,11 @@ headings stable, since they are the anchors.
   destructive Bash/PowerShell detector uses, the state file I/O, the gate
   messages, and `run()`.
 - `scripts/lib/gateguard-target-class.js`: target identity and classification
-  for first-touch Edit/Write/MultiEdit targets: canonical path keys, target
-  classes and their questions, sensitive-target detection and sibling-collapse
-  eligibility. Stateless; filesystem access is limited to worktree `.git`
-  checks and realpath/lstat of the target's parent chain.
+  for first-touch Edit/Write/MultiEdit/NotebookEdit targets: canonical path
+  keys, target classes and their questions, sensitive-target and hard-link
+  detection and sibling-collapse eligibility. Stateless; filesystem access is
+  limited to worktree `.git` checks, realpath/lstat of the target's parent
+  chain, and lstat/stat of the target for its link count.
 - `scripts/lib/gateguard-turn-scan.js`: one bounded tail read of the Claude Code
   JSONL transcript, walked back to the start of the current turn. Yields the
   turn id, the turn's completed non-error search calls (newest first), their
@@ -43,10 +80,11 @@ headings stable, since they are the anchors.
 ## Fail to deny
 
 Every allowance other than a retry of an already-gated target (prior-search
-credit, the trivial-edit pass, sibling collapse, the denial cap, the read-only
-first shell command) is an exception to the first-touch or routine
-denial, so each one falls back to the denial on any doubt: an unreadable
-transcript, a parse failure, an unresolvable path, or an exception. The lib
+credit, the trivial-edit pass, sibling collapse, the denial cap, the subagent
+bypass, the read-only first shell command) is an exception to the first-touch
+or routine denial, so each one falls back to the denial on any doubt: an
+unreadable transcript, a parse failure, an unresolvable path, a stat error on
+the target, or an exception. The lib
 exports that feed those decisions never throw (they catch and return a
 fallback that denies, or no scan at all), so an error cannot escape into credit or
 sibling logic. Allowances are never an `allow` permission decision: credit,
@@ -74,6 +112,56 @@ exceptions).
   location, so `src/tools -> ../auth` cannot launder `src/tools/login.py`.
 - A real location that cannot be resolved (dangling symlink, `ENOTDIR`,
   `EACCES`, loops), a non-string path, or any error counts as sensitive.
+
+## Hard-linked targets
+
+A file with more than one hard link can be changed through any of its names,
+and the other names may be sensitive (`vendor/token.js` linked to
+`src/auth/token.js`), belong to another class, or live outside the project.
+Neither the lexical path nor `realpath` reveals them, and finding every name
+would mean walking the filesystem. So the allowances trust no name of such a
+file: a target whose `lstat` (or, for a symlink, `stat`) reports
+`nlink > 1` gets no prior-search credit, change profile, trivial-edit pass,
+sibling collapse, denial cap or subagent bypass, exactly as a sensitive target.
+
+- Directories are skipped (their link count counts subdirectories).
+- A missing file (`ENOENT`, `ENOTDIR`) is a new file with one name, so a Write
+  that creates one keeps its allowances; any other stat error, an unresolvable
+  target, or a non-string path counts as hard-linked. The stat is only used for
+  this allowance decision; it never turns an allowed retry into a denial.
+- A Windows-style path on a POSIX host (or the reverse) has no file to stat and
+  is judged by its path alone, as for the real-path checks.
+- The denial names the rule ("Hard-linked target: …") rather than calling the
+  file sensitive; a target that is both gets the sensitive note. Metrics record
+  the reason `hard-linked` (or `subagent-hard-linked`) with `sensitive: false`.
+- The check runs at decision time; a link created after the first touch is not
+  seen, which is the same limit as for sensitive real paths.
+
+## Exempt globs
+
+`GATEGUARD_EXEMPT_GLOBS` is an operator decision and stays authoritative: an
+exempt target passes before the subagent, checked, sensitive and hard-link
+rules are consulted, so a glob that covers `src/auth/**` or a hard-linked file
+turns its check off. The alternative (sensitive rules overriding exemptions)
+would make a documented control silently ineffective for the paths an
+operator is most likely to be deliberate about, and would change behaviour
+for existing configurations. The precedence is documented in the skill's
+order of checks, and the table row warns that exemptions apply to sensitive
+and hard-linked targets too.
+
+## NotebookEdit
+
+NotebookEdit writes a `.ipynb` file named by `tool_input.notebook_path` (not
+`file_path`), so it is routed to the edit-write gate by adding it to that
+entry's matcher only; the other PreToolUse entries are unchanged. The hook
+treats it as an Edit of `notebook_path`: the same canonical checked key (an
+Edit and a NotebookEdit of one notebook share a first touch), class by path
+(`.ipynb` falls through to code; under `tests/` it is a test), and the same
+sensitive, hard-link, credit, cap, subagent and exempt rules. A `file_path`
+field on the call is ignored. The change profile only understands source text,
+not a cell edit, so a NotebookEdit always gets the full questions and is never
+a trivial pass. It is never a new-file Write, so it never opens or joins a
+sibling gate.
 
 ## Target resolution
 
@@ -273,7 +361,7 @@ malformed value leaves the gate uncapped and says so once on stderr. Once the
 session's denials reach the cap, a first touch passes with the input unchanged
 and is counted in `cap_allows`. The cap check reads the state the same write
 persists, so a lost concurrent update can add a denial but never passes a
-target early. Sensitive targets are never capped.
+target early. Sensitive and hard-linked targets are never capped.
 
 ## State file is untrusted
 
@@ -499,7 +587,8 @@ before sibling collapse and the denial cap. It is not marked checked and does
 not touch the denial count or ordinal, so the next change that alters code is
 gated as a first touch; `trivial_allows` counts the passes (merged by maximum
 like the other counters). The trivial pass never marks the target checked and
-never applies to sensitive, instruction or config targets, so the next
+never applies to sensitive, hard-linked, instruction or config targets or to
+a NotebookEdit, so the next
 non-trivial change still meets the full gate.
 
 ## File context
@@ -510,7 +599,7 @@ that opens above it, follow a line that continues onto it, or lose its line
 break so the next line joins it. So an Edit is trivial only when checked
 against the file it applies to.
 
-- The hook reads the current target (never a sensitive one) itself: the path
+- The hook reads the current target (never a sensitive or hard-linked one) itself: the path
   is resolved like every other target, opened read-only and non-blocking,
   and used only if `fstat` says it is a regular file of at most 1 MiB; CRLF
   is folded to LF, as the Edit tool does. A missing, unreadable, larger or
@@ -569,8 +658,9 @@ questions were asked without storing text.
 | config | any | `config-reader`, `config-effect`, `no-plaintext-secrets`, `quote-instruction` |
 
 `[data-schema]` is asked only when `touchesData`. With an unknown profile the
-code text is byte-identical to the fixed four questions. Sensitive targets are
-never profiled, so they always get the full code questions. Instruction and
+code text is byte-identical to the fixed four questions. Sensitive and
+hard-linked targets and NotebookEdit calls are never profiled, so they always
+get the full code questions. Instruction and
 config questions carry no change-dependent item, and the test and prose items
 do not depend on what the change touches, so the profile leaves those classes
 alone. For a MultiEdit, the denied file's profile covers every entry for that
@@ -585,7 +675,8 @@ names `callers`, `no-duplicate` and `data-schema` like its full denial.
 
 ## Closest search that did not count
 
-When a non-sensitive first touch is denied and the turn holds a search (or a
+When an ordinary (not sensitive or hard-linked) first touch is denied and the
+turn holds a search (or a
 `Read`, or a non-search shell command) that mentions the target but did not
 credit it, the denial adds one line naming the closest one, so the agent does
 the missing step instead of restating facts:
@@ -611,8 +702,8 @@ closest to farthest (the closest wins, then the newest):
 reading past it would cost a second, larger scan. Ambiguous shell commands
 (substitutions, heredocs, over 8192 characters) give no line. The tool name
 comes from a fixed set; the detail is the tool input, sanitized like a path,
-whitespace-folded and cut to 60 characters. Sensitive targets never get the
-line, since no search could have credited them. In a condensed denial the line
+whitespace-folded and cut to 60 characters. Sensitive and hard-linked targets
+never get the line, since no search could have credited them. In a condensed denial the line
 follows the batch warning.
 
 ## Read-only first shell command
@@ -685,9 +776,9 @@ the work it delegated, and a subagent writing many files would otherwise draw
 one denial per file. Shell gates were never skipped, so a subagent can
 already receive a denial, present facts and retry.
 
-Sensitive targets are the exception. A subagent Edit, Write or MultiEdit
-entry on a sensitive target is denied once per path with the full sensitive
-denial, unless the parent already gated that path. Prior-search credit, the
+Sensitive and hard-linked targets are the exception. A subagent Edit, Write,
+NotebookEdit or MultiEdit entry on such a target is denied once per path with
+the full denial and its note, unless the parent already gated that path. Prior-search credit, the
 change profile, sibling collapse and the denial cap never apply, as at top
 level. The subagent's denial marks a separate subagent key, not the file's
 key, so a subagent's retry never unlocks the path for the parent, whose own

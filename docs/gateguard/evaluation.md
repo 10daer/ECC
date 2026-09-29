@@ -46,8 +46,8 @@ Metrics per hook:
 - **Hook latency p50/p95**: wall time of `run()` per step, in process. The
   only non-deterministic metric.
 
-Each scenario runs in its own temp project (files and symlinks created from
-the fixture), with its own transcript, `GATEGUARD_STATE_DIR`, `HOME` and a
+Each scenario runs in its own temp project (files, symlinks and hard links
+created from the fixture), with its own transcript, `GATEGUARD_STATE_DIR`, `HOME` and a
 clean environment (`PATH`, `CLAUDE_PROJECT_DIR`, plus the scenario's `env`),
 in a fresh worker thread, so module state and state files never leak between
 scenarios or hooks. A baseline hook is materialised from `git show
@@ -56,29 +56,29 @@ relatively at that ref, into a temp tree that mirrors the repo layout.
 
 ## Results
 
-Working tree = branch `gateguard-full`; `upstream/main` = `bd9402f7`;
+Working tree = branch `gateguard-full`; `upstream/main` = `d30588f9`;
 `58a4a0d0` = the pull request head before this round. Node 22, Linux.
 
 ```text
-Corpus: 18 scenarios, 172 steps.
+Corpus: 20 scenarios, 182 steps.
 ```
 
 | Metric | working tree | upstream/main | 58a4a0d0 |
 | --- | ---: | ---: | ---: |
-| Steps | 172 | 172 | 172 |
-| Denials | 124 | 152 | 130 |
-| Redundant denials | 0 | 36 | 16 |
-| Must-deny bypasses | 0 | 5 | 5 |
-| Expectation mismatches | 0 | 48 | 26 |
+| Steps | 182 | 182 | 182 |
+| Denials | 131 | 155 | 131 |
+| Redundant denials | 0 | 37 | 16 |
+| Must-deny bypasses | 0 | 8 | 9 |
+| Expectation mismatches | 0 | 54 | 32 |
 | Irrelevant questions asked | 2 | 181 | 146 |
 | Irrelevant questions in condensed denials | 2 | 105 | 84 |
 | Warranted questions not asked | 1 | 55 | 42 |
-| Estimated denial tokens | 23584 | 26724 | 24549 |
-| Allows with a credit note | 9 | 0 | 8 |
+| Estimated denial tokens | 25455 | 27524 | 24813 |
+| Allows with a credit note | 11 | 0 | 10 |
 | Allows with a sibling note | 11 | 0 | 11 |
 | Allows with a trivial-edit note | 5 | 0 | 0 |
-| Hook latency p50 (ms) | 1.71 | 0.86 | 1.45 |
-| Hook latency p95 (ms) | 7.89 | 2.95 | 5.99 |
+| Hook latency p50 (ms) | 1.68 | 0.76 | 1.23 |
+| Hook latency p95 (ms) | 7.67 | 2.13 | 5.38 |
 
 | Scenario | Steps | Denials: working tree | Denials: upstream/main | Denials: 58a4a0d0 |
 | --- | ---: | ---: | ---: | ---: |
@@ -100,18 +100,22 @@ Corpus: 18 scenarios, 172 steps.
 | cap-with-sensitive | 6 | 4 | 6 | 4 |
 | bypass-comment-context | 22 | 21 | 19 | 19 |
 | exported-members | 6 | 6 | 6 | 6 |
+| notebook-edits | 6 | 4 | 0 | 0 |
+| hard-linked-targets | 4 | 3 | 3 | 1 |
 
 ### Reading the results
 
 Against `upstream/main`:
 
-- 18% fewer denials (152 to 124) and 12% fewer denial tokens, with every
-  redundant denial in the corpus gone (36 to 0).
-- All five must-deny bypasses closed: `upstream/main` lets a subagent edit
-  `src/auth/oauth.js` and `config/secrets.yaml` without a question, and never
-  gates a MultiEdit call that names its file in `tool_input.file_path` (the
-  tool's own shape), so `.env`, `config/.env.local` from a subagent and a
-  first-touch code file all pass.
+- 15% fewer denials (155 to 131) and 8% fewer denial tokens, with every
+  redundant denial in the corpus gone (37 to 0).
+- All eight must-deny bypasses closed: `upstream/main` lets a subagent edit
+  `src/auth/oauth.js`, `config/secrets.yaml` and a hard-linked file without a
+  question, never gates a MultiEdit call that names its file in
+  `tool_input.file_path` (the tool's own shape), so `.env`,
+  `config/.env.local` from a subagent and a first-touch code file all pass,
+  and never gates NotebookEdit, so notebooks under `auth/` and `payments/`
+  pass from the parent and from a subagent.
 - Irrelevant questions drop from 181 to 2 and warranted-but-unasked from 55
   to 1: edits without a public-surface line ask for local call sites instead
   of importers, members of exported interfaces, enums, export lists,
@@ -119,20 +123,22 @@ Against `upstream/main`:
   question is asked only when the change touches data, and condensed denials
   name the same questions as full ones.
 - Denials rise only where they should: the subagent's first touch of a
-  sensitive file, MultiEdit calls, the first mutating shell command after a
-  read-only one (`upstream/main` spends its once-per-session routine gate on
-  `ls`), and the first code-changing edit after a comment-only one (the
-  comment edit no longer spends the file's first touch).
+  sensitive or hard-linked file, MultiEdit calls, NotebookEdit calls, the first
+  mutating shell command after a read-only one (`upstream/main` spends its
+  once-per-session routine gate on `ls`), and the first code-changing edit
+  after a comment-only one (the comment edit no longer spends the file's first
+  touch).
 
-Against `58a4a0d0` (the pull request head before this round): 6 fewer
-denials net. The first 16 scenarios account for 8 fewer (3 in the
-comment-only scenario, 6 from read-only first shell commands and 1 from the
-test edit credited by its stem, less 2 more for subagent edits of sensitive
-files); `bypass-comment-context` adds 2 (three MultiEdit calls now gated, one
-comment edit passed). Redundant denials drop from 16 to 0, all five bypasses
-close, and irrelevant questions drop from 146 to 2.
+Against `58a4a0d0` (the pull request head before this round): the same 131
+denials with 16 fewer redundant ones and nine bypasses closed. The first 16
+scenarios account for 8 fewer denials (3 in the comment-only scenario, 6 from
+read-only first shell commands and 1 from the test edit credited by its stem,
+less 2 more for subagent edits of sensitive files); `bypass-comment-context`
+adds 2 (three MultiEdit calls now gated, one comment edit passed),
+`notebook-edits` adds 4 and `hard-linked-targets` adds 2. Irrelevant
+questions drop from 146 to 2.
 
-The security review of this round's allowances added two scenarios.
+The security reviews of this round added four scenarios.
 `bypass-comment-context` holds 21 must-deny steps: comment-looking edits that
 change code in their file (a comment line after a continued C macro, a line
 break dropped so the next line joins a comment, lines inside a template
@@ -148,19 +154,32 @@ Before the fixes the branch let 20 of those 21 through (every edit and
 `exported-members` holds six member edits whose container declaration sits
 outside the snippet; before the fixes the branch asked for local call sites
 on the five public ones (5 irrelevant questions, 10 warranted ones not asked).
+`notebook-edits` covers a cold NotebookEdit, its retry, a credited test
+notebook, a comment-only cell and sensitive notebooks in the parent and a
+subagent; every earlier hook allows all six calls. `hard-linked-targets`
+edits a second name of a file after a search that names it, makes a
+comment-only change to another linked file and edits a linked file from a
+subagent, with a single-link control; before the fix the branch allowed all
+three (credit, trivial pass, subagent bypass), and `58a4a0d0` allowed the
+credited alias and the subagent edit.
 
 What the working tree still gets wrong, by the corpus's own labels:
 
 - Sensitive targets are never profiled, so a sensitive code Write always asks
   the data-schema question (`symlinked-auth-first`, `symlinked-auth-sibling`:
   the 2 irrelevant questions).
+- NotebookEdit and hard-linked targets always get the full questions; the
+  corpus labels all four as warranted for them, so this costs nothing in the
+  table, but a notebook cell that handles no data still gets the data-schema
+  question.
 - The C edit that turns a declaration into a comment continuation
   (`c-comment-continuation`) has no data words, so the condensed hint no
   longer mentions data schemas; the corpus labels that question as warranted
   (the 1 unasked one).
-- Latency roughly doubles against `upstream/main` (p50 about 2 ms, p95 about
-  8 ms) with the added transcript scanning and path resolution; both stay far
-  below the 200 ms budget for blocking hooks. Checking a comment-only edit
+- Latency rises against `upstream/main` (p50 1.7 ms against 0.8 ms, p95
+  7.7 ms against 2.1 ms) with the added transcript scanning, path resolution
+  and the target's link-count check; both stay far below the 200 ms budget
+  for blocking hooks. Checking a comment-only edit
   reads and scans the target file, which costs up to about 50 ms for a 1 MiB
   file (the largest one read).
 
@@ -185,8 +204,9 @@ mismatch, a must-deny bypass, an explicit `allow` decision or a thrown error.
 One JSON file per scenario in `tests/fixtures/gateguard-scenarios/`:
 
 - `name`, `description`;
-- `files` (project-relative path to content), optional `dirs` and `symlinks`
-  (link path to target, relative to the link), created in a temp project;
+- `files` (project-relative path to content), optional `dirs`, `symlinks`
+  (link path to target, relative to the link) and `hardlinks` (link path to
+  an existing project file, both project-relative), created in a temp project;
 - optional `root` (a fixed project path, used for Windows-style paths, where
   nothing is created on disk) and `env` (extra environment variables);
 - `steps`, in order. Each step has an `id`, an optional `note`, the
@@ -200,8 +220,9 @@ project and transcript paths. Transcripts are the same for every hook: a
 step's call is assumed to succeed eventually, so the next step's records start
 with its `tool_result`.
 
-A scenario with `symlinks` is skipped (and reported) where symlinks cannot be
-created, such as Windows without the privilege.
+A scenario with `symlinks` or `hardlinks` is skipped (and reported) where the
+links cannot be created, such as Windows without the symlink privilege or a
+file system without hard links.
 
 ## Limits
 

@@ -4,17 +4,22 @@
 
 ### Changed
 
-- GateGuard first-touch Edit/Write/MultiEdit denials now ask questions that fit the target's class (instruction, test, prose, config, or code), classified on its project-relative path. Code targets keep the existing questions word for word.
-- GateGuard credits investigation that already happened: a completed, non-error `Glob`, `Grep`, `LS`, or search-style Bash/PowerShell command in the current human turn that names the target and whose scope contains it satisfies the first-touch check with a note instead of a denial. `Read` never counts; searches in the gated call's own batch, before a compaction, with error results, or behind exclusion globs never count; and any transcript problem falls back to the denial.
-- GateGuard asks once for a batch of new files: after a Write of a new file is denied, later new files of the same class in the same real directory within the same human turn pass with a note. Edits, config and instruction files, and any dotfile or dot-directory are always gated one by one.
-- Add opt-in `GATEGUARD_FACT_FORCE_MAX_DENIALS`, a per-session denial cap: once that many first-touch denials have been issued, further new paths pass through (counted in `cap_allows`). Unset keeps the current behaviour, credit and sibling allows never consume it, destructive and routine shell gates are unaffected, and a malformed value is reported once on stderr and leaves the gate uncapped (#2755, thanks @SulimanAbdulrazzaq; closes #2608).
-- Sensitive targets (`.env*`, keys and certificates, `credentials*`, `secrets.*`, `auth`/`security`/`payment(s)`/`billing`/`migrations` path segments, `.github/workflows/`) are always gated on first touch, judged on both the path as written and its real (symlink-resolved) location; the denial says so.
-- Session state records `fact_force_credited`, `denials_by_class`, `credited_by_class`, `sibling_allows`, `dir_gates`, and `cap_allows`; older state files load unchanged. These rules only remove redundant denials: nothing previously allowed is now denied. See `skills/gateguard/SKILL.md`.
+- GateGuard first-touch denials ask questions that fit the target: by class (instruction, test, prose, config, code) on its project-relative path, and for code by what the change touches. An edit that changes no public declaration asks for the in-module call sites instead of importers and public API, and the data-schema question is dropped when the change handles no data. Changes the hook cannot read with confidence keep the original four questions word for word.
+- GateGuard credits investigation that already happened: a completed, non-error `Glob`, `Grep`, `LS`, or search-style Bash/PowerShell command in the current human turn that names the target and whose scope contains it passes the first touch with a note. `Read` never counts, nor do searches in the same batch, before a compaction, with error results, or whose filters exclude the target. When a denial follows a search that nearly counted, it names that search and why it did not count.
+- GateGuard passes comment and whitespace-only edits of code, test and prose files with a note, without marking the file checked, so the next change that alters code is still gated.
+- GateGuard asks once for a batch of new files: after a new file is denied, later new files of the same class in the same real directory within the same human turn pass with a note.
+- Read-only shell commands (`ls`, `cat`, `rg`, `git status`/`log`/`diff`, `Get-ChildItem`, …) no longer use up the once-per-session routine shell gate; the first other command is still gated (#2573).
+- GateGuard session state keyed by a session id or transcript path now expires after 8 idle hours instead of 30 minutes; the project-directory fallback keeps 30 minutes.
+- Add opt-in `GATEGUARD_FACT_FORCE_MAX_DENIALS`, a per-session denial cap: once that many first-touch denials have been issued, further new paths pass through (counted in `cap_allows`). Unset keeps the current behaviour; a malformed value is reported once on stderr and leaves the gate uncapped (#2755, thanks @SulimanAbdulrazzaq; closes #2608).
+- Add opt-in `GATEGUARD_METRICS` decision metrics (codes only, never paths, commands or content) and `scripts/gateguard-report.js` to summarise them.
+- Sensitive targets (`.env*`, keys and certificates, `credentials*`, `secrets.*`, `auth`/`security`/`payment(s)`/`billing`/`migrations` path segments, `.github/workflows/`) and files with more than one hard link get none of these allowances, judged on the path as written and its real location, and are gated in subagents too. `GATEGUARD_EXEMPT_GLOBS` still takes precedence.
+- Newly denied: a subagent's first touch of a sensitive or hard-linked file, and the first NotebookEdit of each notebook. Every other rule only removes denials and never returns an `allow` decision. See `skills/gateguard/SKILL.md`.
 
 ### Fixed
 
 - GateGuard keys checked files by canonical path, resolving relative targets against the tool `cwd`, so `a.py`, `./a.py`, and the absolute path (or differently cased and separated Windows spellings) share one first touch. Keys from earlier state files are still honoured.
-- GateGuard gates a MultiEdit call as its `tool_input.file_path` when its entries do not name their own path, which is the tool's own shape; such calls were never gated before, including on sensitive files and from subagents.
+- GateGuard gates a MultiEdit call as its `tool_input.file_path` when its entries do not name their own path, which is the tool's own shape; such calls were never gated before, including on sensitive files.
+- GateGuard gates NotebookEdit as a first-touch edit of its `notebook_path`; notebooks were never gated before.
 
 ## 2.2.2 - 2026-09-15
 

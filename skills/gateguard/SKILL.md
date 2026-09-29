@@ -1,6 +1,6 @@
 ---
 name: gateguard
-description: "PreToolUse fact-forcing gate that denies the first Edit/Write/Bash (including MultiEdit) attempt until the agent presents concrete facts (importers, data schemas, verbatim user instruction), then allows retry; A/B-tested at +2.25 quality points. Use when enabling or configuring the GateGuard hook, exempting paths via env vars, or handling first-touch denials."
+description: "PreToolUse fact-forcing gate that denies the first Edit/Write/Bash (including MultiEdit and NotebookEdit) attempt until the agent presents concrete facts (importers, data schemas, verbatim user instruction), then allows retry; A/B-tested at +2.25 quality points. Use when enabling or configuring the GateGuard hook, exempting paths via env vars, or handling first-touch denials."
 metadata:
   origin: community
 ---
@@ -50,6 +50,9 @@ Both agents produce code that runs and passes tests. The difference is design de
 
 MultiEdit is handled identically — each file in the batch is gated individually;
 entries without their own `file_path` are gated as the call's `file_path`.
+NotebookEdit is gated as an Edit of its `notebook_path`: same class, checked
+key, credit and cap rules, the full questions (the cell change is not read),
+and never a comment-only pass.
 
 The questions depend on the target's class (see
 [Questions by target class](#questions-by-target-class)). For **code**
@@ -122,7 +125,7 @@ Supported extensions: `.js .mjs .cjs .jsx .ts .tsx .mts .cts .py .pyi .go .rs
 .bat .cmd`. Any other extension, a
 missing or non-string field, more than 64 MultiEdit entries, a side over
 64 KiB, or 256 KiB in total means the full questions, word for word. Sensitive
-targets always get the full questions. Other classes keep their class
+and hard-linked targets and NotebookEdit calls always get the full questions. Other classes keep their class
 questions. Each question has a stable id (`importers`, `public-api`,
 `local-callers`, `callers`, `no-duplicate`, `data-schema`,
 `quote-instruction`, and one per class question), listed in
@@ -244,16 +247,22 @@ anything is ambiguous.
 
 ### Order of checks
 
-For each Edit/Write target (and each MultiEdit entry) the gate decides in
-this order; the first rule that applies wins:
+For each Edit/Write/NotebookEdit target (and each MultiEdit entry) the gate
+decides in this order; the first rule that applies wins:
 
 1. **Exempt** (`GATEGUARD_EXEMPT_GLOBS`, Claude settings files) — allowed.
+   Operator exemptions are authoritative: they win over every later rule,
+   including the sensitive and hard-link rules, so a glob that covers
+   `src/auth/**` or a hard-linked file turns its check off. Exempt only
+   paths that may be edited without the check.
 2. **Subagent** call — allowed (the parent session was already gated),
-   except a [sensitive target](#sensitive-targets): denied once per path
+   except a [sensitive](#sensitive-targets) or
+   [hard-linked](#hard-linked-targets) target: denied once per path
    unless the parent already gated it. A subagent's retry does not unlock
    the path for the parent.
 3. **Already checked** this session — allowed.
-4. **Sensitive target?** — if so, skip straight to the denial (step 9).
+4. **Sensitive or hard-linked target?** — if so, skip straight to the
+   denial (step 9).
 5. **Prior-search credit** — allowed with a note.
 6. **Comment or whitespace-only Edit** — allowed with a note, not marked
    checked.
@@ -292,9 +301,21 @@ on its absolute path. Any error while deciding (a dangling symlink, a file
 where a directory should be, a permission error) counts as sensitive.
 Destructive and routine shell gates are unaffected.
 
+### Hard-linked targets
+
+A file with more than one hard link (`nlink > 1`, or a symlink to such a file)
+is also reachable under another name, which may be sensitive or in another
+class, so the path being edited says little about what changes. It gets the
+same treatment as a sensitive target — no prior-search credit, change profile,
+comment-only pass, sibling collapse, denial cap, or subagent bypass — and its
+denial carries "Hard-linked target: prior-search credit, sibling collapse, and
+the denial cap do not apply." instead of the sensitive line (a target that is
+both says "Sensitive target"). A stat error other than a missing file counts as
+hard-linked; a new file that does not exist yet is not.
+
 ### Prior-search credit
 
-An Edit, Write, or MultiEdit entry is allowed, with an
+An Edit, Write, NotebookEdit, or MultiEdit entry is allowed, with an
 `additionalContext` note naming the search, when a qualifying search in the
 **current human turn** already covered the file:
 
@@ -397,7 +418,8 @@ An Edit, Write, or MultiEdit entry is allowed, with an
   as before.
 - **Falls back to deny:** a missing, unreadable, or non-file transcript,
   garbage records, or any internal error mean no credit.
-- **Closest miss in the denial:** when a non-sensitive first touch is denied
+- **Closest miss in the denial:** when an ordinary (not sensitive or
+  hard-linked) first touch is denied
   and a call in the turn mentioned the file without crediting it, the denial
   adds one line, "Closest search this turn did not count (`<tool>`
   `<detail>`): `<why>`.", naming the closest such call and why it failed: sent
@@ -437,7 +459,8 @@ entry reads cleanly:
   division), JSX-like tags, and `-->`; in shell scripts heredocs, backticks,
   `$(` inside double quotes, `$'...'`, line continuations and here-strings
   (see the design notes for the full list);
-- config, instruction, and sensitive targets never pass this way.
+- config, instruction, sensitive and hard-linked targets, and NotebookEdit
+  calls never pass this way.
 
 The edit is also checked against the current file (a regular file of at
 most 1 MiB, read by the hook and never stored): `old_string` must be found as
@@ -517,7 +540,9 @@ working.
   `GATEGUARD_METRICS` (unset means no metrics). The existing controls are
   unchanged.
 - **Nothing previously allowed is now denied**, except a subagent's first
-  touch of a sensitive target. The other rules only remove denials, and never return `permissionDecision: "allow"`, so other hooks
+  touch of a sensitive or hard-linked target, and the first NotebookEdit of
+  each notebook (NotebookEdit was not gated before). The other rules only
+  remove denials, and never return `permissionDecision: "allow"`, so other hooks
   and permission rules still apply.
 - **Trust limit:** prior-search credit reads the local transcript file,
   which the agent could in principle write to. The credit verifies observed
@@ -552,12 +577,12 @@ load-bearing destructive-Bash checks keep running:
 | Variable | Default | Effect |
 |---|---|---|
 | `GATEGUARD_BASH_ROUTINE_DISABLED` | unset (gate on) | Disables the **routine-Bash** gate only. The destructive-Bash gate (`rm -rf`, `git reset --hard`, `drop table`, `dd if=`, …) is unaffected. |
-| `GATEGUARD_EXEMPT_GLOBS` | unset (no exemptions) | Comma-separated globs; a matching Edit/Write/MultiEdit target skips first-touch fact-forcing. Intended for low-import-value trees (tests, generated artifacts, scratch dirs) where "who imports this / what schema" carries no signal. |
+| `GATEGUARD_EXEMPT_GLOBS` | unset (no exemptions) | Comma-separated globs; a matching Edit/Write/MultiEdit/NotebookEdit target skips first-touch fact-forcing, even when it is sensitive or hard-linked. Intended for low-import-value trees (tests, generated artifacts, scratch dirs) where "who imports this / what schema" carries no signal. |
 | `GATEGUARD_FACT_FORCE_FULL_DENIALS` | `3` | How many denials emit the full fact block before later ones condense to a single line. `0` condenses from the very first denial. |
-| `GATEGUARD_FACT_FORCE_MAX_DENIALS` | unset (no cap) | A **denial budget**: caps how many first-touch Edit/Write/MultiEdit denials a session draws. Once that many denials have been issued, further new paths pass through instead of being denied (counted in `cap_allows`, not as denials); `0` passes from the first. Prior-search credit and sibling collapse run first and never use it up, and [sensitive targets](#sensitive-targets) are always denied. Destructive and routine Bash stay gated. The cap is best effort when hooks run concurrently: a lost count update can add a denial, but never lets a new path through early. Opt-in: unset, or any value that is not a whole non-negative integer (surrounding spaces allowed), keeps the deny-every-new-path behaviour; a malformed value is reported once on stderr (`ignoring malformed GATEGUARD_FACT_FORCE_MAX_DENIALS=…; the denial cap is not active.`). Unlike `GATEGUARD_FACT_FORCE_FULL_DENIALS`, a **message budget** that only changes how much text a denial carries, this changes whether the operation is blocked. Condensed denials name this variable. |
+| `GATEGUARD_FACT_FORCE_MAX_DENIALS` | unset (no cap) | A **denial budget**: caps how many first-touch Edit/Write/MultiEdit/NotebookEdit denials a session draws. Once that many denials have been issued, further new paths pass through instead of being denied (counted in `cap_allows`, not as denials); `0` passes from the first. Prior-search credit and sibling collapse run first and never use it up, and [sensitive](#sensitive-targets) and [hard-linked](#hard-linked-targets) targets are always denied. Destructive and routine Bash stay gated. The cap is best effort when hooks run concurrently: a lost count update can add a denial, but never lets a new path through early. Opt-in: unset, or any value that is not a whole non-negative integer (surrounding spaces allowed), keeps the deny-every-new-path behaviour; a malformed value is reported once on stderr (`ignoring malformed GATEGUARD_FACT_FORCE_MAX_DENIALS=…; the denial cap is not active.`). Unlike `GATEGUARD_FACT_FORCE_FULL_DENIALS`, a **message budget** that only changes how much text a denial carries, this changes whether the operation is blocked. Condensed denials name this variable. |
 | `GATEGUARD_BASH_EXTRA_DESTRUCTIVE` | unset | Extra destructive-command patterns, as regex source, added to the built-in set. A malformed regex is treated as unset (built-ins still apply) and logged once to stderr. |
 | `GATEGUARD_STATE_DIR` | `~/.gateguard` | Where per-session gate state is kept. If state cannot be persisted the gate allows the operation rather than looping, and names this variable in the warning. |
-| `GATEGUARD_METRICS` | unset (off) | Records one line per Edit/Write/MultiEdit/Bash/PowerShell decision in `<GATEGUARD_STATE_DIR>/metrics.jsonl` (see [Decision metrics](#decision-metrics)). Never changes a decision. |
+| `GATEGUARD_METRICS` | unset (off) | Records one line per Edit/Write/MultiEdit/NotebookEdit/Bash/PowerShell decision in `<GATEGUARD_STATE_DIR>/metrics.jsonl` (see [Decision metrics](#decision-metrics)). Never changes a decision. |
 
 `GATEGUARD_BASH_ROUTINE_DISABLED` and `GATEGUARD_METRICS` accept `1`, `true`,
 `on`, `enabled`, `enable`, or `yes` (case- and whitespace-insensitive); any
@@ -577,10 +602,10 @@ file it decided):
 |---|---|
 | `v` | Schema version (`1`) |
 | `session` | First 12 hex characters of the sha256 of the session key |
-| `tool` | `Edit`, `Write`, `MultiEdit`, `Bash` or `PowerShell` |
+| `tool` | `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Bash` or `PowerShell` |
 | `class` | Target class, or `null` for shell commands |
 | `decision` | `deny`, `credit`, `sibling`, `cap`, `trivial`, `pass-checked`, `pass-exempt`, `pass-subagent`, `routine-deny`, `routine-readonly`, `destructive-deny` or `pass` |
-| `reason` | Short code: `first-touch`, `sensitive`, `near-miss:<code>`, `subagent-sensitive`, `prior-search`, `comment-whitespace`, `same-turn-dir`, `max-denials`, `checked`, `exempt-glob`, `claude-settings`, `no-path`, `subagent`, `readonly-git`, `readonly`, `first-command`, `routine-checked`, `routine-disabled`, `destructive`, `destructive-retry`, `state-error` |
+| `reason` | Short code: `first-touch`, `sensitive`, `hard-linked`, `near-miss:<code>`, `subagent-sensitive`, `subagent-hard-linked`, `prior-search`, `comment-whitespace`, `same-turn-dir`, `max-denials`, `checked`, `exempt-glob`, `claude-settings`, `no-path`, `subagent`, `readonly-git`, `readonly`, `first-command`, `routine-checked`, `routine-disabled`, `destructive`, `destructive-retry`, `state-error` |
 | `questions` | Question ids of a first-touch denial; `null` otherwise |
 | `sensitive` | Whether the target is a [sensitive target](#sensitive-targets) |
 | `profile` | Change-profile flags when the profile was computed; `null` otherwise |
@@ -624,6 +649,8 @@ Both patterns and paths use `/` separators and lowercase matching. `*` matches
 within a segment, `**` across segments, and `?` one non-separator character.
 `**/` includes zero directories, so `**/tests/**` also matches `tests/foo.js`.
 Malformed patterns are dropped without granting an exemption.
+An exemption applies before every other rule, including the sensitive and
+hard-link rules (see [Order of checks](#order-of-checks)).
 
 Since 2.2.1, `services/**` only covers the project's root services tree, and
 `*.md` only covers its root Markdown files. Use `**/*.md` for all Markdown

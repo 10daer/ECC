@@ -49,6 +49,8 @@ Both agents produce code that runs and passes tests. The difference is design de
 
 MultiEdit is handled identically — each file in the batch is gated individually.
 
+NotebookEdit は `notebook_path` への Edit として扱われます（同じクラス・チェック済みキー・クレジット・上限の規則。セル内容は読まないため常に完全な質問になり、コメントのみの通過はありません）。
+
 質問内容は対象ファイルのクラスによって変わります（[対象クラス別の質問](#対象クラス別の質問)を参照）。以下は **code** クラスの Edit ゲートの質問です。
 
 ```
@@ -137,9 +139,10 @@ Triggers on: `rm -rf`, `git reset --hard`, `git push --force`, `drop table`, etc
 - **正規化パスキー:** 相対パスはツールの `cwd` を基準に解決され、`a.py`、`./a.py`、絶対パスは同じファイルとして扱われ、初回タッチは 1 回だけです。
 - **セッション内カウンター:** 状態ファイルに `fact_force_credited`、`denials_by_class`、`credited_by_class`、`sibling_allows`、`dir_gates`、`cap_allows` を記録します（クラス名のみ記録し、パスは記録しません。`dir_gates` はサニタイズ済みの最初のファイル名のみ保持、最大 50 件）。
 - **拒否の上限（オプトイン）:** `GATEGUARD_FACT_FORCE_MAX_DENIALS` を設定すると、セッション内の初回タッチ拒否がその回数に達した後の新しいパスは拒否されずに通過します（`cap_allows` に記録）。`GATEGUARD_FACT_FORCE_FULL_DENIALS` はメッセージの詳しさ（メッセージ予算）だけを変えますが、こちらはブロックするかどうか（拒否予算）を変えます。事前検索のクレジットと兄弟ファイル集約が先に判定され、上限を消費しません。不正な値は上限なしとして扱い、stderr に 1 回警告します。
-- **機密対象:** `.env`/`.env.*`、`*.pem`・`*.key`・`*.p12`・`*.pfx`、`id_rsa*`・`id_ed25519*`・`id_ecdsa*`・`id_dsa*`・`.netrc`・`.pgpass`・`credentials*`・`secrets.*`、パスセグメントが `auth`・`authn`・`authz`・`security`・`secrets`・`payment`・`payments`・`billing`・`migrations` のいずれかと完全一致するもの、`.github/workflows/` 配下は、クレジット・集約・上限のいずれも適用されず、初回タッチで必ず拒否されます。判定は字句上のパスとシンボリックリンクを解決した実体の両方で行い（`src/tools -> ../auth` なら `src/tools/login.py` も機密）、実体を解決できない場合は機密とみなします。判定順は exempt → subagent → checked → 機密? → クレジット → 兄弟集約 → 上限 → 拒否です。
+- **機密対象:** `.env`/`.env.*`、`*.pem`・`*.key`・`*.p12`・`*.pfx`、`id_rsa*`・`id_ed25519*`・`id_ecdsa*`・`id_dsa*`・`.netrc`・`.pgpass`・`credentials*`・`secrets.*`、パスセグメントが `auth`・`authn`・`authz`・`security`・`secrets`・`payment`・`payments`・`billing`・`migrations` のいずれかと完全一致するもの、`.github/workflows/` 配下は、クレジット・集約・上限のいずれも適用されず、初回タッチで必ず拒否されます。判定は字句上のパスとシンボリックリンクを解決した実体の両方で行い（`src/tools -> ../auth` なら `src/tools/login.py` も機密）、実体を解決できない場合は機密とみなします。判定順は exempt → subagent → checked → 機密またはハードリンク? → クレジット → 兄弟集約 → 上限 → 拒否です。`GATEGUARD_EXEMPT_GLOBS` による除外は最優先で、機密対象やハードリンク対象にも適用されます。
+- **ハードリンク対象:** リンク数が 2 以上のファイル（またはそれを指すシンボリックリンク）は別名から到達できるため、機密対象と同じくクレジット・変更プロファイル・コメントのみの通過・兄弟集約・上限・サブエージェントの通過が適用されません。拒否には機密の行の代わりに「Hard-linked target: ...」の行が付きます。存在しない新規ファイル以外の stat エラーはハードリンクとみなします。
 - **判定メトリクス（オプトイン）:** `GATEGUARD_METRICS=1` で各判定を `<GATEGUARD_STATE_DIR>/metrics.jsonl` に 1 行ずつ記録します（パス・コマンド・内容は記録せず、1 MiB で `.1` にローテーション）。集計は `node scripts/gateguard-report.js [--dir <path>] [--json]` です。
-- **互換性:** 新しい環境変数はオプトインの `GATEGUARD_FACT_FORCE_MAX_DENIALS` と `GATEGUARD_METRICS` のみです。以前許可されていた操作が拒否されることはありません。
+- **互換性:** 新しい環境変数はオプトインの `GATEGUARD_FACT_FORCE_MAX_DENIALS` と `GATEGUARD_METRICS` のみです。サブエージェントによる機密・ハードリンク対象への初回タッチと、各ノートブックへの最初の NotebookEdit（以前はゲート対象外）を除き、以前許可されていた操作が拒否されることはありません。
 - **信頼の限界:** クレジットはローカルのトランスクリプトを読むため、エージェントが理論上それを書き換えられます。検証するのは行動（検索が実行され結果が返ったこと）であり、意図ではありません。
 
 ## Quick Start
