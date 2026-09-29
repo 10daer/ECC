@@ -7,6 +7,7 @@ const { execFileSync } = require('child_process');
 const { resolveInstallPlan } = require('../install-manifests');
 const { getInstallTargetAdapter } = require('../install-targets/registry');
 const { resolveInvocationEnvironment } = require('../invocation-environment');
+const { readHooksConfig } = require('../hooks-config');
 const {
   materializeManagedHooks,
 } = require('./claude-settings');
@@ -142,7 +143,9 @@ function materializeClaudeSettingsOperation(sourceRoot, operation) {
     return [];
   }
 
-  const hooksConfig = readJsonObject(sourcePath, operation.sourceRelativePath);
+  // Stable ids and descriptions live in hooks/hooks.metadata.json; readHooksConfig
+  // merges them back so managed settings entries keep their ids.
+  const hooksConfig = readHooksConfig(sourcePath, operation.sourceRelativePath);
   const managedHooks = materializeManagedHooks(
     hooksConfig,
     path.dirname(operation.destinationPath)

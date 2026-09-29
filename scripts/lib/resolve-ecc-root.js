@@ -127,6 +127,16 @@ function resolveEccRoot(options = {}) {
   return claudeDir;
 }
 
+function normalizePluginRootForPlatform(rootDir, platform = process.platform) {
+  if (platform !== 'win32' || typeof rootDir !== 'string') return rootDir;
+
+  const match = rootDir.match(/^\/([a-zA-Z])(?:\/(.*))?$/);
+  if (!match) return rootDir;
+
+  const [, driveLetter, rest = ''] = match;
+  return `${driveLetter.toUpperCase()}:/${rest}`;
+}
+
 /**
  * Compact inline locator for embedding in hooks.json and command .md code blocks.
  *
@@ -152,5 +162,6 @@ const INLINE_RESOLVE = `(function(){var p=require('path'),f=require('fs'),o=requ
 
 module.exports = {
   resolveEccRoot,
+  normalizePluginRootForPlatform,
   INLINE_RESOLVE,
 };

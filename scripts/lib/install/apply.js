@@ -34,6 +34,10 @@ const {
   preserveUnwrittenFiles,
 } = require('./ownership-guard');
 const { cleanupLegacyOpencodeInstall } = require('./opencode-legacy-migration');
+const {
+  completeExcludedPathsReconciliation,
+  prepareExcludedPathsReconciliation,
+} = require('./excluded-paths-reconciliation');
 const { buildInstallIndex, rewriteRelativeLinks } = require('./link-rewrite');
 const { transformCopyFileContent } = require('./content-transform');
 
@@ -439,9 +443,12 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
   if (typeof beforeInstallStateRead === 'function') {
     beforeInstallStateRead({ plan });
   }
-  const migration = prepareHookConsentMigration(
+  const migration = prepareExcludedPathsReconciliation(
     plan,
-    prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+    prepareHookConsentMigration(
+      plan,
+      prepareUserOwnedFileGuard(plan, prepareClaudeSkillMigration(plan))
+    )
   );
   const appliedPlan = {
     ...plan,
@@ -481,7 +488,7 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
       if (typeof beforeOperationWrite === 'function') {
         beforeOperationWrite({ plan: appliedPlan, operation });
       }
-      assertNoNewUserOwnedFile(migration, operation);
+      assertNoNewUserOwnedFile(migration, operation, appliedPlan);
 
       if (
         operation.kind === 'update-claude-settings'
@@ -656,17 +663,31 @@ function applyInstallPlanLocked(plan, dependencies = {}, settingsLockHeld = fals
     ];
   }
 
+  let excludedPathsRemoved = [];
+  let excludedPathsWarnings = [];
+  try {
+    const excludedReconciliation = completeExcludedPathsReconciliation(migration, appliedPlan);
+    excludedPathsRemoved = excludedReconciliation.removedPaths;
+    excludedPathsWarnings = excludedReconciliation.warnings;
+  } catch (error) {
+    excludedPathsWarnings = [
+      `Excluded-paths reconciliation did not finish: ${error.message}. Previously managed files under excluded source paths were preserved; remove them manually or rerun the install.`,
+    ];
+  }
+
     return {
       ...plan,
       statePreview: finalState,
       plannedOperations: [...plan.operations],
       operations: migration.appliedOperations,
       skippedOperations: migration.skippedOperations,
+      reconciledExcludedPaths: excludedPathsRemoved,
       warnings: [
         ...(Array.isArray(plan.warnings) ? plan.warnings : []),
         ...migration.warnings,
         ...antigravityMigrationWarnings,
         ...opencodeMigrationWarnings,
+        ...excludedPathsWarnings,
       ],
       applied: true,
     };
