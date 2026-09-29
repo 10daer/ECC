@@ -6862,6 +6862,58 @@ function runTests() {
     assert.ok(!fs.existsSync(oldTmp), 'stale temp file is pruned on the short window');
   });
 
+  // --- Sensitive targets in subagents ---
+  const subRun = (tool, toolInput, extra = {}) =>
+    runHook({ tool_name: tool, tool_input: toolInput, session_id: 'subagent-sensitive-session', ...extra }, { CLAUDE_SESSION_ID: '', ECC_SESSION_ID: '' });
+  const subEdit = (file_path, extra) => subRun('Edit', { file_path, old_string: 'a', new_string: 'b' }, extra);
+  const subAgent = { agent_id: 'agent-sens' };
+
+  c3Case('a subagent Edit of a sensitive file is denied once, then its retry passes', () => {
+    const first = subEdit('/src/.env', subAgent);
+    assert.strictEqual(roDecision(first), 'deny', first.stdout);
+    assert.ok(roReason(first).includes(sensLine));
+    assert.strictEqual(roDecision(subEdit('/src/.env', subAgent)), undefined, 'subagent retry passes');
+  });
+
+  c3Case('a subagent pass on a sensitive file does not unlock it for the parent', () => {
+    subEdit('/src/auth/login.js', subAgent);
+    assert.strictEqual(roDecision(subEdit('/src/auth/login.js', subAgent)), undefined);
+    const parent = subEdit('/src/auth/login.js');
+    assert.strictEqual(roDecision(parent), 'deny', 'parent first touch is still gated');
+  });
+
+  c3Case('a sensitive file the parent already gated passes in a subagent', () => {
+    assert.strictEqual(roDecision(subEdit('/src/secrets.json')), 'deny');
+    assert.strictEqual(roDecision(subEdit('/src/secrets.json', { parent_tool_use_id: 'toolu_parent' })), undefined);
+  });
+
+  c3Case('subagent Write and MultiEdit of sensitive targets are denied; ordinary targets still pass', () => {
+    const write = subRun('Write', { file_path: '/repo/.github/workflows/ci.yml', content: 'x' }, subAgent);
+    assert.strictEqual(roDecision(write), 'deny');
+    const multi = subRun('MultiEdit', {
+      edits: [
+        { file_path: '/src/plain.js', old_string: 'a', new_string: 'b' },
+        { file_path: '/src/payments/charge.js', old_string: 'a', new_string: 'b' }
+      ]
+    }, subAgent);
+    assert.strictEqual(roDecision(multi), 'deny');
+    assert.ok(roReason(multi).includes('charge.js'));
+    assert.strictEqual(roDecision(subEdit('/src/ordinary.js', subAgent)), undefined);
+    assert.strictEqual(roDecision(subRun('Write', { file_path: '/src/new-file.js', content: 'x' }, subAgent)), undefined);
+  });
+
+  c3Case('subagent sensitive denials ignore prior-search credit and the denial cap', () => {
+    const transcript = c3WriteTranscript([c3Human('fix it'), ...c3Search('toolu_sub1', 'Grep', { pattern: 'login', path: '/src' })]);
+    const result = subRun('Edit', { file_path: '/src/auth/login.js', old_string: 'a', new_string: 'b' }, { ...subAgent, transcript_path: transcript });
+    assert.strictEqual(roDecision(result), 'deny');
+    clearState();
+    const capped = runHook(
+      { tool_name: 'Edit', tool_input: { file_path: '/src/.env.local', old_string: 'a', new_string: 'b' }, session_id: 'subagent-sensitive-session', ...subAgent },
+      { CLAUDE_SESSION_ID: '', ECC_SESSION_ID: '', GATEGUARD_FACT_FORCE_MAX_DENIALS: '0' }
+    );
+    assert.strictEqual(roDecision(capped), 'deny');
+  });
+
   fs.rmSync(f3Base, { recursive: true, force: true });
   fs.rmSync(f2Root, { recursive: true, force: true });
 

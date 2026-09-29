@@ -2077,6 +2077,24 @@ function siblingNote(gate) {
   );
 }
 
+// --- Subagents ---
+// see docs/gateguard/design-notes.md#subagents
+
+function subagentGateKey(fileKey) {
+  return `__subagent__${crypto.createHash('sha256').update(fileKey).digest('hex').slice(0, 16)}`;
+}
+
+function subagentSensitiveDenial(filePath, data, isWrite) {
+  if (!isSensitiveTargetFor(filePath, data)) return null;
+  const fileKey = canonicalPathKey(filePath, data);
+  const subKey = subagentGateKey(fileKey);
+  if (isChecked([fileKey, filePath, subKey])) return null;
+  const cls = classifyTargetFor(filePath, data);
+  const { ok, denials } = markCheckedAndCountDenial(subKey, { cls });
+  if (!ok) return allowWithStateWarning();
+  return firstTouchDenial(filePath, { isWrite, denials, cls, sensitive: true, profile: null, miss: null });
+}
+
 // --- Change profile ---
 
 function changeProfileFor(toolName, filePath, edits, content) {
@@ -2119,7 +2137,7 @@ function run(rawInput) {
     }
 
     if (inSubagent) {
-      return rawInput; // parent session already passed the first-touch file gate
+      return subagentSensitiveDenial(filePath, data, toolName === 'Write') || rawInput;
     }
 
     const fileKey = canonicalPathKey(filePath, data);
@@ -2170,11 +2188,16 @@ function run(rawInput) {
   }
 
   if (toolName === 'MultiEdit') {
-    if (inSubagent) {
-      return rawInput; // parent session already passed the first-touch file gate
-    }
-
     const edits = toolInput.edits || [];
+    if (inSubagent) {
+      for (const edit of edits) {
+        const filePath = (edit && edit.file_path) || '';
+        if (!filePath || isClaudeSettingsPath(filePath) || isExemptPath(filePath, data)) continue;
+        const denial = subagentSensitiveDenial(filePath, data, false);
+        if (denial) return denial;
+      }
+      return rawInput;
+    }
 
     const notes = [];
     const trivialKeys = new Set();

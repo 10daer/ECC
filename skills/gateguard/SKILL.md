@@ -233,7 +233,10 @@ For each Edit/Write target (and each MultiEdit entry) the gate decides in
 this order; the first rule that applies wins:
 
 1. **Exempt** (`GATEGUARD_EXEMPT_GLOBS`, Claude settings files) — allowed.
-2. **Subagent** call — allowed (the parent session was already gated).
+2. **Subagent** call — allowed (the parent session was already gated),
+   except a [sensitive target](#sensitive-targets): denied once per path
+   unless the parent already gated it. A subagent's retry does not unlock
+   the path for the parent.
 3. **Already checked** this session — allowed.
 4. **Sensitive target?** — if so, skip straight to the denial (step 9).
 5. **Prior-search credit** — allowed with a note.
@@ -482,8 +485,8 @@ working.
 - **One new, opt-in environment variable:**
   `GATEGUARD_FACT_FORCE_MAX_DENIALS` (unset means no cap). The existing
   controls are unchanged.
-- **Nothing previously allowed is now denied.** These rules only remove
-  denials, and never return `permissionDecision: "allow"`, so other hooks
+- **Nothing previously allowed is now denied**, except a subagent's first
+  touch of a sensitive target. The other rules only remove denials, and never return `permissionDecision: "allow"`, so other hooks
   and permission rules still apply.
 - **Trust limit:** prior-search credit reads the local transcript file,
   which the agent could in principle write to. The credit verifies observed

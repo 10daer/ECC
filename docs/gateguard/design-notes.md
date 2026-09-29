@@ -482,3 +482,21 @@ judged by file name: `state-proj-*` uses 30 minutes, any other key 8 hours.
 A session id that itself starts with `proj-` gets the short window for both
 expiry and pruning, which can only expire state sooner. Temporary files from interrupted writes
 are never loaded and always use the short window.
+
+## Subagents
+
+File gates skip subagent calls (a non-empty string `agent_id`, `agentId`,
+`parent_tool_use_id` or `parentToolUseId`): the parent was already gated on
+the work it delegated, and a subagent writing many files would otherwise draw
+one denial per file. Shell gates were never skipped, so a subagent can
+already receive a denial, present facts and retry.
+
+Sensitive targets are the exception. A subagent Edit, Write or MultiEdit
+entry on a sensitive target is denied once per path with the full sensitive
+denial, unless the parent already gated that path. Prior-search credit, the
+change profile, sibling collapse and the denial cap never apply, as at top
+level. The subagent's denial marks a separate subagent key, not the file's
+key, so a subagent's retry never unlocks the path for the parent, whose own
+first touch is still gated. The keys share the parent's state file when the
+subagent's call carries the parent's session id. Exempt globs and Claude
+settings files are skipped first, as at top level.

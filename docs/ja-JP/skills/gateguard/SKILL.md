@@ -116,7 +116,7 @@ Triggers on: `rm -rf`, `git reset --hard`, `git push --force`, `drop table`, etc
 2. What this specific command verifies or produces
 ```
 
-このゲートが発火するまでは、読み取り専用のコマンド（`ls`、`cat`、`rg`、`git status`/`log`/`diff`、`Get-ChildItem` など。リダイレクト、置換、`tee`、`xargs`、未知のコマンドを含まないもの）はゲートを消費せずに通過し `routine_readonly_passes` に数えます。セッション ID またはトランスクリプトパスで識別される状態は 8 時間、プロジェクトディレクトリによるフォールバックは 30 分の無操作で失効します。
+このゲートが発火するまでは、読み取り専用のコマンド（`ls`、`cat`、`rg`、`git status`/`log`/`diff`、`Get-ChildItem` など。リダイレクト、置換、`tee`、`xargs`、未知のコマンドを含まないもの）はゲートを消費せずに通過し `routine_readonly_passes` に数えます。セッション ID またはトランスクリプトパスで識別される状態は 8 時間、プロジェクトディレクトリによるフォールバックは 30 分の無操作で失効し、サブエージェントでも機密対象はパスごとに 1 回拒否されます（親のゲートは解除されません）。
 
 ## すでに済んでいるとみなされるもの
 
