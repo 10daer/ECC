@@ -5245,6 +5245,115 @@ function runTests() {
     }
   });
 
+  // --- Denials name the closest search that did not count ---
+  const MISS_PREFIX = 'Closest search this turn did not count';
+  const missLine = reason => reason.split('\n').find(line => line.startsWith(MISS_PREFIX)) || '';
+
+  c3Case('a denial names a search that looked outside the file directory', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_o1', 'Grep', { pattern: 'widget_factory', path: `${c3Root}/docs` })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertDenied(out, 'out of scope');
+    const line = missLine(out.reason);
+    assert.ok(line.includes('(Grep widget_factory)'), line || out.reason);
+    assert.ok(line.includes("its search path does not contain this file"), line);
+  });
+
+  c3Case('a denial names a search whose filters excluded the file', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_x1', 'Bash', { command: "rg -g '!*.py' widget_factory ." })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertDenied(out, 'excluded');
+    assert.ok(missLine(out.reason).includes('its filters exclude this file'), out.reason);
+  });
+
+  c3Case('a denial names a search sent in the same batch', () => {
+    const batch = (id, name, input) => ({
+      type: 'assistant',
+      uuid: c3NextUuid(),
+      message: { id: 'msg_b4batch', role: 'assistant', content: [{ type: 'tool_use', id, name, input }] }
+    });
+    const t = c3WriteTranscript([
+      c3Human('x'),
+      ...c3Search('toolu_far', 'Grep', { pattern: 'widget_factory', path: `${c3Root}/docs` }),
+      batch('toolu_sb', 'Grep', { pattern: 'widget_factory' }),
+      batch('toolu_se', 'Edit', { file_path: `${c3Root}/src/widget_factory.py` }),
+      c3ToolResult('toolu_sb')
+    ], { pending: false });
+    const input = { file_path: `${c3Root}/src/widget_factory.py`, old_string: 'a', new_string: 'b' };
+    const result = runHook({ tool_name: 'Edit', tool_use_id: 'toolu_se', cwd: c3Root, transcript_path: t, tool_input: input }, c3Env);
+    const reason = parseOutput(result.stdout).hookSpecificOutput.permissionDecisionReason;
+    const line = missLine(reason);
+    assert.ok(line.includes('same batch as this call'), `same batch outranks out of scope: ${line}`);
+  });
+
+  c3Case('a denial names a search that only read piped input', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_p1', 'Bash', { command: 'git diff | grep widget_factory' })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertDenied(out, 'stdin');
+    assert.ok(missLine(out.reason).includes('it searched piped input, not the tree'), out.reason);
+  });
+
+  c3Case('a denial names a Read or a non-search command of the file', () => {
+    const read = c3WriteTranscript([
+      c3Human('x'),
+      c3ToolUse('toolu_r1', 'Read', { file_path: `${c3Root}/src/widget_factory.py` }),
+      c3ToolResult('toolu_r1')
+    ]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, read);
+    c3AssertDenied(out, 'read');
+    const line = missLine(out.reason);
+    assert.ok(line.includes(`(Read ${c3Root}/src/widget_factory.py)`), line || out.reason);
+    assert.ok(line.includes('only Glob, Grep, LS and shell search commands count'), line);
+    clearState();
+    const cat = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_c1', 'Bash', { command: 'cat src/widget_factory.py' })]);
+    assert.ok(missLine(c3Edit(`${c3Root}/src/widget_factory.py`, cat).reason).includes('(Bash cat src/widget_factory.py)'));
+  });
+
+  c3Case('a denial explains that a generic file name never matches', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_g1', 'Grep', { pattern: 'index' })]);
+    const out = c3Edit(`${c3Root}/src/index.py`, t);
+    c3AssertDenied(out, 'generic');
+    assert.ok(missLine(out.reason).includes('this file name is too generic to match a search'), out.reason);
+  });
+
+  c3Case('no closest-search line when nothing in the turn mentions the file', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_n1', 'Grep', { pattern: 'unrelated_thing' })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    c3AssertDenied(out, 'unrelated');
+    assert.strictEqual(missLine(out.reason), '');
+    assert.ok(!out.reason.includes(MISS_PREFIX));
+    const none = c3Edit(`${c3Root}/src/other_file.py`, undefined);
+    assert.ok(!none.reason.includes(MISS_PREFIX), 'no transcript, no line');
+  });
+
+  c3Case('the closest-search detail is sanitized and bounded', () => {
+    const noisy = `widget_factory \u202e\u200b${'z'.repeat(200)}\u0007`;
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_s1', 'Grep', { pattern: noisy, path: `${c3Root}/docs` })]);
+    const out = c3Edit(`${c3Root}/src/widget_factory.py`, t);
+    const line = missLine(out.reason);
+    assert.ok(line, out.reason);
+    for (const bad of ['\u202e', '\u200b', '\u0007']) assert.ok(!line.includes(bad), `no U+${bad.codePointAt(0).toString(16)}`);
+    const detail = line.slice(line.indexOf('(Grep ') + 6, line.indexOf('):'));
+    assert.ok(Array.from(detail).length <= 60, `detail bounded: ${detail.length}`);
+    assert.ok(detail.endsWith('...'), 'truncation marked');
+  });
+
+  c3Case('sensitive targets never get a closest-search line', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_k1', 'Grep', { pattern: 'login_view', path: `${c3Root}/docs` })]);
+    const out = c3Edit(`${c3Root}/src/auth/login_view.py`, t);
+    c3AssertDenied(out, 'sensitive');
+    assert.ok(!out.reason.includes(MISS_PREFIX), out.reason);
+  });
+
+  c3Case('condensed denials and MultiEdit denials carry the closest-search line', () => {
+    const t = c3WriteTranscript([c3Human('x'), ...c3Search('toolu_m1', 'Grep', { pattern: 'widget_factory', path: `${c3Root}/docs` })]);
+    const condensed = c3Edit(`${c3Root}/src/widget_factory.py`, t, { GATEGUARD_FACT_FORCE_FULL_DENIALS: '0' });
+    assert.ok(!condensed.reason.includes('\n'), 'still one line');
+    assert.ok(condensed.reason.includes(`${MISS_PREFIX} (Grep widget_factory)`), condensed.reason);
+    clearState();
+    const multi = c3Run('MultiEdit', { edits: [{ file_path: `${c3Root}/src/widget_factory.py`, old_string: 'a', new_string: 'b' }] }, t);
+    assert.ok(missLine(multi.reason).includes('(Grep widget_factory)'), multi.reason);
+  });
+
   // --- Exclusion globs never earn search credit ---
   const r2Target = `${c3Root}/src/widget.py`;
   let r2Seq = 0;

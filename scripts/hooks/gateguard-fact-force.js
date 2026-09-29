@@ -1869,13 +1869,14 @@ function firstTouchGateMsg(filePath, isWrite, cls, profile) {
  * (#2142). Carries the denial ordinal so consecutive denials differ
  * textually, and a one-line recovery hint instead of the multi-line block.
  */
-function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = false, profile = null) {
+function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = false, profile = null, missNote = '') {
   const safe = sanitizePath(filePath);
   const hint = condensedHintFor(cls, action === 'creation', profile);
   return (
     `[Fact-Forcing Gate] (denial #${ordinal} this session) First ${action} of ${safe}: ` +
     `${hint} ` +
     `${batchSiblingWarning(safe)} ` +
+    (missNote ? `${missNote} ` : '') +
     (sensitive ? `${SENSITIVE_TARGET_NOTE} ` : '') +
     '(Use GATEGUARD_EXEMPT_GLOBS for path-scoped exemptions; GATEGUARD_FACT_FORCE_MAX_DENIALS caps denials per session; ECC_GATEGUARD=off disables this gate.)'
   );
@@ -1884,19 +1885,21 @@ function condensedGateMsg(action, filePath, ordinal, cls = 'code', sensitive = f
 const SENSITIVE_TARGET_NOTE = 'Sensitive target: prior-search credit, sibling collapse, and the denial cap do not apply.';
 const RETRY_LINE = 'Present the facts, then retry the same operation.';
 
-function withSensitiveNote(message) {
+function withNoteBeforeRetry(message, note) {
+  if (!note) return message;
   const at = message.lastIndexOf(RETRY_LINE);
-  if (at < 0) return `${message}\n\n${SENSITIVE_TARGET_NOTE}`;
-  return `${message.slice(0, at)}${SENSITIVE_TARGET_NOTE}\n\n${message.slice(at)}`;
+  if (at < 0) return `${message}\n\n${note}`;
+  return `${message.slice(0, at)}${note}\n\n${message.slice(at)}`;
 }
 
-function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile }) {
+function firstTouchDenial(filePath, { isWrite, denials, cls, sensitive, profile, miss }) {
+  const missNote = sensitive ? '' : closestMissNote(miss);
   if (denials > getFullDenialBudget()) {
     const action = isWrite ? 'creation' : 'edit';
-    return denyResult(condensedGateMsg(action, filePath, denials, cls, sensitive, profile), { includeRecoveryHint: false });
+    return denyResult(condensedGateMsg(action, filePath, denials, cls, sensitive, profile, missNote), { includeRecoveryHint: false });
   }
-  const message = firstTouchGateMsg(filePath, isWrite, cls, profile);
-  return denyResult(sensitive ? withSensitiveNote(message) : message, {
+  const message = withNoteBeforeRetry(firstTouchGateMsg(filePath, isWrite, cls, profile), missNote);
+  return denyResult(sensitive ? withNoteBeforeRetry(message, SENSITIVE_TARGET_NOTE) : message, {
     narrowRecoveryHint: EDIT_WRITE_NARROW_RECOVERY_HINT
   });
 }
@@ -1980,7 +1983,7 @@ function allowWithStateWarning() {
 // --- Prior-search credit ---
 
 const CREDIT_DETAIL_MAX_CHARS = 80;
-const { findCreditingSearch } = createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGMENT_SEPARATORS });
+const { findCreditingSearch, findClosestMiss } = createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGMENT_SEPARATORS });
 
 function creditNote(match, filePath) {
   const chars = Array.from(sanitizePath(match.detail).replace(/\s+/g, ' '));
@@ -1990,6 +1993,25 @@ function creditNote(match, filePath) {
     `[Fact-Forcing Gate] Prior search seen in this turn (${match.name} ${detail}, ${calls}); ` +
     `first-touch check satisfied for ${sanitizePath(filePath)}.`
   );
+}
+
+// --- Closest search that did not count ---
+
+const MISS_DETAIL_MAX_CHARS = 60;
+const MISS_REASON_TEXT = Object.freeze({
+  'same-batch': 'it was sent in the same batch as this call, so its result was not seen yet',
+  excluded: 'its filters exclude this file',
+  'out-of-scope': 'its search path does not contain this file',
+  'stdin-only': 'it searched piped input, not the tree',
+  'not-a-search': 'only Glob, Grep, LS and shell search commands count',
+  'generic-stem': 'this file name is too generic to match a search'
+});
+
+function closestMissNote(miss) {
+  if (!miss || !Object.hasOwn(MISS_REASON_TEXT, miss.reason)) return '';
+  const chars = Array.from(sanitizePath(miss.detail).replace(/\s+/g, ' ').trim());
+  const detail = chars.length > MISS_DETAIL_MAX_CHARS ? `${chars.slice(0, MISS_DETAIL_MAX_CHARS - 3).join('')}...` : chars.join('');
+  return `Closest search this turn did not count (${sanitizePath(miss.name)} ${detail}): ${MISS_REASON_TEXT[miss.reason]}.`;
 }
 
 function isMissingOnDisk(resolved) {
@@ -2118,7 +2140,8 @@ function run(rawInput) {
         // see docs/gateguard/design-notes.md#denial-cap
         return rawInput;
       }
-      return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, profile });
+      const miss = sensitive ? null : findClosestMiss(getTurnScan(), filePath, isNewFile, data);
+      return firstTouchDenial(filePath, { isWrite: toolName === 'Write', denials, cls, sensitive, profile, miss });
     }
 
     return rawInput; // allow
@@ -2166,7 +2189,8 @@ function run(rawInput) {
           // see docs/gateguard/design-notes.md#denial-cap
           continue;
         }
-        return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, profile });
+        const miss = sensitive ? null : findClosestMiss(getTurnScan(), filePath, false, data);
+        return firstTouchDenial(filePath, { isWrite: false, denials, cls, sensitive, profile, miss });
       }
     }
     if (notes.length > 0) {
@@ -2221,4 +2245,4 @@ function run(rawInput) {
   return rawInput; // allow
 }
 
-module.exports = { classifyDestructiveCommand, classifyTarget, classifyTargetFor, findCreditingSearch, run, scanCurrentTurn };
+module.exports = { classifyDestructiveCommand, classifyTarget, classifyTargetFor, findCreditingSearch, findClosestMiss, run, scanCurrentTurn };

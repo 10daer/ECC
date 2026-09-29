@@ -179,6 +179,26 @@ test('callsAgo counts back from the newest call, skipping the pending call', () 
   assert.deepStrictEqual(scan.shellCommands, ['ls']);
 });
 
+test('the scan lists the turn Read calls newest first, skipping the pending call', () => {
+  const t = writeTranscript([
+    human('go'),
+    toolUse('toolu_r1', 'Read', { file_path: 'src/a.js' }),
+    toolResult('toolu_r1'),
+    ...search('toolu_g', 'Grep', { pattern: 'a' }),
+    toolUse('toolu_r2', 'Read', { file_path: 'src/b.js' }),
+    toolResult('toolu_r2'),
+    toolUse('toolu_r3', 'Read', { file_path: 42 })
+  ]);
+  const scan = scanCurrentTurn(t, `toolu_pending_${seq}`);
+  assert.deepStrictEqual(scan.reads, [
+    { name: 'Read', path: 'src/b.js', callsAgo: 2 },
+    { name: 'Read', path: 'src/a.js', callsAgo: 4 }
+  ]);
+  assert.deepStrictEqual(scan.searches.map(s => s.name), ['Grep'], 'reads are never searches');
+  const before = writeTranscript([toolUse('toolu_r0', 'Read', { file_path: 'x' }), toolResult('toolu_r0'), human('next')]);
+  assert.deepStrictEqual(scanCurrentTurn(before).reads, [], 'reads before the turn are not listed');
+});
+
 test('no transcript, a directory, or a whole file without a boundary -> no searches', () => {
   assert.strictEqual(scanCurrentTurn(''), null);
   assert.strictEqual(scanCurrentTurn(path.join(transcriptDir, 'missing.jsonl')), null);

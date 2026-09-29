@@ -19,7 +19,8 @@ headings stable, since they are the anchors.
 - `scripts/lib/gateguard-turn-scan.js`: one bounded tail read of the Claude Code
   JSONL transcript, walked back to the start of the current turn. Yields the
   turn id, the turn's completed non-error search calls (newest first), their
-  batch ids and the turn's shell commands.
+  batch ids, the turn's shell commands and its `Read` calls (used only to
+  explain a denial, never as evidence).
 - `scripts/lib/gateguard-search-evidence.js`: decides whether a search in the
   current turn covers a target (prior-search credit). Its shell-dependent part
   is built by `createSearchEvidence()` from the hook's shell parser, so the
@@ -383,3 +384,35 @@ alone. For a MultiEdit, the denied file's profile covers every entry for that
 file (same canonical key); entries for other files do not count. The condensed
 denial uses the local-callers hint when `local-callers` is asked, else the
 original code hint.
+
+## Closest search that did not count
+
+When a non-sensitive first touch is denied and the turn holds a search (or a
+`Read`, or a non-search shell command) that mentions the target but did not
+credit it, the denial adds one line naming the closest one, so the agent does
+the missing step instead of restating facts:
+`Closest search this turn did not count (<tool> <detail>): <why>.` It reuses
+the single cached turn scan; no transcript is read again, and nothing is
+computed on the credit or allow paths.
+
+A search mentions the target when its stem matches (or, for a generic or short
+stem, the bare name of at least three characters appears as a word) or, for a
+new-file Write, when it names the target's directory. Reason codes, from
+closest to farthest (the closest wins, then the newest):
+
+| Code | Meaning |
+|---|---|
+| `same-batch` | it would have credited, but was sent in the pending call's own batch |
+| `excluded` | an exclusion covers the target, or include globs miss it |
+| `out-of-scope` | its path or operands do not contain the target |
+| `stdin-only` | a search segment that read piped input or had no tree operand |
+| `not-a-search` | a `Read` of the target, or a non-search shell segment naming it |
+| `generic-stem` | the target's name is too generic or short to match any search |
+
+`previous-turn` is not reported: the scan stops at the turn boundary, and
+reading past it would cost a second, larger scan. Ambiguous shell commands
+(substitutions, heredocs, over 8192 characters) give no line. The tool name
+comes from a fixed set; the detail is the tool input, sanitized like a path,
+whitespace-folded and cut to 60 characters. Sensitive targets never get the
+line, since no search could have credited them. In a condensed denial the line
+follows the batch warning.

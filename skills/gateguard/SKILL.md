@@ -358,6 +358,14 @@ An Edit, Write, or MultiEdit entry is allowed, with an
   as before.
 - **Falls back to deny:** a missing, unreadable, or non-file transcript,
   garbage records, or any internal error mean no credit.
+- **Closest miss in the denial:** when a non-sensitive first touch is denied
+  and a call in the turn mentioned the file without crediting it, the denial
+  adds one line, "Closest search this turn did not count (`<tool>`
+  `<detail>`): `<why>`.", naming the closest such call and why it failed: sent
+  in the same batch, its filters exclude the file, its search path does not
+  contain it, it searched piped input, it was a `Read` or another command
+  rather than a search, or the file name is too generic to match. The detail
+  is sanitized and cut to 60 characters; no other transcript text is shown.
 
 ### Comment and whitespace-only edits
 

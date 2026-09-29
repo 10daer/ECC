@@ -89,6 +89,37 @@ test('credits by Glob literal-prefix directory and stem, folding case only for W
   assert.strictEqual(findCreditingSearch(posixScan, '/proj/src/new_file.js', true, { cwd: '/proj' }), null, 'posix is case-sensitive');
 });
 
+test('findClosestMiss reports a reason code for the nearest non-qualifying search', () => {
+  const { findClosestMiss } = loadHook();
+  const data = { cwd: root };
+  const target = `${root}/src/widget_factory.py`;
+  const scanOf = (searches, extra = {}) => ({ turnId: null, searches, batchIds: new Map(), newestMessageId: null, shellCommands: [], reads: [], ...extra });
+  const s = (name, input, messageId = 'msg_1') => ({ name, input, callsAgo: 1, messageId });
+  const reason = (scan, allowDir = false, file = target) => (findClosestMiss(scan, file, allowDir, data) || {}).reason || null;
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'widget_factory', path: `${root}/docs` })])), 'out-of-scope');
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'widget_factory', glob: '!*.py' })])), 'excluded');
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'widget_factory', glob: '*.md' })])), 'excluded', 'include globs that miss');
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'widget_factory' }, 'msg_b')], { newestMessageId: 'msg_b' })), 'same-batch');
+  assert.strictEqual(reason(scanOf([s('Bash', { command: 'git diff | grep widget_factory' })])), 'stdin-only');
+  assert.strictEqual(reason(scanOf([s('Bash', { command: 'cat src/widget_factory.py' })])), 'not-a-search');
+  assert.strictEqual(reason(scanOf([], { reads: [{ name: 'Read', path: 'src/widget_factory.py', callsAgo: 1 }] })), 'not-a-search');
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'index' })]), false, `${root}/src/index.py`), 'generic-stem');
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'unrelated' })])), null);
+  assert.strictEqual(reason(scanOf([s('Grep', { pattern: 'widget_factory' })])), null, 'a crediting search is not a miss');
+  assert.strictEqual(reason(scanOf([s('LS', { path: `${root}/src` })]), true, `${root}/src/brand_new.py`), null, 'dir credit is not a miss');
+  assert.strictEqual(
+    reason(scanOf([s('Grep', { pattern: 'widget_factory', path: `${root}/docs` }), s('Grep', { pattern: 'widget_factory', glob: '!*.py' })])),
+    'excluded',
+    'excluded outranks out-of-scope'
+  );
+  const miss = findClosestMiss(scanOf([s('Grep', { pattern: 'widget_factory', path: `${root}/docs` })]), target, false, data);
+  assert.deepStrictEqual(Object.keys(miss).sort(), ['detail', 'name', 'reason']);
+  for (const bad of [null, {}, { searches: 'x' }, scanOf([null, { name: 'Grep' }]), scanOf([], { reads: [null, { path: 5 }] })]) {
+    assert.strictEqual(findClosestMiss(bad, target, false, data), null);
+  }
+  assert.strictEqual(findClosestMiss(scanOf([s('Grep', { pattern: 'widget_factory', path: '/elsewhere' })]), '', false, data), null);
+});
+
 fs.rmSync(transcriptDir, { recursive: true, force: true });
 
 console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);

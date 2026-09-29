@@ -661,9 +661,12 @@ function powershellSearchFilters(kind, args, filters) {
 
 // --- Prior-search credit ---
 
+const MIN_GENERIC_MISS_STEM = 3;
+const MISS_RANK = Object.freeze({ 'same-batch': 0, excluded: 1, 'out-of-scope': 2, 'stdin-only': 3, 'not-a-search': 4, 'generic-stem': 5 });
+
 /** Build the prior-search matcher around the hook's shell segmenter. */
 function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGMENT_SEPARATORS }) {
-  function searchEvidence(search, shellDirsTrusted) {
+  function searchEvidence(search, shellDirsTrusted, misses) {
     const input = search.input;
     if (search.name === 'Glob') {
       if (typeof input.pattern !== 'string' || !input.pattern) return [];
@@ -693,7 +696,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     if (search.name === 'LS') {
       return stringsOf(input.path).map(dir => ({ texts: [], dirs: [[dir]], scope: [dir], detail: dir }));
     }
-    return shellSearchEvidence(input.command, shellDirsTrusted);
+    return shellSearchEvidence(input.command, shellDirsTrusted, misses);
   }
 
   function segmentPipeFlags(input) {
@@ -728,7 +731,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     return flags;
   }
 
-  function shellSearchEvidence(command, dirsTrusted) {
+  function shellSearchEvidence(command, dirsTrusted, misses) {
     if (typeof command !== 'string' || !command || command.length > MAX_SEARCH_COMMAND_CHARS) return [];
     if (AMBIGUOUS_SHELL_PATTERN.test(command)) return [];
     const pipeFlags = segmentPipeFlags(command);
@@ -743,18 +746,21 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
         base = baseAfterDirectoryChange(base, lead, tokens);
         return;
       }
-      if (!SHELL_SEARCH_COMMANDS.has(lead)) return;
-      let kind = lead;
-      let args = tokens.slice(1);
-      if (lead === 'git') {
-        if (!GIT_SEARCH_SUBCOMMANDS.has(tokens[1])) return;
-        kind = `git ${tokens[1]}`;
-        args = tokens.slice(2);
+      const miss = reason => {
+        if (misses) misses.push({ texts: [tokens.join(' ')], detail: tokens.join(' '), reason });
+      };
+      if (!SHELL_SEARCH_COMMANDS.has(lead) || (lead === 'git' && !GIT_SEARCH_SUBCOMMANDS.has(tokens[1]))) {
+        miss('not-a-search');
+        return;
       }
+      const kind = lead === 'git' ? `git ${tokens[1]}` : lead;
+      const args = tokens.slice(lead === 'git' ? 2 : 1);
       const parsed = parseSearchArgs(kind, args);
       // see docs/gateguard/design-notes.md#stdin-is-not-a-tree-search
-      if (parsed.stdin) return;
-      if (parsed.operands.length === 0 && (!parsed.recursive || pipeFlags[index] !== false)) return;
+      if (parsed.stdin || (parsed.operands.length === 0 && (!parsed.recursive || pipeFlags[index] !== false))) {
+        miss('stdin-only');
+        return;
+      }
       const scopes = shellSearchScopes(parsed, base);
       if (scopes.length === 0) return;
       const filters = shellSearchFilters(kind, args);
@@ -813,7 +819,66 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
     }
   }
 
-  return { findCreditingSearch };
+  // --- Closest non-qualifying search ---
+  // see docs/gateguard/design-notes.md#closest-search-that-did-not-count
+
+  function mentionsTarget(texts, stem, rawStem) {
+    const matcher = stem || rawStem;
+    return Boolean(matcher) && texts.some(text => typeof text === 'string' && matcher.test(text.toLowerCase()));
+  }
+
+  function itemMiss(item, ctx, stem, rawStem, allowDirMatch, sameBatch) {
+    if (stem === null) return mentionsTarget(item.texts, null, rawStem) ? 'generic-stem' : null;
+    const byDir = Boolean(allowDirMatch) && evidenceNamesDir(item, ctx);
+    const mentioned = mentionsTarget(item.texts, stem, null);
+    if (!mentioned && !byDir) return null;
+    const inScope = evidenceInScope(item, ctx);
+    const admitted = filtersAdmitTarget(item, ctx, stem);
+    const included = includesAdmitTarget(item, ctx);
+    if (inScope && admitted && (byDir || included)) return sameBatch ? 'same-batch' : null;
+    if (!inScope) return 'out-of-scope';
+    return 'excluded';
+  }
+
+  /** Closest search of the current turn that did not credit the target, with a reason code, else null. */
+  function findClosestMiss(scan, targetPath, allowDirMatch, data) {
+    try {
+      if (!scan || !Array.isArray(scan.searches) || typeof targetPath !== 'string' || !targetPath) return null;
+      const ctx = dirContext(targetPath, data);
+      if (!ctx) return null;
+      const eligible = eligibleStem(targetPath);
+      const stem = stemMatcher(eligible);
+      const base = (String(targetPath).split(/[\\/]/).pop() || '').toLowerCase();
+      const bare = base.includes('.') ? base.slice(0, base.lastIndexOf('.')) : base;
+      const rawStem = eligible === null && bare.length >= MIN_GENERIC_MISS_STEM ? stemMatcher(bare) : null;
+      const excluded = excludedBatchId(scan, data);
+      const shellDirsTrusted = !turnChangesDirectory(scan.shellCommands);
+      let best = null;
+      const consider = (name, detail, reason) => {
+        if (reason && (best === null || MISS_RANK[reason] < MISS_RANK[best.reason])) best = { name, detail, reason };
+      };
+      for (const search of scan.searches) {
+        if (!search || typeof search.messageId !== 'string' || !search.messageId) continue;
+        const misses = [];
+        for (const item of searchEvidence(search, shellDirsTrusted, misses)) {
+          consider(search.name, item.detail, itemMiss(item, ctx, stem, rawStem, allowDirMatch, search.messageId === excluded));
+        }
+        for (const miss of misses) {
+          if (mentionsTarget(miss.texts, stem, rawStem)) consider(search.name, miss.detail, stem === null ? 'generic-stem' : miss.reason);
+        }
+      }
+      for (const read of Array.isArray(scan.reads) ? scan.reads : []) {
+        if (!read || typeof read.path !== 'string' || !read.path) continue;
+        const readsTarget = ctx.resolveDir(read.path) === ctx.targetKey || mentionsTarget([read.path], stem, null);
+        if (readsTarget) consider('Read', read.path, 'not-a-search');
+      }
+      return best;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return { findCreditingSearch, findClosestMiss };
 }
 
 module.exports = { createSearchEvidence };

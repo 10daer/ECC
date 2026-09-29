@@ -121,7 +121,8 @@ function scanCurrentTurn(transcriptPath, pendingId = '') {
     searches: collectTurnSearches(toolUses, okResultIds, pendingId),
     batchIds,
     newestMessageId,
-    shellCommands: collectShellCommands(toolUses)
+    shellCommands: collectShellCommands(toolUses),
+    reads: collectTurnReads(toolUses, pendingId)
   });
 
   for (let i = lines.length - 1; i >= firstLine; i--) {
@@ -166,7 +167,7 @@ function scanCurrentTurn(transcriptPath, pendingId = '') {
   if ((tail.truncated || firstLine > 0) && windowPromptIds.size <= 1) {
     return finish(windowPromptIds.size === 1 ? [...windowPromptIds][0] : null);
   }
-  return { turnId: null, searches: [], batchIds: new Map(), newestMessageId: null, shellCommands: [] };
+  return { turnId: null, searches: [], batchIds: new Map(), newestMessageId: null, shellCommands: [], reads: [] };
 }
 
 function collectTurnSearches(toolUsesNewestFirst, okResultIds, pendingId) {
@@ -185,6 +186,17 @@ function collectTurnSearches(toolUsesNewestFirst, okResultIds, pendingId) {
     searches.push({ name: block.name, input: block.input, callsAgo: index + 1, messageId });
   });
   return searches;
+}
+
+function collectTurnReads(toolUsesNewestFirst, pendingId) {
+  const reads = [];
+  toolUsesNewestFirst
+    .filter(({ block }) => !pendingId || block.id !== pendingId)
+    .forEach(({ block }, index) => {
+      if (block.name !== 'Read' || !isObject(block.input) || typeof block.input.file_path !== 'string') return;
+      reads.push({ name: 'Read', path: block.input.file_path, callsAgo: index + 1 });
+    });
+  return reads;
 }
 
 function collectShellCommands(toolUses) {
