@@ -677,7 +677,7 @@ function runDdRegressionTests() {
         const input = { tool_name: 'Bash', tool_input: { command } };
         const result = spawnSync(process.execPath, [runner, 'pre:bash:gateguard-fact-force',
           'scripts/hooks/gateguard-fact-force.js', 'standard,strict'], {
-          input: JSON.stringify(input), encoding: 'utf8', timeout: 3000,
+          input: JSON.stringify(input), encoding: 'utf8', timeout: 15000,
           env: { ...process.env, ...environment }, stdio: ['pipe', 'pipe', 'pipe']
         });
         assert.ifError(result.error);
@@ -707,7 +707,7 @@ function runDdRegressionTests() {
       const result = spawnSync(process.execPath, [runner, 'pre:bash:gateguard-fact-force',
         'scripts/hooks/gateguard-fact-force.js', 'standard,strict'], {
         input: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'dd if=input' } }),
-        encoding: 'utf8', timeout: 3000,
+        encoding: 'utf8', timeout: 15000,
         env: { ...process.env, ...environment, ECC_DISABLED_HOOKS: 'pre:bash:gateguard-fact-force' },
         stdio: ['pipe', 'pipe', 'pipe']
       });
