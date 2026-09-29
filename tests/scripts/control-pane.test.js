@@ -602,10 +602,13 @@ async function runTests() {
   else failed++;
 
   if (
-    await test('CLI browser opener handles spawn errors', async () => {
+    await test('CLI browser opener delegates structured launch failures', async () => {
       const source = fs.readFileSync(SCRIPT, 'utf8');
-      const helper = fs.readFileSync(path.join(path.dirname(SCRIPT), 'lib/platform-launch.js'), 'utf8');
+
       assert.match(source, /require\('\.\/lib\/platform-launch'\)/);
+      assert.match(source, /if \(!result\.opened\)/);
+      assert.match(source, /result\.reason/);
+      const helper = fs.readFileSync(path.join(path.dirname(SCRIPT), 'lib/platform-launch.js'), 'utf8');
       assert.match(helper, /child\.on\('error'/);
       assert.match(helper, /child\.unref\(\)/);
     })
