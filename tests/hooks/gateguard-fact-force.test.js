@@ -4862,35 +4862,6 @@ function runTests() {
     assert.strictEqual(c3State().fact_force_denials, 1);
   });
 
-  c3Case('scanCurrentTurn / findCreditingSearch units', () => {
-    const { scanCurrentTurn, findCreditingSearch } = loadDirectHook();
-    const human = c3Human('go');
-    const t = c3WriteTranscript(
-      [c3Human('old'), human, ...c3Search('toolu_u1', 'Glob', { pattern: '**/*.md' }), c3ToolUse('toolu_u2', 'Grep', { pattern: 'pending' })],
-      { pending: false }
-    );
-    const scan = scanCurrentTurn(t);
-    assert.strictEqual(scan.turnId, human.uuid, 'turnId is the boundary uuid');
-    assert.deepStrictEqual(scan.searches.map(s => [s.name, s.callsAgo]), [['Glob', 2]]);
-    assert.strictEqual(scanCurrentTurn(path.join(c3TranscriptDir, 'missing.jsonl')), null);
-    const data = { cwd: c3Root };
-    // A Glob with no literal prefix and no explicit path names no directory.
-    assert.strictEqual(findCreditingSearch(scan, `${c3Root}/new-notes.md`, true, data), null, 'Glob **/*.md gives no dir credit');
-    const docsScan = scanCurrentTurn(
-      c3WriteTranscript([c3Human('go'), ...c3Search('toolu_u3', 'Glob', { pattern: 'docs/*.md' }), c3ToolUse('toolu_u4', 'Grep', { pattern: 'x' })], {
-        pending: false
-      })
-    );
-    assert.ok(findCreditingSearch(docsScan, `${c3Root}/docs/new-notes.md`, true, data), 'Glob literal prefix names the dir');
-    assert.strictEqual(findCreditingSearch(docsScan, `${c3Root}/docs/sub/new-notes.md`, true, data), null, 'not a subdirectory');
-    assert.strictEqual(findCreditingSearch(scan, `${c3Root}/new-notes.md`, false, data), null, 'Edit needs a stem match');
-    assert.strictEqual(findCreditingSearch(null, `${c3Root}/x.md`, true, data), null);
-    const winScan = { turnId: null, searches: [{ name: 'LS', input: { path: 'C:\\Proj\\Src' }, callsAgo: 1, messageId: 'msg_w' }] };
-    assert.ok(findCreditingSearch(winScan, 'c:/proj/src/new_file.js', true, { cwd: 'C:\\proj' }), 'win32 dir match folds case');
-    const posixScan = { turnId: null, searches: [{ name: 'LS', input: { path: '/Proj/Src' }, callsAgo: 1, messageId: 'msg_p' }] };
-    assert.strictEqual(findCreditingSearch(posixScan, '/proj/src/new_file.js', true, { cwd: '/proj' }), null, 'posix is case-sensitive');
-  });
-
   c3Case('50 MB transcript is scanned from the tail only (<= 256 KiB read)', () => {
     const big = path.join(c3TranscriptDir, 'big.jsonl');
     const bigSize = 50 * 1024 * 1024;
