@@ -287,3 +287,51 @@ def test_generate_drops_tool_result_orphaned_by_interleaved_user_text() -> None:
     # Only the first tool_result (which immediately follows its tool_use)
     # survives; the interleaved one is dropped.
     assert flat_tool_use_ids == ["toolu_1"]
+
+
+@pytest.mark.unit
+def test_generate_removes_matching_tool_use_when_orphan_result_is_dropped() -> None:
+    """When a tool_result is dropped because the user text turn was
+    interleaved, the matching tool_use block must also be stripped from
+    the prior assistant turn — otherwise the Anthropic API rejects the
+    request because every tool_use must have a matching tool_result in
+    the immediately following user turn (greptile P1 on #3057)."""
+    provider = make_provider(make_response([SimpleNamespace(type="text", text="ok")]))
+
+    provider.generate(
+        LLMInput(
+            messages=[
+                Message(role=Role.USER, content="hi"),
+                Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    tool_calls=[
+                        ToolCall(id="toolu_1", name="search", arguments={"q": "x"}),
+                        ToolCall(id="toolu_2", name="read", arguments={"p": "y"}),
+                    ],
+                ),
+                Message(role=Role.TOOL, content="results-1", tool_call_id="toolu_1"),
+                # User text interleaved BEFORE the second tool_result
+                Message(role=Role.USER, content="while you were at it"),
+                # Orphan tool_result: toolu_2 is no longer the immediately
+                # previous tool_use.
+                Message(role=Role.TOOL, content="results-2", tool_call_id="toolu_2"),
+            ]
+        )
+    )
+
+    params = provider.client.messages.last_params
+    # Both tool_use blocks must NOT appear in the request anymore — the
+    # orphan tool_result for toolu_2 was dropped, so toolu_2 would
+    # otherwise be an unanswered tool_use on the wire.
+    flat_tool_use_ids: list[str] = []
+    for msg in params["messages"]:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    flat_tool_use_ids.append(block["id"])
+    assert flat_tool_use_ids == ["toolu_1"], (
+        "Only the answered tool_use (toolu_1) should remain; "
+        f"got {flat_tool_use_ids}"
+    )
