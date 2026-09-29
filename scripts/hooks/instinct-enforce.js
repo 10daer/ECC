@@ -7,7 +7,8 @@
  * warns (0.70-0.84) or blocks (>= 0.85) when a deterministic match hits.
  *
  * Compatible with run-with-flags.js via module.exports.run().
- * Fail-open on unreadable stdin, a missing store, or hook errors.
+ * Fail-open on unreadable stdin, a missing store, or hook errors. Unexpected
+ * failures are reported on stderr without the tool payload.
  * Never echoes stdin.
  */
 
@@ -105,29 +106,53 @@ function evaluateMatches(matches) {
   return { verdict: 'warn', best };
 }
 
+function describeError(error) {
+  return error && error.message ? error.message : String(error);
+}
+
+// Fail open, but say why. Warnings name the failing stage and file path only;
+// the tool payload is never included, so a match-stage failure reports just
+// the error type rather than a message that could quote tool input.
 function loadMatchesForTool(toolInput) {
+  const warnings = [];
+
   let observerContext;
   try {
     observerContext = resolveProjectContext();
-  } catch {
-    return [];
+  } catch (error) {
+    warnings.push(`[instinct-enforce] could not resolve project context, skipping: ${describeError(error)}`);
+    return { matches: [], warnings };
   }
 
   let loaded;
   try {
-    loaded = loadInstincts(observerContext);
-  } catch {
-    return [];
+    loaded = loadInstincts(observerContext, {
+      onWarn(filePath, error) {
+        warnings.push(`[instinct-enforce] skipped unreadable instinct file ${filePath}: ${describeError(error)}`);
+      },
+    });
+  } catch (error) {
+    warnings.push(`[instinct-enforce] could not load instincts, skipping: ${describeError(error)}`);
+    return { matches: [], warnings };
   }
 
   try {
-    return matchInstincts(loaded.merged, toolInput, {
+    const matches = matchInstincts(loaded.merged, toolInput, {
       minConfidence: getInstinctConfidenceThreshold(),
       limit: 3,
     });
-  } catch {
-    return [];
+    return { matches, warnings };
+  } catch (error) {
+    const kind = error && error.name ? error.name : 'Error';
+    warnings.push(`[instinct-enforce] instinct matching failed (${kind}), skipping`);
+    return { matches: [], warnings };
   }
+}
+
+function joinStderr(warnings, message) {
+  const lines = [...warnings];
+  if (message) lines.push(message);
+  return lines.join('\n');
 }
 
 async function run(stdinText) {
@@ -152,11 +177,13 @@ async function run(stdinText) {
   }
 
   const toolInput = data.tool_input || data.toolInput || {};
-  const matches = loadMatchesForTool(toolInput);
+  const { matches, warnings } = loadMatchesForTool(toolInput);
   const { verdict, best } = evaluateMatches(matches);
 
   if (verdict === 'none' || !best) {
-    return NO_OPINION;
+    return warnings.length > 0
+      ? { ...NO_OPINION, stderr: joinStderr(warnings) }
+      : NO_OPINION;
   }
 
   if (verdict === 'block') {
@@ -164,14 +191,18 @@ async function run(stdinText) {
     return {
       exitCode: 2,
       stdout: message,
-      stderr: message,
+      stderr: joinStderr(warnings, message),
     };
   }
 
-  return {
+  const result = {
     exitCode: 0,
     additionalContext: buildWarnMessage(best),
   };
+  if (warnings.length > 0) {
+    result.stderr = joinStderr(warnings);
+  }
+  return result;
 }
 
 function formatCheckOutput(matches, verdict) {
@@ -207,15 +238,34 @@ async function runCheck(filePath) {
     return;
   }
 
-  const record = data && typeof data === 'object' ? data : null;
-  const toolName = normalizeToolName(record && (record.tool_name || record.toolName));
-  if (!ENFORCE_TOOLS.has(toolName)) {
-    process.stdout.write(formatCheckOutput([], 'none'));
+  // A gate miss must not read like a clean pass: an unsupported tool is a
+  // real "none" (exit 0), but a payload with no usable tool_name or
+  // tool_input is malformed and fails the dry run (exit 1).
+  const record = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+  const rawToolName = record ? (record.tool_name ?? record.toolName) : undefined;
+  if (typeof rawToolName !== 'string' || !rawToolName.trim()) {
+    process.stdout.write('verdict: none\nreason: payload has no tool_name\n');
+    process.exitCode = 1;
     return;
   }
 
-  const toolInput = record.tool_input || record.toolInput || {};
-  const matches = loadMatchesForTool(toolInput);
+  const toolName = normalizeToolName(rawToolName.trim());
+  if (!ENFORCE_TOOLS.has(toolName)) {
+    process.stdout.write(`verdict: none\nreason: ${toolName} not enforced\n`);
+    return;
+  }
+
+  const toolInput = record.tool_input ?? record.toolInput;
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) {
+    process.stdout.write('verdict: none\nreason: payload has no tool_input object\n');
+    process.exitCode = 1;
+    return;
+  }
+
+  const { matches, warnings } = loadMatchesForTool(toolInput);
+  if (warnings.length > 0) {
+    process.stderr.write(`${joinStderr(warnings)}\n`);
+  }
   const { verdict } = evaluateMatches(matches);
   process.stdout.write(formatCheckOutput(matches, verdict));
 }

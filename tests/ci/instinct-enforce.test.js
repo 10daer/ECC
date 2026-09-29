@@ -10,6 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { readHooksConfig } = require('../../scripts/lib/hooks-config');
 
 const repoRoot = path.join(__dirname, '..', '..');
 const runner = path.join(repoRoot, 'scripts', 'hooks', 'run-with-flags.js');
@@ -118,7 +119,7 @@ async function runTests() {
   let failed = 0;
 
   if (await test('hooks.json registers a Write|Edit|MultiEdit|Bash PreToolUse matcher through run-with-flags', () => {
-    const hooks = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf8'));
+    const hooks = readHooksConfig(hooksJsonPath);
     const entry = hooks.hooks.PreToolUse.find(item => item.id === 'pre:edit-write:instinct-enforce');
     assert.ok(entry, 'Should register pre:edit-write:instinct-enforce');
     assert.strictEqual(entry.matcher, 'Write|Edit|MultiEdit|Bash');
@@ -320,13 +321,79 @@ async function runTests() {
       });
       assert.strictEqual(grepResult.status, 0, grepResult.stderr);
       assert.ok(grepResult.stdout.includes('verdict: none'));
-      assert.ok(grepResult.stdout.includes('matches: none'));
+      assert.ok(grepResult.stdout.includes('reason: Grep not enforced'));
       assert.ok(!grepResult.stdout.includes('no-foo-prefix'));
       assert.ok(!/verdict: (block|warn)/.test(grepResult.stdout));
     } finally {
       fs.rmSync(homunculusDir, { recursive: true, force: true });
     }
   })) passed++; else failed++;
+
+  if (await test('--check fails a payload with no tool_name instead of reporting a clean pass', async () => {
+    const homunculusDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-instinct-check-'));
+    const payloadPath = path.join(homunculusDir, 'payload.json');
+    const runCheck = () => spawnSync(process.execPath, [hookScript, '--check', payloadPath], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CLV2_HOMUNCULUS_DIR: homunculusDir,
+      },
+    });
+    try {
+      writeInstinct(path.join(homunculusDir, 'instincts', 'personal', 'no-foo-prefix.yaml'), {
+        id: 'no-foo-prefix',
+        confidence: 0.91,
+        trigger: 'when naming new modules',
+        content: 'NEVER foo prefix on new modules',
+      });
+
+      fs.writeFileSync(payloadPath, JSON.stringify({
+        tool_input: { file_path: '/src/fooWidget.js', contents: 'fooWidget' },
+      }));
+      const missingName = runCheck();
+      assert.strictEqual(missingName.status, 1);
+      assert.ok(missingName.stdout.includes('verdict: none'));
+      assert.ok(missingName.stdout.includes('reason: payload has no tool_name'));
+      assert.ok(!missingName.stdout.includes('matches: none'));
+      assert.ok(!missingName.stdout.includes('fooWidget'));
+
+      fs.writeFileSync(payloadPath, JSON.stringify({ tool_name: 'Write' }));
+      const missingInput = runCheck();
+      assert.strictEqual(missingInput.status, 1);
+      assert.ok(missingInput.stdout.includes('reason: payload has no tool_input object'));
+    } finally {
+      fs.rmSync(homunculusDir, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
+  const canDenyRead = process.platform !== 'win32'
+    && !(typeof process.getuid === 'function' && process.getuid() === 0);
+  if (canDenyRead) {
+    await withHomunculus({
+      id: 'no-foo-prefix',
+      confidence: 0.91,
+      content: 'NEVER foo prefix on new modules',
+    }, async (homunculusDir) => {
+      if (await test('unreadable instinct file fails open but reports the failure on stderr', async () => {
+        const badFile = path.join(homunculusDir, 'instincts', 'personal', 'unreadable.yaml');
+        fs.writeFileSync(badFile, '---\nid: unreadable\nconfidence: 0.9\n---\nNEVER bar\n');
+        fs.chmodSync(badFile, 0o000);
+        try {
+          const hook = loadHook();
+          const result = await hook.run(JSON.stringify({
+            tool_name: 'Write',
+            tool_input: { file_path: '/src/fooWidget.js', contents: 'export function fooWidget() {}' },
+          }));
+          assert.strictEqual(result.exitCode, 2, 'readable instincts still enforce');
+          assert.ok(result.stderr.includes('skipped unreadable instinct file'));
+          assert.ok(result.stderr.includes('unreadable.yaml'));
+          assert.ok(!result.stderr.includes('export function fooWidget'));
+        } finally {
+          fs.chmodSync(badFile, 0o600);
+        }
+      })) passed++; else failed++;
+    });
+  }
 
   console.log(`\nPassed: ${passed}`);
   console.log(`Failed: ${failed}`);

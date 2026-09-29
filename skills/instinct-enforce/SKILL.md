@@ -33,11 +33,11 @@ The hook is `scripts/hooks/instinct-enforce.js`, registered on `Write|Edit|Multi
 | 0.70-0.84 | warn (`additionalContext`) | `ECC_INSTINCT_ENFORCE_MODE=block` promotes these to block |
 | no match | no opinion (empty stdout, exit 0) | |
 
-Disable with `ECC_INSTINCT_ENFORCE=0` / `off` / `false`. Missing store, unreadable file, or stdin parse failure: no opinion. The hook never echoes stdin.
+Disable with `ECC_INSTINCT_ENFORCE=0` / `off` / `false`. Missing store, unreadable file, or stdin parse failure: no opinion. Unexpected failures (project context, an unreadable instinct file, matcher errors) are still reported on stderr so they are not swallowed. The hook never echoes stdin or the tool payload.
 
 ## Dry-run
 
-`/instinct-enforce` runs the hook with `--check` against a JSON file of `{tool_name, tool_input}` and prints matches without hook stdin.
+`/instinct-enforce` runs the hook with `--check` against a JSON file of `{tool_name, tool_input}` and prints matches without hook stdin. A tool the hook does not enforce prints `verdict: none` with `reason: <tool> not enforced` (exit 0). A payload with no `tool_name` or no `tool_input` object prints a `reason:` line and exits 1, so a malformed dry run never looks like a clean pass.
 
 ```bash
 node "$ECC_ROOT/scripts/hooks/instinct-enforce.js" --check ./payload.json

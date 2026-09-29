@@ -43,6 +43,10 @@ Payload shape:
 3. Load project + global instincts from the SessionStart store
 4. Print `verdict` (`block` / `warn` / `none`) and up to 3 matching instinct ids
 5. Do not echo the payload; a missing file is a CLI error, a missing store is `verdict: none`
+6. Tell a gate miss apart from a real no-match:
+   - unsupported tool (e.g. `Grep`): `verdict: none` + `reason: Grep not enforced`, exit 0
+   - no `tool_name`: `verdict: none` + `reason: payload has no tool_name`, exit 1
+   - no `tool_input` object: `verdict: none` + `reason: payload has no tool_input object`, exit 1
 
 ## Related
 
