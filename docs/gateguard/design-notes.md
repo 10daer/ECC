@@ -31,11 +31,17 @@ headings stable, since they are the anchors.
 - `scripts/lib/gateguard-change-profile.js`: pure analysis of the change text
   of an Edit/Write/MultiEdit into a bounded change profile (see
   [Change profile](#change-profile)).
+- `scripts/lib/gateguard-readonly-shell.js`: decides whether a Bash or
+  PowerShell command is allowlisted read-only introspection (see
+  [Read-only first shell command](#read-only-first-shell-command)). Built by
+  `createReadOnlyShell()` from the hook's `quoteAwareSegments`, like the
+  search evidence.
 
 ## Fail to deny
 
 Every allowance other than a retry of an already-gated target (prior-search
-credit, the trivial-edit pass, sibling collapse, the denial cap) is an exception to the first-touch
+credit, the trivial-edit pass, sibling collapse, the denial cap, the read-only
+first shell command) is an exception to the first-touch or routine
 denial, so each one falls back to the denial on any doubt: an unreadable
 transcript, a parse failure, an unresolvable path, or an exception. The lib
 exports that feed those decisions never throw (they catch and return a
@@ -416,3 +422,48 @@ comes from a fixed set; the detail is the tool input, sanitized like a path,
 whitespace-folded and cut to 60 characters. Sensitive targets never get the
 line, since no search could have credited them. In a condensed denial the line
 follows the batch warning.
+
+## Read-only first shell command
+
+The routine shell gate asks for the user's request once per session, before
+the first Bash or PowerShell command. Sessions usually open with `ls`,
+`git status` or a search, which the question adds nothing to, so a command
+that is only read-only introspection passes without using the gate up. The
+next command that is not read-only still draws the routine denial, so the
+question still comes before the first command that can change something.
+
+- Destructive detection runs first and is unchanged; the check sits after it
+  and after `GATEGUARD_BASH_ROUTINE_DISABLED`, inside the routine gate, and is
+  skipped once the gate is checked. A pass returns the input unchanged,
+  never marks the routine gate checked, and adds one to
+  `routine_readonly_passes`.
+- Character screen, quote-aware: any non-ASCII or control character (other
+  than tab), an unterminated quote, or a lone `&` rejects. Bash rejects
+  backslashes anywhere, `` ` `` and `$` outside single quotes, and unquoted
+  `<`, `>`, `(`, `)`, `{`, `}`, so redirection, here-documents, command,
+  process and parameter substitution never pass. PowerShell rejects `` ` ``
+  and `$` outside single quotes and unquoted `<`, `>`, `(`, `)`, `{`, `}`,
+  `@`, `[`, `]`. Non-ASCII is rejected because PowerShell treats typographic
+  quotes as quotes, which the segmenter does not.
+- The screened command is split by the hook's quote-aware segmenter on `;`,
+  `|`, `&&` and `||`. PowerShell backslashes are doubled first, since they are
+  literal there. Every segment must pass.
+- Each segment's first word must be an exact allowlisted name with no `=`,
+  path separator or glob character, so assignments, wrappers (`env`, `sudo`,
+  `sh -c`, `xargs`), paths and unknown programs reject. Bash: `ls`, `pwd`,
+  `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `find`, `fd`, `tree`, `git`.
+  PowerShell (case-insensitive): `Get-ChildItem`, `Get-Content`,
+  `Select-String`, `Get-Location` and their aliases, `rg`, `git`; `--%`
+  rejects.
+- Options that execute or write reject: `find -exec*`/`-ok*`/`-delete`/
+  `-fprint*`/`-fls`, `fd -x`/`-X`/`--exec*` (also inside a short cluster),
+  `rg --pre*`/`--hostname-bin`, `tree -o`/`-R` (also inside a short cluster).
+- `git` takes no global options. The subcommand must be `status`, `log`,
+  `diff`, `show`, `ls-files`, `rev-parse` or `branch`, and every option must
+  be in that subcommand's allowlist, so `--output` (and its abbreviations),
+  `--ext-diff` and `--textconv` reject. `branch` takes no positional
+  argument, so it only lists.
+- Over 4096 characters, a non-string command, or any exception rejects.
+
+The earlier read-only git allowlist, which runs before destructive detection,
+is unchanged.

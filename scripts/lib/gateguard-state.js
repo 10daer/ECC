@@ -26,6 +26,10 @@ function getTrivialAllowCount(state) {
   return toCount(state && state.trivial_allows);
 }
 
+function getRoutineReadonlyPassCount(state) {
+  return toCount(state && state.routine_readonly_passes);
+}
+
 // --- Sibling dir gates ---
 
 const MAX_DIR_GATES = 50;
@@ -128,6 +132,7 @@ module.exports = {
   getCreditedCount,
   getCapAllowCount,
   getTrivialAllowCount,
+  getRoutineReadonlyPassCount,
   getSiblingAllowCount,
   getClassCounts,
   mergeClassCounts,

@@ -43,11 +43,13 @@ const {
 const { scanCurrentTurn, createTurnScanner, currentTurnId, transcriptPathFor } = require('../lib/gateguard-turn-scan');
 const { createSearchEvidence } = require('../lib/gateguard-search-evidence');
 const { profileChange } = require('../lib/gateguard-change-profile');
+const { createReadOnlyShell } = require('../lib/gateguard-readonly-shell');
 const {
   getDenialCount,
   getCreditedCount,
   getCapAllowCount,
   getTrivialAllowCount,
+  getRoutineReadonlyPassCount,
   getSiblingAllowCount,
   getClassCounts,
   mergeClassCounts,
@@ -1453,6 +1455,7 @@ function saveState(state) {
     let mergedSiblingAllows = getSiblingAllowCount(state);
     let mergedCapAllows = getCapAllowCount(state);
     let mergedTrivialAllows = getTrivialAllowCount(state);
+    let mergedReadonlyPasses = getRoutineReadonlyPassCount(state);
 
     try {
       if (fs.existsSync(stateFile)) {
@@ -1471,6 +1474,7 @@ function saveState(state) {
         mergedSiblingAllows = Math.max(mergedSiblingAllows, getSiblingAllowCount(diskState));
         mergedCapAllows = Math.max(mergedCapAllows, getCapAllowCount(diskState));
         mergedTrivialAllows = Math.max(mergedTrivialAllows, getTrivialAllowCount(diskState));
+        mergedReadonlyPasses = Math.max(mergedReadonlyPasses, getRoutineReadonlyPassCount(diskState));
       }
     } catch (_) {
       /* ignore malformed or transient disk state */
@@ -1486,7 +1490,8 @@ function saveState(state) {
       credited_by_class: mergedCreditedByClass,
       sibling_allows: mergedSiblingAllows,
       cap_allows: mergedCapAllows,
-      trivial_allows: mergedTrivialAllows
+      trivial_allows: mergedTrivialAllows,
+      routine_readonly_passes: mergedReadonlyPasses
     };
 
     // Atomic write: temp file + rename prevents partial reads
@@ -1634,6 +1639,15 @@ function countTrivialAllow() {
 
 function isTrivialChange(cls, sensitive, profile) {
   return !sensitive && TRIVIAL_CLASSES.has(cls) && Boolean(profile) && profile.known === true && profile.trivial === true;
+}
+
+// --- Read-only first shell command ---
+
+const { isReadOnlyShellCommand } = createReadOnlyShell({ quoteAwareSegments });
+
+function countRoutineReadonlyPass() {
+  const state = loadState();
+  return saveState({ ...state, routine_readonly_passes: getRoutineReadonlyPassCount(state) + 1 });
 }
 
 // --- Sibling gates ---
@@ -2153,6 +2167,7 @@ function run(rawInput) {
     }
 
     const edits = toolInput.edits || [];
+
     const notes = [];
     const trivialKeys = new Set();
     for (const edit of edits) {
@@ -2226,6 +2241,9 @@ function run(rawInput) {
     }
 
     if (!isChecked(ROUTINE_BASH_SESSION_KEY)) {
+      if (isReadOnlyShellCommand(toolName, command)) {
+        return countRoutineReadonlyPass() ? rawInput : allowWithStateWarning();
+      }
       if (!markChecked(ROUTINE_BASH_SESSION_KEY)) {
         return allowWithStateWarning();
       }
@@ -2245,4 +2263,4 @@ function run(rawInput) {
   return rawInput; // allow
 }
 
-module.exports = { classifyDestructiveCommand, classifyTarget, classifyTargetFor, findCreditingSearch, findClosestMiss, run, scanCurrentTurn };
+module.exports = { classifyDestructiveCommand, classifyTarget, classifyTargetFor, findCreditingSearch, findClosestMiss, isReadOnlyShellCommand, run, scanCurrentTurn };

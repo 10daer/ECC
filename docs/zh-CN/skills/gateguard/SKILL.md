@@ -98,6 +98,7 @@ LLM 的自我评估不起作用。问"你是否违反了任何策略？"答案�
 * **同回合同级文件合并：** 同一目录、同一类别（仅 code、test、prose）的新文件在同一回合内（完全没有 transcript 路径时为 120 秒内）只拒绝第一个，其余以附注放行。config、instruction，以及任何以 `.` 开头的路径段（点文件和所有点目录）或 8.3 短文件名下的文件从不合并；目录按解析符号链接后的真实位置判定和记录；有 transcript 路径但文件缺失、无法读取或得不到回合 ID 时不合并；编辑从不合并。
 * **拒绝上限（可选）：** 设置 `GATEGUARD_FACT_FORCE_MAX_DENIALS` 后，会话内首次触碰的拒绝次数达到该值后，新路径直接放行（计入 `cap_allows`）。`GATEGUARD_FACT_FORCE_FULL_DENIALS` 只决定消息详略（消息预算），而此变量决定是否拦截（拒绝预算）。事先搜索抵免和同级合并先于上限判定，不消耗上限；格式错误的值视为无上限，并在 stderr 警告一次。
 * **敏感目标：** `.env`/`.env.*`、`*.pem`/`*.key`/`*.p12`/`*.pfx`、`id_rsa*`/`id_ed25519*`/`id_ecdsa*`/`id_dsa*`/`.netrc`/`.pgpass`/`credentials*`/`secrets.*`、任一路径段恰为 `auth`、`authn`、`authz`、`security`、`secrets`、`payment`、`payments`、`billing`、`migrations`，以及 `.github/workflows/` 下的文件，不适用抵免、合并和上限，首次触碰总是拒绝。按字面路径和解析符号链接后的真实位置同时判定（`src/tools -> ../auth` 时 `src/tools/login.py` 也是敏感目标），真实位置无法解析时视为敏感。判定顺序：exempt → subagent → checked → 敏感? → 抵免 → 同级合并 → 上限 → 拒绝。
+* **例行 shell 门控与会话：** 门控触发前，只读命令（`ls`、`cat`、`rg`、`git status`/`log`/`diff`、`Get-ChildItem` 等，不含重定向、替换、`tee`、`xargs` 或未知命令）直接放行且不消耗门控，计入 `routine_readonly_passes`。
 * **兼容性：** 唯一新增的环境变量是可选的 `GATEGUARD_FACT_FORCE_MAX_DENIALS`；以前允许的操作不会变为拒绝，且从不返回 `permissionDecision: "allow"`。
 
 ## 快速开始

@@ -182,6 +182,19 @@ Triggers on: `rm -rf`, `git reset --hard`, `git push --force`, `drop table`, etc
 2. What this specific command verifies or produces
 ```
 
+Read-only introspection does not use this gate up: until it fires, a command
+whose every `;`, `|`, `&&` or `||` segment is `ls`, `pwd`, `cat`, `head`,
+`tail`, `wc`, `grep`, `rg`, `find`, `fd`, `tree`, or `git status`/`log`/
+`diff`/`show`/`ls-files`/`rev-parse`/`branch` with read-only options (in
+PowerShell: `Get-ChildItem`, `Get-Content`, `Select-String`, `Get-Location`,
+their aliases, `rg`, `git`) passes and is counted in
+`routine_readonly_passes`. The first other command is still gated. Any
+redirection, `tee`, substitution, backtick, variable, environment
+assignment, wrapper (`env`, `sudo`, `xargs`, `sh -c`), unknown command,
+`find -exec`/`-delete`, `fd -x`, `rg --pre`, `tree -o`, `git` global option or
+write/execute option, or PowerShell `$`, `@`, `(`, `{` or `--%` makes the
+command ordinary. Destructive detection runs first, unchanged.
+
 ## Parallel Batches and Partial Application
 
 The first-touch gate evaluates each tool call independently. When several
@@ -455,6 +468,7 @@ the sanitized first file per directory):
 | `dir_gates` | Per class and directory, the denial that opened a sibling window (turn, time, first file, ordinal); capped at 50 entries |
 | `cap_allows` | Number of first touches passed through by the denial cap (`GATEGUARD_FACT_FORCE_MAX_DENIALS`); these never count as denials |
 | `trivial_allows` | Number of comment or whitespace-only edits passed without the first-touch check; these never mark the file checked |
+| `routine_readonly_passes` | Number of read-only shell commands passed before the routine shell gate fired; these never mark it checked |
 
 Missing or malformed fields load as empty or zero, so older state files keep
 working.

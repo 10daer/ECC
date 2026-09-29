@@ -12,6 +12,7 @@ const {
   getDenialCount,
   getCapAllowCount,
   getTrivialAllowCount,
+  getRoutineReadonlyPassCount,
   getClassCounts,
   mergeClassCounts,
   incrementClassCount,
@@ -43,6 +44,14 @@ test('trivial_allows reads as a non-negative integer', () => {
     assert.strictEqual(getTrivialAllowCount({ trivial_allows: bad }), 0, String(bad));
   }
   assert.strictEqual(getTrivialAllowCount(null), 0);
+});
+
+test('routine_readonly_passes reads as a non-negative integer', () => {
+  assert.strictEqual(getRoutineReadonlyPassCount({ routine_readonly_passes: 4 }), 4);
+  for (const bad of [undefined, null, -1, 'x', NaN, Infinity, {}]) {
+    assert.strictEqual(getRoutineReadonlyPassCount({ routine_readonly_passes: bad }), 0, String(bad));
+  }
+  assert.strictEqual(getRoutineReadonlyPassCount(null), 0);
 });
 
 test('malformed or missing counters read as zero', () => {

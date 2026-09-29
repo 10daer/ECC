@@ -116,6 +116,8 @@ Triggers on: `rm -rf`, `git reset --hard`, `git push --force`, `drop table`, etc
 2. What this specific command verifies or produces
 ```
 
+このゲートが発火するまでは、読み取り専用のコマンド（`ls`、`cat`、`rg`、`git status`/`log`/`diff`、`Get-ChildItem` など。リダイレクト、置換、`tee`、`xargs`、未知のコマンドを含まないもの）はゲートを消費せずに通過し `routine_readonly_passes` に数えます。
+
 ## すでに済んでいるとみなされるもの
 
 調査がすでに行われたことがトランスクリプトから確認できる場合、または前回の拒否と同じ回答になる場合、ゲートは拒否の代わりに注記（`additionalContext`）付きで通過させます。判断が曖昧な場合は常に従来どおり拒否します。

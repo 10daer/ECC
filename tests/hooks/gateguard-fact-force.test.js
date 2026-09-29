@@ -1039,7 +1039,7 @@ function runTests() {
     test('denies first routine Bash, allows second', () => {
       const input = {
         tool_name: 'Bash',
-        tool_input: { command: 'ls -la' }
+        tool_input: { command: 'npm test' }
       };
 
       // First call: should deny
@@ -1406,7 +1406,7 @@ function runTests() {
 
       const result = runBashHook({
         tool_name: 'Bash',
-        tool_input: { command: 'pwd' }
+        tool_input: { command: 'npm test' }
       });
       const output = parseOutput(result.stdout);
       assert.ok(output, 'should produce valid JSON output');
@@ -1429,7 +1429,7 @@ function runTests() {
       const input = {
         session_id: 'raw-session-1234',
         tool_name: 'Bash',
-        tool_input: { command: 'ls -la' }
+        tool_input: { command: 'npm test' }
       };
 
       const first = runBashHook(input, {
@@ -1522,7 +1522,7 @@ function runTests() {
       const input = {
         session_id: longSessionId,
         tool_name: 'Bash',
-        tool_input: { command: 'ls -la' }
+        tool_input: { command: 'npm test' }
       };
 
       const first = runBashHook(input, {
@@ -1619,15 +1619,21 @@ function runTests() {
   // --- Test 23: quoted shell separators are not read-only git bypasses
   clearState();
   if (
-    test('does not treat quoted shell separators as read-only git introspection', () => {
+    test('checks a quoted separator in a git argument as one command after destructive detection', () => {
       const result = runBashHook({
         tool_name: 'Bash',
         tool_input: { command: 'git show HEAD:"docs/a;b.md"' }
       });
       const output = parseOutput(result.stdout);
       assert.ok(output, 'should produce valid JSON output');
-      assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny');
-      assert.ok(output.hookSpecificOutput.permissionDecisionReason.includes('current user request'));
+      assert.ok(!output.hookSpecificOutput, 'read-only first command passes');
+      const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+      assert.strictEqual(state.routine_readonly_passes, 1, 'passed by the read-only check, not the early git allowlist');
+      assert.ok(!state.checked.includes('__bash_session__'), 'routine gate stays unchecked');
+
+      const routine = parseOutput(runBashHook({ tool_name: 'Bash', tool_input: { command: 'git show HEAD:"docs/a;b.md" > out.txt' } }).stdout);
+      assert.strictEqual(routine.hookSpecificOutput.permissionDecision, 'deny');
+      assert.ok(routine.hookSpecificOutput.permissionDecisionReason.includes('current user request'));
     })
   )
     passed++;
@@ -1666,7 +1672,7 @@ function runTests() {
       const input = {
         transcript_path: path.join(stateDir, 'session.jsonl'),
         tool_name: 'Bash',
-        tool_input: { command: 'pwd' }
+        tool_input: { command: 'npm test' }
       };
 
       const first = runBashHook(input, {
@@ -1703,7 +1709,7 @@ function runTests() {
     test('uses project directory fallback when no session or transcript id exists', () => {
       const input = {
         tool_name: 'Bash',
-        tool_input: { command: 'pwd' }
+        tool_input: { command: 'npm test' }
       };
       const fallbackEnv = {
         CLAUDE_SESSION_ID: '',
@@ -1965,7 +1971,7 @@ function runTests() {
   clearState();
   if (
     test('routine Bash remains gated in subagent context', () => {
-      const result = runFreshSessionBash('pwd', { agent_id: 'agent-abc-123' });
+      const result = runFreshSessionBash('npm test', { agent_id: 'agent-abc-123' });
       const output = parseOutput(result.stdout);
       assert.ok(output, 'subagent Bash should produce JSON output');
       assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny');
@@ -3061,7 +3067,7 @@ function runTests() {
   clearState();
   if (
     test('GATEGUARD_BASH_ROUTINE_DISABLED unset preserves baseline (denies first routine bash)', () => {
-      const input = { tool_name: 'Bash', tool_input: { command: 'ls -la' } };
+      const input = { tool_name: 'Bash', tool_input: { command: 'npm test' } };
       const result = runBashHook(input);
       assert.strictEqual(result.code, 0, 'exit code should be 0');
       const output = parseOutput(result.stdout);
@@ -3077,7 +3083,7 @@ function runTests() {
     test('GATEGUARD_BASH_ROUTINE_DISABLED=0 / off / false keeps current behavior', () => {
       for (const value of ['0', 'false', 'off', '', 'random-value']) {
         clearState();
-        const result = runBashHook({ tool_name: 'Bash', tool_input: { command: 'ls -la' } }, { GATEGUARD_BASH_ROUTINE_DISABLED: value });
+        const result = runBashHook({ tool_name: 'Bash', tool_input: { command: 'npm test' } }, { GATEGUARD_BASH_ROUTINE_DISABLED: value });
         const output = parseOutput(result.stdout);
         assert.ok(output, `value="${value}": should produce JSON`);
         assert.strictEqual(output.hookSpecificOutput.permissionDecision, 'deny', `value="${value}": routine gate should still fire`);
@@ -3145,7 +3151,7 @@ function runTests() {
       // should fall back to the built-in patterns. A plain `ls` should
       // therefore hit the routine gate (denied first time) and a
       // built-in destructive (`rm -rf`) should still fire the destructive gate.
-      const lsResult = runBashHook({ tool_name: 'Bash', tool_input: { command: 'ls -la' } }, { GATEGUARD_BASH_EXTRA_DESTRUCTIVE: '(unclosed' });
+      const lsResult = runBashHook({ tool_name: 'Bash', tool_input: { command: 'npm test' } }, { GATEGUARD_BASH_EXTRA_DESTRUCTIVE: '(unclosed' });
       assert.strictEqual(lsResult.code, 0, 'malformed regex must not crash hook');
       const lsOutput = parseOutput(lsResult.stdout);
       assert.ok(lsOutput, 'should produce JSON despite bad env regex');
@@ -6512,7 +6518,7 @@ function runTests() {
     const env = { ...c4Env, [capEnvName]: '0' };
     const destructive = parseOutput(runBashHook({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } }, env).stdout);
     assert.strictEqual(destructive.hookSpecificOutput.permissionDecision, 'deny', 'destructive gate unchanged');
-    const routine = parseOutput(runBashHook({ tool_name: 'Bash', tool_input: { command: 'ls' } }, env).stdout);
+    const routine = parseOutput(runBashHook({ tool_name: 'Bash', tool_input: { command: 'npm test' } }, env).stdout);
     assert.strictEqual(routine.hookSpecificOutput.permissionDecision, 'deny', 'routine gate unchanged');
     assert.ok(!c3State().cap_allows, 'Bash never counts a cap pass');
   });
@@ -6718,6 +6724,81 @@ function runTests() {
       const decision = output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
       assert.notStrictEqual(decision, 'allow', stdout);
     }
+  });
+
+  // --- Read-only first shell command ---
+  const roDecision = result => {
+    const output = parseOutput(result.stdout);
+    return output && output.hookSpecificOutput ? output.hookSpecificOutput.permissionDecision : undefined;
+  };
+  const roReason = result => {
+    const output = parseOutput(result.stdout);
+    return output && output.hookSpecificOutput ? String(output.hookSpecificOutput.permissionDecisionReason) : '';
+  };
+  const roBash = (command, extra = {}, env = {}) => runBashHook({ tool_name: 'Bash', tool_input: { command }, ...extra }, env);
+  const roPs = command => runPowerShellHook({ tool_name: 'PowerShell', tool_input: { command } });
+
+  c3Case('a read-only first Bash command passes without using the routine gate', () => {
+    const first = roBash('ls -la src');
+    assert.strictEqual(roDecision(first), undefined, first.stdout);
+    assert.ok(!first.stdout.includes('permissionDecision'), first.stdout);
+    const state = c3State();
+    assert.strictEqual(state.routine_readonly_passes, 1);
+    assert.ok(!(state.checked || []).includes('__bash_session__'), 'routine gate must stay unchecked');
+    const second = roBash('git status --short | head');
+    assert.strictEqual(roDecision(second), undefined, second.stdout);
+    assert.strictEqual(c3State().routine_readonly_passes, 2);
+    const routine = roBash('npm test');
+    assert.strictEqual(roDecision(routine), 'deny');
+    assert.ok(roReason(routine).includes('current user request'));
+    assert.strictEqual(roDecision(roBash('npm test')), undefined, 'retry after the routine gate passes');
+  });
+
+  c3Case('read-only commands after the routine gate is checked are not counted', () => {
+    writeState({ checked: ['__bash_session__'], last_active: Date.now() });
+    assert.strictEqual(roDecision(roBash('ls')), undefined);
+    assert.ok(!c3State().routine_readonly_passes, 'no read-only pass counted once the gate is checked');
+  });
+
+  c3Case('a read-only first PowerShell command passes and the next cmdlet is still gated', () => {
+    assert.strictEqual(roDecision(roPs('Get-ChildItem -Recurse -Filter *.js')), undefined);
+    const routine = roPs('Get-Date');
+    assert.strictEqual(roDecision(routine), 'deny');
+    assert.ok(roReason(routine).includes('Before the first PowerShell command'));
+  });
+
+  c3Case('commands that write, substitute or run unknown programs still draw the routine gate', () => {
+    for (const command of ['ls > out.txt', 'ls | tee out.txt', 'cat $(pwd)/a', 'find . -exec ls {} +', 'find . -name x -delete', 'git log | xargs echo', 'FOO=1 ls', 'sed -i s/a/b/ f', 'git commit -m x']) {
+      clearState();
+      const result = roBash(command);
+      assert.strictEqual(roDecision(result), 'deny', `${command}: ${result.stdout}`);
+      assert.ok(roReason(result).includes('current user request'), `${command}: routine gate expected`);
+      assert.ok(!c3State().routine_readonly_passes, `${command}: no read-only pass`);
+    }
+    for (const command of ['Get-ChildItem | Out-File a.txt', 'Get-Content a | Set-Content b', 'pwsh -Command Get-ChildItem', 'Get-Content $env:X']) {
+      clearState();
+      assert.strictEqual(roDecision(roPs(command)), 'deny', command);
+    }
+  });
+
+  c3Case('destructive commands are gated before the read-only check', () => {
+    for (const command of ['find . -name x -exec rm {} +', 'rm -rf build', 'git branch -D old']) {
+      clearState();
+      const result = roBash(command);
+      assert.strictEqual(roDecision(result), 'deny', command);
+      assert.ok(roReason(result).includes('Destructive command detected'), `${command}: destructive gate expected`);
+    }
+    clearState();
+    const ps = roPs('Remove-Item -Recurse -Force C:/tmp/demo');
+    assert.strictEqual(roDecision(ps), 'deny');
+    assert.ok(roReason(ps).includes('Destructive command detected'));
+  });
+
+  c3Case('a read-only first command in a subagent passes and other commands stay gated', () => {
+    assert.strictEqual(roDecision(roBash('pwd', { agent_id: 'agent-ro' })), undefined);
+    const routine = roBash('npm test', { agent_id: 'agent-ro' });
+    assert.strictEqual(roDecision(routine), 'deny');
+    assert.ok(roReason(routine).includes('current user request'));
   });
 
   fs.rmSync(f3Base, { recursive: true, force: true });
