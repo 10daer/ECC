@@ -60,25 +60,25 @@ Working tree = branch `gateguard-full`; `upstream/main` = `bd9402f7`;
 `58a4a0d0` = the pull request head before this round. Node 22, Linux.
 
 ```text
-Corpus: 16 scenarios, 144 steps.
+Corpus: 18 scenarios, 172 steps.
 ```
 
 | Metric | working tree | upstream/main | 58a4a0d0 |
 | --- | ---: | ---: | ---: |
-| Steps | 144 | 144 | 144 |
-| Denials | 97 | 127 | 105 |
-| Redundant denials | 0 | 35 | 15 |
-| Must-deny bypasses | 0 | 2 | 2 |
-| Expectation mismatches | 0 | 44 | 22 |
-| Irrelevant questions asked | 2 | 173 | 138 |
-| Irrelevant questions in condensed denials | 2 | 100 | 79 |
-| Warranted questions not asked | 1 | 54 | 41 |
-| Estimated denial tokens | 18991 | 22583 | 20142 |
+| Steps | 172 | 172 | 172 |
+| Denials | 124 | 152 | 130 |
+| Redundant denials | 0 | 36 | 16 |
+| Must-deny bypasses | 0 | 5 | 5 |
+| Expectation mismatches | 0 | 48 | 26 |
+| Irrelevant questions asked | 2 | 181 | 146 |
+| Irrelevant questions in condensed denials | 2 | 105 | 84 |
+| Warranted questions not asked | 1 | 55 | 42 |
+| Estimated denial tokens | 23584 | 26724 | 24549 |
 | Allows with a credit note | 9 | 0 | 8 |
 | Allows with a sibling note | 11 | 0 | 11 |
-| Allows with a trivial-edit note | 4 | 0 | 0 |
-| Hook latency p50 (ms) | 1.77 | 0.92 | 1.46 |
-| Hook latency p95 (ms) | 7.93 | 3.08 | 6.23 |
+| Allows with a trivial-edit note | 5 | 0 | 0 |
+| Hook latency p50 (ms) | 1.71 | 0.86 | 1.45 |
+| Hook latency p95 (ms) | 7.89 | 2.95 | 5.99 |
 
 | Scenario | Steps | Denials: working tree | Denials: upstream/main | Denials: 58a4a0d0 |
 | --- | ---: | ---: | ---: | ---: |
@@ -98,38 +98,56 @@ Corpus: 16 scenarios, 144 steps.
 | bypass-turn-and-batch | 7 | 7 | 7 | 7 |
 | bypass-siblings | 11 | 11 | 11 | 11 |
 | cap-with-sensitive | 6 | 4 | 6 | 4 |
+| bypass-comment-context | 22 | 21 | 19 | 19 |
+| exported-members | 6 | 6 | 6 | 6 |
 
 ### Reading the results
 
 Against `upstream/main`:
 
-- 24% fewer denials (127 to 97) and 16% fewer denial tokens, with every
-  redundant denial in the corpus gone (35 to 0).
-- Both must-deny bypasses closed: `upstream/main` lets a subagent edit
-  `src/auth/oauth.js` and `config/secrets.yaml` without a question.
-- Irrelevant questions drop from 173 to 2 and warranted-but-unasked from 54
+- 18% fewer denials (152 to 124) and 12% fewer denial tokens, with every
+  redundant denial in the corpus gone (36 to 0).
+- All five must-deny bypasses closed: `upstream/main` lets a subagent edit
+  `src/auth/oauth.js` and `config/secrets.yaml` without a question, and never
+  gates a MultiEdit call that names its file in `tool_input.file_path` (the
+  tool's own shape), so `.env`, `config/.env.local` from a subagent and a
+  first-touch code file all pass.
+- Irrelevant questions drop from 181 to 2 and warranted-but-unasked from 55
   to 1: edits without a public-surface line ask for local call sites instead
-  of importers, the data-schema question is asked only when the change
-  touches data, and condensed denials name the same questions as full ones.
+  of importers, members of exported interfaces, enums, export lists,
+  dataclasses and `pub` enums keep the importer questions, the data-schema
+  question is asked only when the change touches data, and condensed denials
+  name the same questions as full ones.
 - Denials rise only where they should: the subagent's first touch of a
-  sensitive file, the first mutating shell command after a read-only one
-  (`upstream/main` spends its once-per-session routine gate on `ls`), and the
-  first code-changing edit after a comment-only one (the comment edit no
-  longer spends the file's first touch).
+  sensitive file, MultiEdit calls, the first mutating shell command after a
+  read-only one (`upstream/main` spends its once-per-session routine gate on
+  `ls`), and the first code-changing edit after a comment-only one (the
+  comment edit no longer spends the file's first touch).
 
-Against `58a4a0d0` (this round's increment): 8 fewer denials net (3 fewer
-in the comment-only scenario: four trivial passes, one of them a shell
-script, less the later code edit they no longer pre-check; 6 fewer from
-read-only first shell commands; 1 fewer from the test edit credited by
-`rg tokenizer src tests`; 2 more from subagent edits of sensitive files),
-redundant denials 15 to 0, both subagent bypasses closed, and irrelevant
-questions 138 to 2.
+Against `58a4a0d0` (the pull request head before this round): 6 fewer
+denials net. The first 16 scenarios account for 8 fewer (3 in the
+comment-only scenario, 6 from read-only first shell commands and 1 from the
+test edit credited by its stem, less 2 more for subagent edits of sensitive
+files); `bypass-comment-context` adds 2 (three MultiEdit calls now gated, one
+comment edit passed). Redundant denials drop from 16 to 0, all five bypasses
+close, and irrelevant questions drop from 146 to 2.
 
-Two corpus labels changed in this round because the working tree now handles
-those steps, so both baselines gained a redundant denial: the comment-only
-edit of `scripts/build.sh` (`unknown-extension-comment`, now profiled as a
-shell script) and the test edit after `rg tokenizer src tests`
-(`edit-tokenizer-test`, now credited by the stripped stem `tokenizer`).
+The security review of this round's allowances added two scenarios.
+`bypass-comment-context` holds 21 must-deny steps: comment-looking edits that
+change code in their file (a comment line after a continued C macro, a line
+break dropped so the next line joins a comment, lines inside a template
+literal, a docstring and a heredoc, a snippet that starts inside a string,
+`replace_all` reaching a string), directive comments (shebang, encoding
+cookie, `# type:`, `# nosec`, `@ts-expect-error`, `eslint-disable`,
+`//go:build`, `//go:embed`, a cgo preamble, a Rust doc test), MultiEdit calls
+naming their file once, and `rg -z` as a first shell command; plus one
+comment edit below closed templates and regexes that should still pass.
+Before the fixes the branch let 20 of those 21 through (every edit and
+`rg -z` as a trivial or read-only pass, and the three MultiEdit calls);
+`upstream/main` and `58a4a0d0` let the three MultiEdit calls through.
+`exported-members` holds six member edits whose container declaration sits
+outside the snippet; before the fixes the branch asked for local call sites
+on the five public ones (5 irrelevant questions, 10 warranted ones not asked).
 
 What the working tree still gets wrong, by the corpus's own labels:
 
@@ -142,7 +160,9 @@ What the working tree still gets wrong, by the corpus's own labels:
   (the 1 unasked one).
 - Latency roughly doubles against `upstream/main` (p50 about 2 ms, p95 about
   8 ms) with the added transcript scanning and path resolution; both stay far
-  below the 200 ms budget for blocking hooks.
+  below the 200 ms budget for blocking hooks. Checking a comment-only edit
+  reads and scans the target file, which costs up to about 50 ms for a 1 MiB
+  file (the largest one read).
 
 ## Reproduce
 
