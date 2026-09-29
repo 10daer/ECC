@@ -250,7 +250,9 @@ async function main() {
   });
   const { raw, truncated } = await readBoundedStdin(process.stdin, { maxStdin });
   const rootDir = normalizePluginRootForPlatform(
-    process.env.CLAUDE_PLUGIN_ROOT || process.env.ECC_PLUGIN_ROOT
+    [process.env.CLAUDE_PLUGIN_ROOT, process.env.ECC_PLUGIN_ROOT]
+      .map(value => typeof value === 'string' ? value.trim() : '')
+      .find(Boolean) || ''
   );
 
   if (!mode || !relPath || !rootDir) {
