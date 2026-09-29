@@ -1,7 +1,9 @@
 ---
 name: tinystruct-patterns
 description: tinystruct Java フレームワークで開発する際の専門ガイダンス。tinystruct コードベース、または tinystruct 上に構築されたあらゆるプロジェクトで作業する際に使用します — プロジェクトに存在しない場合の bin/dispatcher・bin/dispatcher.cmd 起動スクリプトの生成、Application クラスの作成、@Action によるルート定義、ユニットテスト、ActionRegistry、HTTP/CLI デュアルモード対応、組み込み HTTP サーバー、イベントシステム、Builder/Builders による JSON 処理、AbstractData によるデータベース永続化、POJO 生成、Server-Sent Events (SSE)、ファイルアップロード、アウトバウンド HTTP 通信を含みます。
-origin: ECC
+metadata:
+  origin: ECC
+  upstream: tinystruct==1.7.34
 ---
 
 # tinystruct 開発パターン
