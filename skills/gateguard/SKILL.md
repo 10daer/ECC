@@ -321,7 +321,11 @@ An Edit, Write, or MultiEdit entry is allowed, with an
   a search for `payment` or `payment_service`, but not by one for
   `payments`. Exclusions are never a stem source. Generic stems (`index`, `main`, `init`, `__init__`,
   `utils`, `util`, `types`, `readme`, `test`, `tests`, `config`, `mod`,
-  `lib`, `setup`, `app`, `spec`, `helpers`, `common`) never match.
+  `lib`, `setup`, `app`, `spec`, `helpers`, `common`) never match. For a test
+  target, one test affix is stripped first (`.test`, `.spec`, and for Python
+  and Go `test_` or `_test`), so `rg tokenizer src tests` credits
+  `tests/tokenizer.test.js`; `index.test.js` still reduces to the generic
+  `index`.
 - **Exclusions never credit:** a Grep `glob` is split on top-level commas;
   entries starting with `!` are exclusions. In shell segments, `rg -g`/
   `--glob`/`--iglob` values starting with `!`, `grep --exclude`/

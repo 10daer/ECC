@@ -12,7 +12,6 @@ const REPO_ROOT = path.join(__dirname, '..', '..');
 const HOOK_RELATIVE_PATH = 'scripts/hooks/gateguard-fact-force.js';
 const DEFAULT_CORPUS_DIR = path.join(REPO_ROOT, 'tests', 'fixtures', 'gateguard-scenarios');
 const DEFAULT_BASELINE = 'upstream/main';
-const BASELINE_ALIASES = Object.freeze({ pr: '58a4a0d0' });
 const EXPECTATIONS = new Set(['deny', 'allow']);
 const TOKEN_CHARS = 4;
 const CONDENSED_PREFIX = /^\[Fact-Forcing Gate\] \(denial #\d+ this session\) First (edit|creation) of /;
@@ -118,10 +117,6 @@ function relativeRequires(source) {
 function requireTarget(fromFile, spec) {
   const joined = path.posix.normalize(path.posix.join(path.posix.dirname(fromFile), spec));
   return path.posix.extname(joined) ? joined : `${joined}.js`;
-}
-
-function resolveBaselineRef(ref) {
-  return Object.hasOwn(BASELINE_ALIASES, ref) ? BASELINE_ALIASES[ref] : ref;
 }
 
 /** Write the hook at a git ref, and every file it requires relatively, into a temp tree; returns the hook path. */
@@ -474,7 +469,7 @@ const USAGE = [
   'Usage: node scripts/dev/gateguard-eval.js [--markdown | --json] [--baseline <ref>]... [--corpus <dir>]',
   '',
   '  --baseline <ref>  git ref whose hook is compared with the working tree (repeatable;',
-  `                    default ${DEFAULT_BASELINE}; "pr" means ${BASELINE_ALIASES.pr})`,
+  `                    default ${DEFAULT_BASELINE})`,
   '  --corpus <dir>    scenario directory (default tests/fixtures/gateguard-scenarios)',
   '  --markdown        print markdown tables (default)',
   '  --json            print the full report as JSON'
@@ -503,9 +498,8 @@ async function evaluate({ baselines = [DEFAULT_BASELINE], corpus = DEFAULT_CORPU
   const hooks = [{ label: 'working tree', ref: null, file: path.join(REPO_ROOT, ...HOOK_RELATIVE_PATH.split('/')) }];
   const materialized = fs.mkdtempSync(path.join(os.tmpdir(), 'gateguard-baseline-'));
   try {
-    baselines.forEach((label, index) => {
-      const ref = resolveBaselineRef(label);
-      hooks.push({ label, ref, file: materializeHook(ref, path.join(materialized, String(index))) });
+    baselines.forEach((ref, index) => {
+      hooks.push({ label: ref, ref, file: materializeHook(ref, path.join(materialized, String(index))) });
     });
     const evaluated = [];
     for (const hook of hooks) {

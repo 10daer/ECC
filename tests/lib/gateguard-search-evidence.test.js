@@ -120,6 +120,43 @@ test('findClosestMiss reports a reason code for the nearest non-qualifying searc
   assert.strictEqual(findClosestMiss(scanOf([s('Grep', { pattern: 'widget_factory', path: '/elsewhere' })]), '', false, data), null);
 });
 
+test('a test target is credited by its module stem once the test affix is stripped', () => {
+  const { findCreditingSearch } = loadHook();
+  const data = { cwd: root };
+  const scanOf = searches => ({ turnId: null, searches, batchIds: new Map(), newestMessageId: null, shellCommands: [], reads: [] });
+  const s = (name, input) => ({ name, input, callsAgo: 1, messageId: 'msg_1' });
+  const credits = (search, file) => Boolean(findCreditingSearch(scanOf([search]), `${root}/${file}`, false, data));
+  assert.ok(credits(s('Bash', { command: 'rg -n "tokenizer" src tests' }), 'tests/parser/tokenizer.test.js'), '.test');
+  assert.ok(credits(s('Grep', { pattern: 'tokenizer', path: `${root}/tests` }), 'tests/parser/tokenizer.spec.ts'), '.spec');
+  assert.ok(credits(s('Grep', { pattern: 'widget_factory' }), 'tests/test_widget_factory.py'), 'test_ prefix');
+  assert.ok(credits(s('Grep', { pattern: 'widget_factory' }), 'pkg/widget_factory_test.py'), '_test.py suffix');
+  assert.ok(credits(s('Grep', { pattern: 'codec' }), 'internal/codec/codec_test.go'), '_test.go suffix');
+  assert.ok(credits(s('Grep', { pattern: 'tokenizer.test' }), 'tests/parser/tokenizer.test.js'), 'the full stem still names it');
+});
+
+test('stripped test stems keep the generic, length, word-boundary and scope rules', () => {
+  const { findCreditingSearch, findClosestMiss } = loadHook();
+  const data = { cwd: root };
+  const scanOf = searches => ({ turnId: null, searches, batchIds: new Map(), newestMessageId: null, shellCommands: [], reads: [] });
+  const s = (name, input) => ({ name, input, callsAgo: 1, messageId: 'msg_1' });
+  const credits = (search, file) => Boolean(findCreditingSearch(scanOf([search]), `${root}/${file}`, false, data));
+  assert.strictEqual(credits(s('Grep', { pattern: 'index' }), 'tests/index.test.js'), false, 'index is generic');
+  assert.strictEqual(credits(s('Grep', { pattern: 'app' }), 'src/app.spec.ts'), false, 'app is generic');
+  assert.strictEqual(credits(s('Grep', { pattern: 'util' }), 'tests/test_util.py'), false, 'util is generic');
+  assert.strictEqual(credits(s('Grep', { pattern: 'main' }), 'cmd/main_test.go'), false, 'main is generic');
+  assert.strictEqual(credits(s('Grep', { pattern: 'abc' }), 'tests/abc.test.js'), false, 'too short');
+  assert.strictEqual(credits(s('Grep', { pattern: 'tokenizers' }), 'tests/tokenizer.test.js'), false, 'word boundary');
+  assert.strictEqual(credits(s('Grep', { pattern: 'tokenizer', path: `${root}/src` }), 'tests/tokenizer.test.js'), false, 'scope');
+  assert.strictEqual(credits(s('Grep', { pattern: 'tokenizer', glob: '!*.test.js' }), 'tests/tokenizer.test.js'), false, 'excluded');
+  assert.strictEqual(credits(s('Grep', { pattern: 'x', glob: '!tokenizer*' }), 'tests/tokenizer.test.js'), false, 'exclusion names the stem');
+  assert.strictEqual(credits(s('Grep', { pattern: 'widget' }), 'tests/widget.test.test.js'), false, 'one affix only');
+  assert.strictEqual(credits(s('Grep', { pattern: 'helpers' }), 'src/test_helpers.js'), false, 'test_ prefix only for Python');
+  assert.strictEqual(credits(s('Grep', { pattern: 'widget' }), 'src/widget_test.js'), false, '_test suffix only for Python and Go');
+  assert.strictEqual(credits(s('Grep', { pattern: 'tokenizer' }), 'skills/tokenizer.test.md'), false, 'instruction targets keep the full stem');
+  const miss = findClosestMiss(scanOf([s('Grep', { pattern: 'index' })]), `${root}/tests/index.test.js`, false, data);
+  assert.strictEqual(miss && miss.reason, 'generic-stem');
+});
+
 fs.rmSync(transcriptDir, { recursive: true, force: true });
 
 console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);

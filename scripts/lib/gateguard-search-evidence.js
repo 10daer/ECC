@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { WINDOWS_PATH_PATTERN } = require('./gateguard-target-class');
+const { WINDOWS_PATH_PATTERN, classifyTargetFor } = require('./gateguard-target-class');
 const { excludedBatchId } = require('./gateguard-turn-scan');
 
 // --- Search commands and flags ---
@@ -84,10 +84,20 @@ const MAX_SEARCH_COMMAND_CHARS = 8192;
 const AMBIGUOUS_SHELL_PATTERN = /`|\$\(|[<>]\(|<</;
 const GLOB_CHARS_PATTERN = /[*?[{]/;
 
-function eligibleStem(filePath) {
-  const base = String(filePath).split(/[\\/]/).pop() || '';
+// see docs/gateguard/design-notes.md#test-stems
+function bareStem(filePath, data) {
+  const base = (String(filePath).split(/[\\/]/).pop() || '').toLowerCase();
   const ext = path.posix.extname(base);
-  const stem = (ext ? base.slice(0, -ext.length) : base).toLowerCase();
+  const stem = ext ? base.slice(0, -ext.length) : base;
+  if (classifyTargetFor(filePath, data) !== 'test') return stem;
+  if (stem.endsWith('.test') || stem.endsWith('.spec')) return stem.slice(0, -5);
+  if (ext === '.py' && stem.startsWith('test_')) return stem.slice(5);
+  if ((ext === '.py' || ext === '.go') && stem.endsWith('_test')) return stem.slice(0, -5);
+  return stem;
+}
+
+function eligibleStem(filePath, data) {
+  const stem = bareStem(filePath, data);
   return stem.length >= MIN_STEM_LENGTH && !GENERIC_STEMS.has(stem) ? stem : null;
 }
 
@@ -798,7 +808,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
       if (typeof targetPath !== 'string' || !targetPath) return null;
       const ctx = dirContext(targetPath, data);
       if (!ctx) return null;
-      const stem = stemMatcher(eligibleStem(targetPath));
+      const stem = stemMatcher(eligibleStem(targetPath, data));
       // see docs/gateguard/design-notes.md#same-batch-searches
       const excluded = excludedBatchId(scan, data);
       const shellDirsTrusted = !turnChangesDirectory(scan.shellCommands);
@@ -846,10 +856,9 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
       if (!scan || !Array.isArray(scan.searches) || typeof targetPath !== 'string' || !targetPath) return null;
       const ctx = dirContext(targetPath, data);
       if (!ctx) return null;
-      const eligible = eligibleStem(targetPath);
+      const eligible = eligibleStem(targetPath, data);
       const stem = stemMatcher(eligible);
-      const base = (String(targetPath).split(/[\\/]/).pop() || '').toLowerCase();
-      const bare = base.includes('.') ? base.slice(0, base.lastIndexOf('.')) : base;
+      const bare = bareStem(targetPath, data);
       const rawStem = eligible === null && bare.length >= MIN_GENERIC_MISS_STEM ? stemMatcher(bare) : null;
       const excluded = excludedBatchId(scan, data);
       const shellDirsTrusted = !turnChangesDirectory(scan.shellCommands);

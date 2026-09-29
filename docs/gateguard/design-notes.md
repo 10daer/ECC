@@ -180,6 +180,20 @@ least four characters and is not generic (`index`, `utils`, `config`, ...).
 Matching is a word-boundary `indexOf` scan; a `RegExp` is never built from
 transcript text.
 
+## Test stems
+
+A test is named after the module it exercises, and a search for that module
+(`rg tokenizer src tests`) is the search that finds its tests. So for a target
+of the test class, one test affix is stripped before the stem rules apply:
+a `.test` or `.spec` suffix, a `test_` prefix on `.py`, and a `_test` suffix
+on `.py` and `.go`, the same affixes that make a file a test. The result
+still has to be at least four characters, not generic (`index.test.js` gives
+`index`, which never credits), a whole word in the search, and in the
+search's scope; exclusions that mention the stripped stem cover the target.
+Only one affix is stripped, and other classes keep the full stem (a
+`tokenizer.test.md` under `skills/` is an instruction file). The full stem
+(`tokenizer.test`) still matches as a word, since `.` is a word boundary.
+
 ## Search filters
 
 A search that excluded the target never saw it:

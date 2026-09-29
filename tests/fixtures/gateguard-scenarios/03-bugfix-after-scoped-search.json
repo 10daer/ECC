@@ -235,6 +235,7 @@
     },
     {
       "id": "edit-tokenizer-test",
+      "note": "rg tokenizer src tests already searched the test directory for the module the test is named after.",
       "transcript": [
         {
           "type": "user",
@@ -331,9 +332,9 @@
         },
         "tool_use_id": "toolu_bugfixafterscopedsearch_006"
       },
-      "expect": "deny",
+      "expect": "allow",
       "mustDeny": false,
-      "redundant": false
+      "redundant": true
     },
     {
       "id": "npm-test",
