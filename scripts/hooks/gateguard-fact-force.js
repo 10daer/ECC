@@ -1640,7 +1640,7 @@ function markCheckedAndCountCredit(key, cls) {
 }
 
 // --- Trivial edits ---
-// see docs/gateguard/design-notes.md#trivial-edits
+// see docs/gateguard/change-profile.md#trivial-edits
 
 const TRIVIAL_CLASSES = new Set(['code', 'test', 'prose']);
 
@@ -2132,7 +2132,7 @@ function subagentRestrictedDenial(filePath, data, isWrite) {
 }
 
 // --- Change profile ---
-// see docs/gateguard/design-notes.md#file-context
+// see docs/gateguard/change-profile.md#file-context
 
 const MAX_CONTEXT_FILE_BYTES = 1024 * 1024;
 

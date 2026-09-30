@@ -183,7 +183,7 @@ const CLASS_QUESTIONS = Object.fromEntries(
   Object.entries(CLASS_QUESTION_IDS).map(([cls, ids]) => [cls, isWrite => ids(isWrite).map(id => QUESTION_TEXT[id])])
 );
 
-// see docs/gateguard/design-notes.md#questions-from-the-change-profile
+// see docs/gateguard/change-profile.md#questions-from-the-change-profile
 function codeQuestionIds(isWrite, profile) {
   const known = Boolean(profile) && profile.known === true;
   const surface = !known || profile.touchesPublicSurface !== false;
