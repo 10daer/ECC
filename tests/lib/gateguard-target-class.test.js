@@ -230,9 +230,9 @@ function tempProject() {
   return root;
 }
 
-function trySymlink(target, link) {
+function trySymlink(target, link, type = 'dir') {
   try {
-    fs.symlinkSync(target, link, 'dir');
+    fs.symlinkSync(target, link, type);
     return true;
   } catch (e) {
     if (process.platform === 'win32' && e.code === 'EPERM') return false;
@@ -567,7 +567,7 @@ test('isHardLinkedTargetFor is true for a file with more than one link', () => {
       assert.strictEqual(isHardLinkedTargetFor(at('src/lib'), data), false, 'a directory');
       fs.writeFileSync(at('src/plainfile'), 'x');
       assert.strictEqual(isHardLinkedTargetFor(at('src/plainfile/a.py'), data), false, 'ENOTDIR is a missing file');
-      if (trySymlink(at('src/lib/report.py'), at('src/report_symlink.py'))) {
+      if (trySymlink(at('src/lib/report.py'), at('src/report_symlink.py'), 'file')) {
         assert.strictEqual(isHardLinkedTargetFor(at('src/report_symlink.py'), data), true, 'symlink to a hard-linked file');
       }
       if (trySymlink(at('src/lib/single.py'), at('src/single_symlink.py'))) {
