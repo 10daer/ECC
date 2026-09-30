@@ -118,6 +118,7 @@ if (( ${#scan_roots[@]} > 0 )); then
   for root in "${scan_roots[@]}"; do process_dir "$root"; done
 fi
 
+: > "$tmpdir/.removals"
 node -e '
   const fs = require("fs");
   const [discFile, resultsFile, outFile, home, ...roots] = process.argv.slice(1);
