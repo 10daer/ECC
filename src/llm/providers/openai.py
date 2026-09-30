@@ -22,6 +22,7 @@ from llm.core.types import (
     ToolCall,
 )
 from llm.providers.constants import EMPTY_FILTERED_RESPONSE_ERROR
+from llm.providers.reasoning import strip_reasoning
 
 
 class OpenAIProvider(LLMProvider):
@@ -105,7 +106,7 @@ class OpenAIProvider(LLMProvider):
                 }
 
             return LLMOutput(
-                content=choice.message.content or "",
+                content=strip_reasoning(choice.message.content or ""),
                 tool_calls=tool_calls,
                 model=response.model,
                 usage=usage,

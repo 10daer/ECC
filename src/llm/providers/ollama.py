@@ -19,6 +19,7 @@ from llm.core.types import (
     ProviderType,
     ToolCall,
 )
+from llm.providers.reasoning import strip_reasoning
 
 
 class OllamaProvider(LLMProvider):
@@ -85,7 +86,7 @@ class OllamaProvider(LLMProvider):
             with urllib.request.urlopen(req, timeout=60) as response:
                 result = json.loads(response.read().decode("utf-8"))
 
-            content = result.get("message", {}).get("content", "")
+            content = strip_reasoning(result.get("message", {}).get("content", ""))
 
             tool_calls = None
             if result.get("message", {}).get("tool_calls"):
