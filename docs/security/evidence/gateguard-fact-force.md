@@ -52,6 +52,11 @@ node scripts/dev/gateguard-eval.js --markdown --baseline c70874fa \
 | Hook errors (`error`) | 0 | 0 |
 | Other expectation mismatches (`warning`) | 0 | 46 |
 
+AgentShield's static scan of the hooks surface gives the same result on
+this branch and on `main` (score 83/B, 0 critical, 0 high); see
+[gateguard-fact-force-agentshield.md](gateguard-fact-force-agentshield.md)
+and `gateguard-fact-force-agentshield.sarif`.
+
 Negative control: the same gate run against `main`'s hook reports the 8
 bypasses as SARIF errors. They are:
 
