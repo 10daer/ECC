@@ -1,7 +1,7 @@
 # GateGuard Fact-Force — Security Evidence
 
 Evidence for the GateGuard fact-force changes, compared with `main` at
-`c70874fa`. Generated on 2026-09-29 with Node.js 22 on Linux; the gate suites
+`c70874fa`. Generated on 2026-09-30 with Node.js 22 on Linux; the gate suites
 also pass on Windows 11.
 
 ## Changed security-sensitive surface
@@ -24,7 +24,7 @@ to edit a file without doing the investigation the gate asks for.
 | Risk | Control | Regression evidence |
 | --- | --- | --- |
 | A new allowance (search credit, trivial edit, same-turn sibling, read-only first command, denial cap) reaches a sensitive target | Sensitive targets never get an allowance; sensitivity is judged on the path as written and its real path, and a resolution failure counts as sensitive | `sensitive-targets`, `cap-with-sensitive`, `windows-paths` scenarios |
-| A search that did not cover the target earns credit (exclusion filters, wrong scope, same batch, earlier turn, error result, `Read`) | Credit fails to deny on any doubt ([design notes](../../gateguard/design-notes.md#fail-to-deny)) | `bypass-search-filters`, `bypass-turn-and-batch` scenarios |
+| A search that did not cover the target earns credit (exclusion filters, include filters for another directory, wrong scope, same batch, earlier turn, error result, `Read`) | Credit fails to deny on any doubt ([design notes](../../gateguard/design-notes.md#fail-to-deny)) | `bypass-search-filters`, `bypass-turn-and-batch` scenarios |
 | Code changes disguised as comment or whitespace edits | Judged against the file's own context; directives, continuations, strings and heredocs count as code | `bypass-comment-context`, `comment-only-edits` scenarios |
 | Sibling collapse used to batch files the gate never questioned | Same class, same real directory, same human turn only; never for sensitive or hard-linked files | `bypass-siblings` scenario |
 | A mutating first shell command treated as read-only | Quote-aware parse; redirection, substitution, pipes into unknown commands and unknown commands are not read-only | `first-shell-commands` scenario |
@@ -42,7 +42,7 @@ node scripts/dev/gateguard-eval.js --markdown --baseline c70874fa \
 ```
 
 - Exit code `0`; SARIF results: `0`.
-- 20 scenarios, 182 hook calls, 86 of them must-deny.
+- 20 scenarios, 184 hook calls, 87 of them must-deny.
 - Reruns write a byte-identical file (no timing, paths or content).
 
 | Gate result | this branch | `main` (`c70874fa`) |
@@ -50,7 +50,7 @@ node scripts/dev/gateguard-eval.js --markdown --baseline c70874fa \
 | Must-deny steps allowed (`error`) | 0 | 8 |
 | Explicit `allow` decisions (`error`) | 0 | 0 |
 | Hook errors (`error`) | 0 | 0 |
-| Other expectation mismatches (`warning`) | 0 | 46 |
+| Other expectation mismatches (`warning`) | 0 | 47 |
 
 AgentShield's static scan of the hooks surface gives the same result on
 this branch and on `main` (score 83/B, 0 critical, 0 high); see
@@ -71,13 +71,16 @@ bypasses as SARIF errors. They are:
 
 | Suite | this branch | `main` |
 | --- | --- | --- |
-| `tests/hooks/gateguard-fact-force.test.js` | 993 passed, 0 failed | 704 passed, 0 failed |
+| `tests/hooks/gateguard-fact-force.test.js` | 1010 passed, 0 failed | 704 passed, 0 failed |
 | `tests/hooks/gateguard-scenarios.test.js` | 25 passed, 0 failed | — |
 | `tests/lib/gateguard-target-class.test.js` | 30 passed, 0 failed | — |
 | `tests/lib/gateguard-readonly-shell.test.js` | 18 passed, 0 failed | — |
 | `tests/lib/gateguard-change-profile.test.js` | 47 passed, 0 failed | — |
+| `tests/lib/gateguard-code-lexer.test.js` | 11 passed, 0 failed | — |
+| `tests/lib/gateguard-file-context.test.js` | 7 passed, 0 failed | — |
+| `tests/lib/gateguard-search-filters.test.js` | 10 passed, 0 failed | — |
 | `tests/lib/gateguard-turn-scan.test.js` | 16 passed, 0 failed | — |
-| `tests/scripts/gateguard-eval.test.js` | 10 passed, 0 failed | — |
+| `tests/scripts/gateguard-eval.test.js` | 12 passed, 0 failed | — |
 
 ## Repository gates
 

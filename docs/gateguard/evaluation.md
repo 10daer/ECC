@@ -56,59 +56,59 @@ relatively at that ref, into a temp tree that mirrors the repo layout.
 
 ## Results
 
-Working tree = branch `gateguard-full`; `upstream/main` = `d30588f9`;
-`58a4a0d0` = the pull request head before this round. Node 22, Linux.
+Working tree = branch `gateguard-full`; `upstream/main` = `c70874fa`;
+`8438f040` = the pull request head before this round. Node 22, Linux.
 
 ```text
-Corpus: 20 scenarios, 182 steps.
+Corpus: 20 scenarios, 184 steps.
 ```
 
-| Metric | working tree | upstream/main | 58a4a0d0 |
+| Metric | working tree | upstream/main | 8438f040 |
 | --- | ---: | ---: | ---: |
-| Steps | 182 | 182 | 182 |
-| Denials | 131 | 155 | 131 |
-| Redundant denials | 0 | 37 | 16 |
-| Must-deny bypasses | 0 | 8 | 9 |
-| Expectation mismatches | 0 | 54 | 32 |
-| Irrelevant questions asked | 2 | 181 | 146 |
-| Irrelevant questions in condensed denials | 2 | 105 | 84 |
-| Warranted questions not asked | 1 | 55 | 42 |
-| Estimated denial tokens | 25455 | 27524 | 24813 |
-| Allows with a credit note | 11 | 0 | 10 |
+| Steps | 184 | 184 | 184 |
+| Denials | 132 | 157 | 131 |
+| Redundant denials | 0 | 38 | 0 |
+| Must-deny bypasses | 0 | 8 | 1 |
+| Expectation mismatches | 0 | 55 | 1 |
+| Irrelevant questions asked | 2 | 187 | 2 |
+| Irrelevant questions in condensed denials | 2 | 111 | 2 |
+| Warranted questions not asked | 1 | 57 | 1 |
+| Estimated denial tokens | 25633 | 27796 | 25455 |
+| Allows with a credit note | 12 | 0 | 13 |
 | Allows with a sibling note | 11 | 0 | 11 |
-| Allows with a trivial-edit note | 5 | 0 | 0 |
-| Hook latency p50 (ms) | 1.68 | 0.76 | 1.23 |
-| Hook latency p95 (ms) | 7.67 | 2.13 | 5.38 |
+| Allows with a trivial-edit note | 5 | 0 | 5 |
+| Hook latency p50 (ms) | 2.28 | 1.20 | 2.14 |
+| Hook latency p95 (ms) | 7.81 | 2.93 | 7.48 |
 
-| Scenario | Steps | Denials: working tree | Denials: upstream/main | Denials: 58a4a0d0 |
+| Scenario | Steps | Denials: working tree | Denials: upstream/main | Denials: 8438f040 |
 | --- | ---: | ---: | ---: | ---: |
 | docs-heavy-session | 14 | 6 | 12 | 6 |
 | scaffold-module | 10 | 3 | 10 | 3 |
-| bugfix-after-scoped-search | 6 | 1 | 3 | 2 |
+| bugfix-after-scoped-search | 6 | 1 | 3 | 1 |
 | cold-writes | 5 | 3 | 4 | 3 |
 | exported-api-edits | 6 | 6 | 6 | 6 |
 | internal-only-edits | 5 | 4 | 4 | 4 |
 | data-handling-edits | 5 | 5 | 5 | 5 |
-| comment-only-edits | 10 | 6 | 9 | 9 |
+| comment-only-edits | 10 | 6 | 9 | 6 |
 | sensitive-targets | 8 | 8 | 8 | 8 |
-| subagent-edits | 6 | 3 | 1 | 1 |
-| first-shell-commands | 20 | 11 | 17 | 17 |
+| subagent-edits | 6 | 3 | 1 | 3 |
+| first-shell-commands | 20 | 11 | 17 | 11 |
 | windows-paths | 8 | 5 | 7 | 5 |
-| bypass-search-filters | 17 | 14 | 17 | 14 |
+| bypass-search-filters | 19 | 15 | 19 | 14 |
 | bypass-turn-and-batch | 7 | 7 | 7 | 7 |
 | bypass-siblings | 11 | 11 | 11 | 11 |
 | cap-with-sensitive | 6 | 4 | 6 | 4 |
-| bypass-comment-context | 22 | 21 | 19 | 19 |
+| bypass-comment-context | 22 | 21 | 19 | 21 |
 | exported-members | 6 | 6 | 6 | 6 |
-| notebook-edits | 6 | 4 | 0 | 0 |
-| hard-linked-targets | 4 | 3 | 3 | 1 |
+| notebook-edits | 6 | 4 | 0 | 4 |
+| hard-linked-targets | 4 | 3 | 3 | 3 |
 
 ### Reading the results
 
 Against `upstream/main`:
 
-- 15% fewer denials (155 to 131) and 8% fewer denial tokens, with every
-  redundant denial in the corpus gone (37 to 0).
+- 16% fewer denials (157 to 132) and 8% fewer denial tokens, with every
+  redundant denial in the corpus gone (38 to 0).
 - All eight must-deny bypasses closed: `upstream/main` lets a subagent edit
   `src/auth/oauth.js`, `config/secrets.yaml` and a hard-linked file without a
   question, never gates a MultiEdit call that names its file in
@@ -116,7 +116,7 @@ Against `upstream/main`:
   `config/.env.local` from a subagent and a first-touch code file all pass,
   and never gates NotebookEdit, so notebooks under `auth/` and `payments/`
   pass from the parent and from a subagent.
-- Irrelevant questions drop from 181 to 2 and warranted-but-unasked from 55
+- Irrelevant questions drop from 187 to 2 and warranted-but-unasked from 57
   to 1: edits without a public-surface line ask for local call sites instead
   of importers, members of exported interfaces, enums, export lists,
   dataclasses and `pub` enums keep the importer questions, the data-schema
@@ -129,16 +129,14 @@ Against `upstream/main`:
   after a comment-only one (the comment edit no longer spends the file's first
   touch).
 
-Against `58a4a0d0` (the pull request head before this round): the same 131
-denials with 16 fewer redundant ones and nine bypasses closed. The first 16
-scenarios account for 8 fewer denials (3 in the comment-only scenario, 6 from
-read-only first shell commands and 1 from the test edit credited by its stem,
-less 2 more for subagent edits of sensitive files); `bypass-comment-context`
-adds 2 (three MultiEdit calls now gated, one comment edit passed),
-`notebook-edits` adds 4 and `hard-linked-targets` adds 2. Irrelevant
-questions drop from 146 to 2.
+Against `8438f040` (the pull request head before this round): one more
+denial and one fewer credit. `bypass-search-filters` now includes a search
+whose directory-qualified include (`rg -g 'src/**' sweep .`) keeps the target
+in `lib/` out of the search; `8438f040` dropped that include and credited the
+edit, its one must-deny bypass. The control that searches the target's own
+directory is still credited.
 
-The security reviews of this round added four scenarios.
+Four scenarios come from security reviews of this change.
 `bypass-comment-context` holds 21 must-deny steps: comment-looking edits that
 change code in their file (a comment line after a continued C macro, a line
 break dropped so the next line joins a comment, lines inside a template
@@ -150,7 +148,7 @@ naming their file once, and `rg -z` as a first shell command; plus one
 comment edit below closed templates and regexes that should still pass.
 Before the fixes the branch let 20 of those 21 through (every edit and
 `rg -z` as a trivial or read-only pass, and the three MultiEdit calls);
-`upstream/main` and `58a4a0d0` let the three MultiEdit calls through.
+`upstream/main` lets the three MultiEdit calls through.
 `exported-members` holds six member edits whose container declaration sits
 outside the snippet; before the fixes the branch asked for local call sites
 on the five public ones (5 irrelevant questions, 10 warranted ones not asked).
@@ -160,8 +158,7 @@ subagent; every earlier hook allows all six calls. `hard-linked-targets`
 edits a second name of a file after a search that names it, makes a
 comment-only change to another linked file and edits a linked file from a
 subagent, with a single-link control; before the fix the branch allowed all
-three (credit, trivial pass, subagent bypass), and `58a4a0d0` allowed the
-credited alias and the subagent edit.
+three (credit, trivial pass, subagent bypass).
 
 What the working tree still gets wrong, by the corpus's own labels:
 
@@ -176,8 +173,8 @@ What the working tree still gets wrong, by the corpus's own labels:
   (`c-comment-continuation`) has no data words, so the condensed hint no
   longer mentions data schemas; the corpus labels that question as warranted
   (the 1 unasked one).
-- Latency rises against `upstream/main` (p50 1.7 ms against 0.8 ms, p95
-  7.7 ms against 2.1 ms) with the added transcript scanning, path resolution
+- Latency rises against `upstream/main` (p50 2.3 ms against 1.2 ms, p95
+  7.8 ms against 2.9 ms) with the added transcript scanning, path resolution
   and the target's link-count check; both stay far below the 200 ms budget
   for blocking hooks. Checking a comment-only edit
   reads and scans the target file, which costs up to about 50 ms for a 1 MiB
@@ -188,14 +185,14 @@ What the working tree still gets wrong, by the corpus's own labels:
 ```bash
 git fetch upstream main
 node scripts/dev/gateguard-eval.js --markdown
-node scripts/dev/gateguard-eval.js --markdown --baseline upstream/main --baseline 58a4a0d0
+node scripts/dev/gateguard-eval.js --markdown --baseline upstream/main --baseline 8438f040
 node scripts/dev/gateguard-eval.js --json > gateguard-eval.json
 node scripts/dev/gateguard-eval.js --baseline upstream/main --sarif gateguard-eval.sarif
 node tests/hooks/gateguard-scenarios.test.js
 ```
 
 `--baseline <ref>` takes any ref and can be repeated (default
-`upstream/main`); pass the pull request head (`58a4a0d0` above) to compare
+`upstream/main`); pass the pull request head (`8438f040` above) to compare
 against it. `--corpus <dir>` points at another
 scenario directory. The script exits non-zero when the working tree has a
 mismatch, a must-deny bypass, an explicit `allow` decision or a thrown error.

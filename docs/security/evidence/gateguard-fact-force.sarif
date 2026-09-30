@@ -62,14 +62,14 @@
       "properties": {
         "corpus": {
           "scenarios": 20,
-          "steps": 182
+          "steps": 184
         },
         "hooks": [
           {
             "label": "working tree",
             "totals": {
-              "steps": 182,
-              "denials": 131,
+              "steps": 184,
+              "denials": 132,
               "mustDenyBypasses": 0,
               "mismatches": 0,
               "explicitAllows": 0,
@@ -80,10 +80,10 @@
           {
             "label": "c70874fa",
             "totals": {
-              "steps": 182,
-              "denials": 155,
+              "steps": 184,
+              "denials": 157,
               "mustDenyBypasses": 8,
-              "mismatches": 54,
+              "mismatches": 55,
               "explicitAllows": 0,
               "errors": 0,
               "skippedScenarios": 0
