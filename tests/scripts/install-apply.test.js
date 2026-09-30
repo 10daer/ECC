@@ -1104,7 +1104,7 @@ function runTests() {
       assert.strictEqual(fs.readFileSync(scriptsPackagePath, 'utf8'), userScriptsPackage);
 
       const state = readJson(path.join(claudeRoot, 'ecc', 'install-state.json'));
-      const boundaryPaths = [hooksPackagePath, libPackagePath];
+      const boundaryPaths = [hooksPackagePath, libPackagePath].map(file => fs.realpathSync(file));
       const packageBoundaryOperations = state.operations.filter(operation => (
         boundaryPaths.includes(operation.destinationPath)
       ));
@@ -1191,6 +1191,7 @@ function runTests() {
 
       applyInstallPlan({
         targetRoot: path.join(tempDir, 'installed'),
+        adapter: { id: 'test-install', target: 'test-install' },
         installStatePath,
         statePreview: {
           schemaVersion: 'ecc.install.v1',
@@ -1486,6 +1487,29 @@ function runTests() {
       cleanup(projectDir);
     }
   })) passed++; else failed++;
+
+  for (const explicitConfig of [true, false]) {
+    if (test(`installs from a UTF-8 BOM config (${explicitConfig ? '--config' : 'auto-detected'})`, () => {
+      const homeDir = createTempDir('install-apply-bom-home-');
+      const projectDir = createTempDir('install-apply-bom-project-');
+      const configPath = path.join(projectDir, 'ecc-install.json');
+      const content = '\uFEFF{\r\n  "version": 1,\r\n  "target": "cursor",\r\n  "modules": ["rules-core"]\r\n}\r\n';
+
+      try {
+        fs.writeFileSync(configPath, content, 'utf8');
+        const args = explicitConfig ? ['--config', configPath] : [];
+        const result = run(args, { cwd: projectDir, homeDir });
+        assert.strictEqual(result.code, 0, result.stderr);
+        assert.ok(fs.existsSync(path.join(projectDir, '.cursor', 'rules', 'common-coding-style.mdc')));
+        const state = readJson(path.join(projectDir, '.cursor', 'ecc-install-state.json'));
+        assert.deepStrictEqual(state.request.modules, ['rules-core']);
+        assert.strictEqual(fs.readFileSync(configPath, 'utf8'), content);
+      } finally {
+        cleanup(homeDir);
+        cleanup(projectDir);
+      }
+    })) passed++; else failed++;
+  }
 
   if (test('preserves legacy language installs when a project config is present', () => {
     const homeDir = createTempDir('install-apply-home-');
