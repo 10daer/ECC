@@ -27,7 +27,7 @@ function thrownBy(fn) {
   catch (error) { return { failed: true, error }; }
 }
 
-function lockFixture(overrides = {}, platform = 'linux') {
+function lockFixture(overrides = {}, platform = 'linux', performance = require('perf_hooks').performance) {
   const calls = [];
   const identity = { dev: 1n, ino: 2n, isFile: () => true, isSymbolicLink: () => false };
   let present = true;
@@ -46,7 +46,7 @@ function lockFixture(overrides = {}, platform = 'linux') {
     const original = facade[name];
     facade[name] = (...args) => fn(state, original, ...args);
   }
-  const lock = loadPrivate(LOCK, { fs: facade, os: { hostname: () => 'fixture' } }, undefined,
+  const lock = loadPrivate(LOCK, { fs: facade, os: { hostname: () => 'fixture' }, perf_hooks: { performance } }, undefined,
     { platform, pid: 7 });
   return { ...state, calls, run: (callback, timeoutMs = 0) => lock.withStateStoreLock('synthetic.db', callback, { timeoutMs }) };
 }
@@ -69,16 +69,28 @@ async function runSynthetic(test) {
     assert.strictEqual(callbacks, 1);
     assert.deepStrictEqual(fixture.calls, ['open', 'open', 'fstat', 'write', 'lstat', 'unlink', 'close']);
   });
-  await test('sustained Windows open EPERM times out as busy without touching the lock', () => {
-    const denied = Object.assign(new Error('pending deletion'), { code: 'EPERM' });
-    const fixture = lockFixture({ openSync(state) { state.calls.push('open'); throw denied; } }, 'win32');
-    const result = thrownBy(() => fixture.run(() => assert.fail('callback must not run'), 20));
-    assert.ok(result.failed);
-    assert.strictEqual(result.error.code, 'STATE_STORE_BUSY');
-    assert.match(result.error.message, /synthetic\.db\.ecc-state\.lock/);
-    assert.ok(fixture.calls.length > 0);
-    assert.ok(fixture.calls.every(call => call === 'open'));
-  });
+  for (const codes of [['EPERM', 'EPERM'], ['EEXIST', 'EPERM'], ['EPERM', 'EEXIST']]) {
+    await test(`Windows lock timeout preserves the final error classification (${codes.join(' -> ')})`, () => {
+      const errors = codes.map(code => Object.assign(new Error(`open failed: ${code}`), { code }));
+      let attempts = 0;
+      const clock = { now: () => attempts * 10 };
+      const fixture = lockFixture({ openSync(state) {
+        state.calls.push('open');
+        throw errors[attempts++];
+      } }, 'win32', clock);
+      const result = thrownBy(() => fixture.run(() => assert.fail('callback must not run'), 20));
+      assert.ok(result.failed);
+      if (codes[1] === 'EPERM') {
+        assert.strictEqual(result.error, errors[1]);
+        assert.doesNotMatch(result.error.message, /remove|leftover lock/i);
+      } else {
+        assert.strictEqual(result.error.code, 'STATE_STORE_BUSY');
+        assert.match(result.error.message, /synthetic\.db\.ecc-state\.lock/);
+      }
+      assert.strictEqual(attempts, 2);
+      assert.deepStrictEqual(fixture.calls, ['open', 'open']);
+    });
+  }
   for (const [platform, code] of [['linux', 'EPERM'], ['darwin', 'EPERM'], ['win32', 'EACCES'], ['win32', 'EIO']]) {
     await test(`unrelated lock-open errors propagate immediately (${platform}, ${code})`, () => {
       const denied = Object.assign(new Error('open denied'), { code });

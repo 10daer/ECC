@@ -97,8 +97,12 @@ remove the database itself. In-memory stores do not create lock files.
 
 The control-pane HTTP server runs board claims and moves in one-shot workers,
 so waiting for another writer does not stall health checks or snapshots. A
-timed-out mutation returns HTTP 503 with `code: STATE_STORE_BUSY` and
-`Retry-After: 1`; invalid mutations continue to return HTTP 400. Each worker
+mutation that times out while lock creation reports `EEXIST` returns HTTP 503
+with `code: STATE_STORE_BUSY` and `Retry-After: 1`. On Windows, lock creation
+also retries `EPERM` within the same deadline because deletion may still be
+pending. If the final attempt still reports `EPERM`, the original permission
+error is preserved rather than replaced with busy or leftover-lock recovery
+advice. Invalid mutations continue to return HTTP 400. Each worker
 closes its store before reporting the result and exits naturally, including
 when the requesting browser disconnects, to avoid interrupting a write.
 

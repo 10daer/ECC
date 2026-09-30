@@ -75,10 +75,13 @@ function acquireLock(dbPath, timeoutMs) {
     } catch (error) {
       // Windows may report EPERM while the previous owner's unlinked file is
       // pending deletion. Retry exclusive creation within the same deadline.
-      const pendingDelete = process.platform === 'win32' && hasCode(error, 'EPERM');
-      if (!hasCode(error, 'EEXIST') && !pendingDelete) throw error;
+      const retryablePermissionError = process.platform === 'win32' && hasCode(error, 'EPERM');
+      if (!hasCode(error, 'EEXIST') && !retryablePermissionError) throw error;
       const remaining = deadline - performance.now();
       if (remaining <= 0) {
+        // EPERM can also mean genuine access denial; preserve its diagnostics
+        // rather than advising the caller to remove a possibly unrelated lock.
+        if (retryablePermissionError) throw error;
         const busy = new Error(`State store is busy: ${dbPath}. Retry after the other ECC operation finishes. `
           + `If an operation terminated unexpectedly, stop all ECC processes using this database, `
           + `then inspect and remove the leftover lock: ${lockPath}`);
