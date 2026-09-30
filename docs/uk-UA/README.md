@@ -17,7 +17,8 @@
   <a href="../de-DE/README.md">Deutsch</a> |
   <a href="../es/README.md">Español</a> |
   <a href="../uk-UA/README.md">Українська</a> |
-  <a href="../pl/README.md">Polski</a>
+  <a href="../pl/README.md">Polski</a> |
+  <a href="../bn/README.md">বাংলা</a>
 </p>
 
 <p align="center">
