@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { performance } = require('perf_hooks');
+const { pathToFileURL } = require('url');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
@@ -512,6 +513,15 @@ function sarifFindings(step) {
   return findings;
 }
 
+function sarifArtifactLocation(corpusDir, file) {
+  const absolute = path.resolve(corpusDir || DEFAULT_CORPUS_DIR, file || '');
+  const relative = path.relative(REPO_ROOT, absolute);
+  if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+    return { uri: relative.split(path.sep).join('/'), uriBaseId: '%SRCROOT%' };
+  }
+  return { uri: pathToFileURL(absolute).href };
+}
+
 function sarifTotals(summary) {
   const { steps, denials, mustDenyBypasses, mismatches, explicitAllows, errors, skippedScenarios } = summary.totals;
   return { steps, denials, mustDenyBypasses, mismatches, explicitAllows, errors, skippedScenarios };
@@ -530,9 +540,7 @@ function renderSarif(report) {
         message: { text: `${step.scenario} / ${step.step}: expected ${step.expect}, got ${step.decision} (${step.kind})` },
         locations: [
           {
-            physicalLocation: {
-              artifactLocation: { uri: `tests/fixtures/gateguard-scenarios/${step.file}`, uriBaseId: '%SRCROOT%' }
-            }
+            physicalLocation: { artifactLocation: sarifArtifactLocation(report.corpusDir, step.file) }
           }
         ]
       });
@@ -614,6 +622,7 @@ async function evaluate({ baselines = [DEFAULT_BASELINE], corpus = DEFAULT_CORPU
     }
     return {
       corpus: { scenarios: scenarios.length, steps: scenarios.reduce((sum, scenario) => sum + scenario.steps.length, 0) },
+      corpusDir: corpus,
       hooks: evaluated
     };
   } finally {

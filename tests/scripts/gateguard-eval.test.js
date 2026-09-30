@@ -5,7 +5,9 @@
 'use strict';
 
 const assert = require('assert');
+const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { parseArgs, renderSarif } = require('../../scripts/dev/gateguard-eval');
 
 let passed = 0;
@@ -103,6 +105,20 @@ test('a must-deny step that was allowed is an error on its scenario file', () =>
   assert.strictEqual(result.locations[0].physicalLocation.artifactLocation.uri, 'tests/fixtures/gateguard-scenarios/09-sensitive-targets.json');
   assert.strictEqual(result.locations[0].physicalLocation.artifactLocation.uriBaseId, '%SRCROOT%');
   assert.match(result.message.text, /sensitive-targets \/ edit-env: expected deny, got allow \(credit\)/);
+});
+
+test('a finding from another corpus inside the repository links to that corpus', () => {
+  const failing = report([step({ decision: 'allow', kind: 'credit', file: 'custom.json' })]);
+  failing.corpusDir = path.join(__dirname, '..', 'fixtures', 'other-scenarios');
+  const location = results(JSON.parse(renderSarif(failing)))[0].locations[0].physicalLocation.artifactLocation;
+  assert.deepStrictEqual(location, { uri: 'tests/fixtures/other-scenarios/custom.json', uriBaseId: '%SRCROOT%' });
+});
+
+test('a finding from a corpus outside the repository links to its absolute file', () => {
+  const failing = report([step({ decision: 'allow', kind: 'credit', file: 'custom.json' })]);
+  failing.corpusDir = path.join(os.tmpdir(), 'gateguard-corpus');
+  const location = results(JSON.parse(renderSarif(failing)))[0].locations[0].physicalLocation.artifactLocation;
+  assert.deepStrictEqual(location, { uri: pathToFileURL(path.join(os.tmpdir(), 'gateguard-corpus', 'custom.json')).href });
 });
 
 test('an explicit allow and a hook error are reported as errors', () => {
