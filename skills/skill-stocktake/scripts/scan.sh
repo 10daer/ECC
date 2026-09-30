@@ -74,11 +74,13 @@ date_ago() {
   date -u -d "${n} days ago" +%Y-%m-%dT%H:%M:%SZ
 }
 
-# Count observations matching a file path since a cutoff timestamp
+# Count observations matching a file path since a cutoff timestamp.
+# Prints null when the observations file is absent so unmeasured usage stays
+# distinguishable from a measured zero downstream.
 count_obs() {
   local file="$1" cutoff="$2"
   if [[ ! -f "$OBSERVATIONS" ]]; then
-    echo 0
+    echo null
     return
   fi
   jq -r --arg p "$file" --arg c "$cutoff" \
@@ -103,10 +105,12 @@ scan_dir_to_json() {
 
   # Pre-aggregate observation counts in two passes (one per window) instead of
   # calling jq per-file — reduces from O(n*m) to O(n+m) jq invocations.
-  local obs_7d_counts obs_30d_counts
+  local obs_7d_counts obs_30d_counts obs_available
   obs_7d_counts=""
   obs_30d_counts=""
+  obs_available="false"
   if [[ -f "$OBSERVATIONS" ]]; then
+    obs_available="true"
     obs_7d_counts=$(jq -r --arg c "$c7" \
       'select(.tool=="Read" and .timestamp>=$c) | .path' \
       "$OBSERVATIONS" 2>/dev/null | sort | uniq -c)
@@ -123,7 +127,7 @@ scan_dir_to_json() {
   # exit non-zero, which would otherwise silently under-count skills.
   # NUL-delimited (-print0 / sort_nul_file / read -d '') so a path containing a
   # literal newline can't desync record boundaries — paths here are untrusted.
-  if ! find -L "$dir" -name "SKILL.md" -type f -print0 >"$find_out" 2>"$find_err"; then
+  if ! find -L "$dir" -name "SKILL.md" -type f -not -path '*/.trash/*' -print0 >"$find_out" 2>"$find_err"; then
     echo "Warning: find encountered errors while scanning $dir (broken symlinks or permission issues may cause skills to be missed):" >&2
     cat "$find_err" >&2
   fi
@@ -143,9 +147,14 @@ scan_dir_to_json() {
       # Use awk exact field match to avoid substring false-positives from grep -F.
       # uniq -c output format: "   N /path/to/file" — path is always field 2.
       u7=$(echo "$obs_7d_counts" | awk -v f="$file" '$2 == f {print $1}' | head -1)
-      u7="${u7:-0}"
       u30=$(echo "$obs_30d_counts" | awk -v f="$file" '$2 == f {print $1}' | head -1)
-      u30="${u30:-0}"
+      if [[ "$obs_available" == "true" ]]; then
+        u7="${u7:-0}"
+        u30="${u30:-0}"
+      else
+        u7="null"
+        u30="null"
+      fi
     fi
     dp="${file/#$HOME/~}"
 

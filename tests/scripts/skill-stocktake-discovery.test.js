@@ -46,7 +46,7 @@ console.log('\nSkill stocktake discovery tests:');
 test('both scanners use canonical, error-visible, NUL-delimited discovery', () => {
   for (const scriptPath of [scanScript, quickDiffScript]) {
     const source = fs.readFileSync(scriptPath, 'utf8');
-    assert.match(source, /find -L "\$dir" -name "SKILL\.md" -type f -print0/);
+    assert.match(source, /find -L "\$dir" -name "SKILL\.md" -type f -not -path '\*\/\.trash\/\*' -print0/);
     assert.match(source, /sort_nul_file "\$find_out"/);
     assert.match(source, /records\.sort\(Buffer\.compare\)/);
     assert.doesNotMatch(source, /sort -z/, `${path.basename(scriptPath)} still requires GNU sort`);
@@ -138,6 +138,53 @@ if (process.platform === 'win32') {
       const output = JSON.parse(result.stdout);
       assert.strictEqual(output.length, 2);
       assert.ok(output.every(entry => !entry.path.includes('newline\nskill/SKILL.md')));
+    });
+
+    test('scan excludes trashed skills from the inventory', () => {
+      const trashSkill = path.join(projectSkills, '.trash', '20240101-1234-abcd', 'old-skill');
+      writeSkill(trashSkill, 'old-skill');
+      try {
+        const result = runBash(scanScript, [], env);
+        assert.strictEqual(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout);
+        assert.strictEqual(output.scan_summary.project.count, 3);
+        assert.ok(!output.skills.some(skill => skill.name === 'old-skill'));
+      } finally {
+        fs.rmSync(path.join(projectSkills, '.trash'), { recursive: true, force: true });
+      }
+    });
+
+    test('quick diff ignores trashed skills', () => {
+      const trashSkill = path.join(projectSkills, '.trash', '20240101-1234-abcd', 'old-skill');
+      writeSkill(trashSkill, 'old-skill');
+      try {
+        fs.writeFileSync(
+          resultsPath,
+          JSON.stringify({ evaluated_at: '2000-01-01T00:00:00Z', skills: [] }),
+        );
+        const result = runBash(quickDiffScript, [resultsPath], env);
+        assert.strictEqual(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout);
+        assert.ok(output.length > 0);
+        assert.ok(!output.some(entry => entry.path.includes('.trash')));
+      } finally {
+        fs.rmSync(path.join(projectSkills, '.trash'), { recursive: true, force: true });
+      }
+    });
+
+    test('scan reports unmeasured usage as null when the observations file is absent', () => {
+      const noObsEnv = {
+        ...env,
+        SKILL_STOCKTAKE_OBSERVATIONS: path.join(tempRoot, 'missing-observations.jsonl'),
+      };
+      const result = runBash(scanScript, [], noObsEnv);
+      assert.strictEqual(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.ok(output.skills.length > 0);
+      for (const skill of output.skills) {
+        assert.strictEqual(skill.use_7d, null, skill.name);
+        assert.strictEqual(skill.use_30d, null, skill.name);
+      }
     });
   } catch (error) {
     console.log(`  ✗ fixture setup: ${error.message}`);

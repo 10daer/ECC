@@ -74,6 +74,11 @@ Scanning:
 | Skill | 7d use | 30d use | Description |
 |-------|--------|---------|-------------|
 
+Render unmeasured usage as `--`. When `~/.claude/observations.jsonl` is absent
+(the default install), the script reports `use_7d`/`use_30d` as `null`, not `0`.
+Absent usage data is never evidence for a verdict — a skill with unmeasured
+usage must not be retired for low usage.
+
 ### Phase 2 — Quality Evaluation
 
 Launch an Agent tool subagent (**general-purpose agent**) with the full inventory and checklist:
@@ -110,7 +115,7 @@ Each skill is evaluated against this checklist:
 - [ ] Content overlap with other skills checked
 - [ ] Overlap with MEMORY.md / CLAUDE.md checked
 - [ ] Freshness of technical references verified (use WebSearch if tool names / CLI flags / APIs are present)
-- [ ] Usage frequency considered
+- [ ] Usage frequency considered (distinguish measured 0 from not measured `--`)
 ```
 
 Verdict criteria:
