@@ -28,7 +28,8 @@ const tests = [
   ['registers the schema gate in the normal test workflow', () => {
     const { scripts } = require('../../package.json');
     assert.strictEqual(scripts['context-profiles:check'], 'node scripts/ci/validate-context-profiles.js');
-    assert.ok(scripts.test.includes('validate-context-profiles.js'));
+    const workflow = [scripts.test, scripts['test:validators']].filter(Boolean).join(' ');
+    assert.ok(workflow.includes('validate-context-profiles.js'));
   }],
 ];
 

@@ -10,7 +10,6 @@ const { readInstallState, validateInstallState } = require('./install-state');
 const { assertWithinTrustedRoot } = require('./path-safety');
 const { createInstallPlanFromRequest } = require('./install/runtime');
 const { assertNoNewUserOwnedFile, prepareUserOwnedFileGuard } = require('./install/ownership-guard');
-const { writeFileNoFollow: guardedWriteFile } = require('./install/guarded-write');
 const { withOpenCodeInstallLocks } = require('./install/opencode-install-lock');
 const { isCodexUserConfig } = require('./install/codex-user-config');
 const {
@@ -57,7 +56,6 @@ const {
   readJsonNoFollow,
   removeContainedPath,
   writeContainedFile,
-  writeFileNoFollow,
 } = require('./install/contained-fs');
 const {
   JSON_REMOVE_SENTINEL,
