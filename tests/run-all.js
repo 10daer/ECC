@@ -104,7 +104,7 @@ console.log('╚' + '═'.repeat(BOX_W) + '╝');
 console.log();
 
 if (skipPatterns.length > 0) {
-  console.log(`⚠ Skipped patterns: ${skipPatterns.join(', ')}`);
+  console.log(`WARNING Skipped patterns: ${skipPatterns.join(', ')}`);
   console.log();
 }
 
