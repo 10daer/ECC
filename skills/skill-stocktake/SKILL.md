@@ -51,7 +51,9 @@ Re-evaluate only skills that have changed since the last run (5–10 min).
 3. If output is `[]`: report "No changes since last run." and stop
 4. Re-evaluate only those changed files using the same Phase 2 criteria
 5. Carry forward unchanged skills from previous results
-6. Output only the diff
+6. Drop entries with `"removed": true` (skills deleted or trashed since the last
+   run — Quick Scan reports them so stale verdicts do not linger in `results.json`)
+7. Output only the diff
 7. Run: `bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
          ~/.claude/skills/skill-stocktake/results.json <<< "$EVAL_RESULTS"`
 

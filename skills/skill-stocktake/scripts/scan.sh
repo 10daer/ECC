@@ -127,7 +127,7 @@ scan_dir_to_json() {
   # exit non-zero, which would otherwise silently under-count skills.
   # NUL-delimited (-print0 / sort_nul_file / read -d '') so a path containing a
   # literal newline can't desync record boundaries — paths here are untrusted.
-  if ! find -L "$dir" -name "SKILL.md" -type f -not -path '*/.trash/*' -print0 >"$find_out" 2>"$find_err"; then
+  if ! find -L "$dir" -path '*/.trash' -prune -o -name "SKILL.md" -type f -not -path '*/.trash/*' -print0 >"$find_out" 2>"$find_err"; then
     echo "Warning: find encountered errors while scanning $dir (broken symlinks or permission issues may cause skills to be missed):" >&2
     cat "$find_err" >&2
   fi

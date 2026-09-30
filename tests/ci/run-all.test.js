@@ -103,6 +103,11 @@ const tests = [
     assert.deepStrictEqual(result.annotations, []);
     assert.ok(result.logs.includes('Error: local failure'));
   }],
+  ['tap TODO directives do not fail the suite', () => {
+    const result = run({ status: 0, stdout: 'ok 1 - done\nnot ok 2 - pending feature # TODO' });
+    assert.strictEqual(result.status, 0);
+    assert.deepStrictEqual(result.annotations, []);
+  }],
 ];
 
 let failed = 0;

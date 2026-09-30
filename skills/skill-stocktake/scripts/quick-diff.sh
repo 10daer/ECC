@@ -67,6 +67,8 @@ trap _cleanup EXIT
 # Shared counter across process_dir calls — intentionally NOT local
 i=0
 
+: > "$tmpdir/discovered"
+
 process_dir() {
   local dir="$1"
   local find_out="$tmpdir/.find-stdout"
@@ -76,7 +78,7 @@ process_dir() {
   # exit non-zero, which would otherwise silently under-count skills.
   # NUL-delimited (-print0 / sort_nul_file / read -d '') so a path containing a
   # literal newline can't desync record boundaries — paths here are untrusted.
-  if ! find -L "$dir" -name "SKILL.md" -type f -not -path '*/.trash/*' -print0 >"$find_out" 2>"$find_err"; then
+  if ! find -L "$dir" -path '*/.trash' -prune -o -name "SKILL.md" -type f -not -path '*/.trash/*' -print0 >"$find_out" 2>"$find_err"; then
     echo "Warning: find encountered errors while scanning $dir (broken symlinks or permission issues may cause skills to be missed):" >&2
     cat "$find_err" >&2
   fi
@@ -86,6 +88,7 @@ process_dir() {
     local mtime dp is_new
     mtime=$(date -u -r "$file" +%Y-%m-%dT%H:%M:%SZ)
     dp="${file/#$HOME/~}"
+    printf '%s\0' "$dp" >>"$tmpdir/discovered"
 
     # Keep path comparison structured so literal newlines remain part of one
     # JSON string instead of becoming ambiguous line-delimited records.
@@ -108,8 +111,46 @@ process_dir() {
   done < "$find_out"
 }
 
-[[ -d "$GLOBAL_DIR" ]] && process_dir "$GLOBAL_DIR"
-[[ -n "$CWD_SKILLS_DIR" && -d "$CWD_SKILLS_DIR" ]] && process_dir "$CWD_SKILLS_DIR"
+scan_roots=()
+if [[ -d "$GLOBAL_DIR" ]]; then scan_roots+=("$GLOBAL_DIR"); fi
+if [[ -n "$CWD_SKILLS_DIR" && -d "$CWD_SKILLS_DIR" ]]; then scan_roots+=("$CWD_SKILLS_DIR"); fi
+if (( ${#scan_roots[@]} > 0 )); then
+  for root in "${scan_roots[@]}"; do process_dir "$root"; done
+fi
+
+node -e '
+  const fs = require("fs");
+  const [discFile, resultsFile, outFile, home, ...roots] = process.argv.slice(1);
+  const raw = fs.readFileSync(discFile);
+  const discovered = new Set();
+  let start = 0;
+  for (let k = 0; k < raw.length; k += 1) {
+    if (raw[k] === 0) {
+      discovered.add(raw.subarray(start, k).toString());
+      start = k + 1;
+    }
+  }
+  const results = JSON.parse(fs.readFileSync(resultsFile, "utf8"));
+  const validRoots = roots.filter(Boolean);
+  const removed = [];
+  for (const skill of results.skills || []) {
+    const cached = skill.path;
+    const expanded = cached.startsWith("~/") ? home + cached.slice(1) : cached;
+    if (!validRoots.some(root => expanded.startsWith(root + "/"))) continue;
+    if (!discovered.has(cached)) removed.push(cached);
+  }
+  fs.writeFileSync(outFile, removed.map(entry => entry + "\0").join(""));
+' "$tmpdir/discovered" "$RESULTS_JSON" "$tmpdir/.removals" "$HOME" "${scan_roots[@]:-}" 2>/dev/null || true
+
+while IFS= read -r -d '' removed_path; do
+  jq -n \
+    --arg path "$removed_path" \
+    --argjson is_new false \
+    --argjson removed true \
+    '{path:$path,mtime:null,is_new:$is_new,removed:$removed}' \
+    > "$tmpdir/$i.json"
+  i=$((i+1))
+done < "$tmpdir/.removals"
 
 if [[ $i -eq 0 ]]; then
   echo "[]"

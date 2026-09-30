@@ -79,12 +79,12 @@ function parseCounts(combined) {
   let tapFailed = 0;
   let tapSeen = false;
   for (const line of lines) {
-    if (/^ok\b/.test(line.trim())) {
+    const trimmed = line.trim();
+    if (/^ok\b/.test(trimmed) || /^not ok\b/.test(trimmed)) {
       tapSeen = true;
-      tapPassed += 1;
-    } else if (/^not ok\b/.test(line.trim())) {
-      tapSeen = true;
-      tapFailed += 1;
+      if (/#\s*TODO\b/i.test(trimmed)) continue;
+      if (trimmed.startsWith('ok')) tapPassed += 1;
+      else tapFailed += 1;
     }
   }
   if (tapSeen) {

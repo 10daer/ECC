@@ -46,7 +46,7 @@ console.log('\nSkill stocktake discovery tests:');
 test('both scanners use canonical, error-visible, NUL-delimited discovery', () => {
   for (const scriptPath of [scanScript, quickDiffScript]) {
     const source = fs.readFileSync(scriptPath, 'utf8');
-    assert.match(source, /find -L "\$dir" -name "SKILL\.md" -type f -not -path '\*\/\.trash\/\*' -print0/);
+    assert.match(source, /find -L "\$dir" -path '\*\/\.trash' -prune -o -name "SKILL\.md" -type f -not -path '\*\/\.trash\/\*' -print0/);
     assert.match(source, /sort_nul_file "\$find_out"/);
     assert.match(source, /records\.sort\(Buffer\.compare\)/);
     assert.doesNotMatch(source, /sort -z/, `${path.basename(scriptPath)} still requires GNU sort`);
@@ -185,6 +185,42 @@ if (process.platform === 'win32') {
         assert.strictEqual(skill.use_7d, null, skill.name);
         assert.strictEqual(skill.use_30d, null, skill.name);
       }
+    });
+
+    test('quick diff reports cached skills missing from disk as removed', () => {
+      fs.writeFileSync(
+        resultsPath,
+        JSON.stringify({
+          evaluated_at: '2000-01-01T00:00:00Z',
+          skills: [{ path: path.join(projectSkills, 'ghost-skill', 'SKILL.md') }],
+        }),
+      );
+      const result = runBash(quickDiffScript, [resultsPath], env);
+      assert.strictEqual(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.strictEqual(output.length, 4);
+      const removed = output.filter(entry => entry.removed === true);
+      assert.strictEqual(removed.length, 1);
+      assert.strictEqual(removed[0].path, path.join(projectSkills, 'ghost-skill', 'SKILL.md'));
+      assert.strictEqual(removed[0].is_new, false);
+      assert.strictEqual(removed[0].mtime, null);
+    });
+
+    test('quick diff does not report removals outside scanned roots', () => {
+      fs.writeFileSync(
+        resultsPath,
+        JSON.stringify({
+          evaluated_at: '2099-01-01T00:00:00Z',
+          skills: [{ path: path.join(tempRoot, 'elsewhere', 'other', 'SKILL.md') }],
+        }),
+      );
+      const result = runBash(quickDiffScript, [resultsPath], env);
+      assert.strictEqual(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.strictEqual(output.length, 3);
+      assert.ok(output.every(entry => entry.is_new === true));
+      assert.ok(!output.some(entry => entry.removed === true));
+      assert.ok(!output.some(entry => entry.path.includes('elsewhere')));
     });
   } catch (error) {
     console.log(`  ✗ fixture setup: ${error.message}`);
