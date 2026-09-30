@@ -148,7 +148,6 @@ if (process.platform === 'win32') {
   }
 }
 
-
 if (process.platform !== 'win32') {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-stocktake-inventory-'));
   try {
@@ -202,20 +201,38 @@ if (process.platform !== 'win32') {
 
     for (const [scope, skillsDir] of [['global', globalSkills], ['project', projectSkills]]) {
       test(`scan rejects incomplete ${scope} discovery and cleans temporary files`, () => {
-        const cyclePath = path.join(skillsDir, 'cycle');
+        const binDir = path.join(tempRoot, `${scope}-bin`);
         const scanTmp = path.join(tempRoot, `${scope}-scan-tmp`);
+        fs.mkdirSync(binDir);
         fs.mkdirSync(scanTmp);
-        fs.symlinkSync(skillsDir, cyclePath, 'dir');
-        try {
-          const result = runBash(scanScript, [], { ...env, TMPDIR: scanTmp });
-          assert.strictEqual(result.status, 1, 'A failed find must not publish a partial inventory');
-          assert.strictEqual(result.stdout, '', 'Incomplete discovery must not produce inventory JSON');
-          assert.match(result.stderr, /Error: find encountered errors while scanning/);
-          assert.ok(result.stderr.includes(cyclePath), 'Preserve the failing path from find stderr');
-          assert.deepStrictEqual(fs.readdirSync(scanTmp), [], 'Clean discovery files on failure');
-        } finally {
-          fs.unlinkSync(cyclePath);
-        }
+        const findResult = spawnSync('bash', ['-c', 'command -v find'], { encoding: 'utf8' });
+        assert.strictEqual(findResult.status, 0, findResult.stderr);
+        const realFind = findResult.stdout.trim();
+        assert.ok(path.isAbsolute(realFind), 'Resolve the real find before overriding PATH');
+        // Directory cycles do not fail consistently across GNU and BSD find.
+        // Emit a real partial record, then fail only the selected scope.
+        fs.writeFileSync(path.join(binDir, 'find'), [
+          '#!/usr/bin/env bash',
+          'if [[ "$2" == "$ECC_TEST_FIND_DIR" ]]; then',
+          '  printf "%s\\0" "$ECC_TEST_FIND_PARTIAL"',
+          '  printf "fixture find failure: %s\\n" "$ECC_TEST_FIND_DIR" >&2',
+          '  exit 1',
+          'fi',
+          'exec "$ECC_TEST_REAL_FIND" "$@"',
+          '',
+        ].join('\n'), { mode: 0o755 });
+        const result = runBash(scanScript, [], {
+          ...env, TMPDIR: scanTmp,
+          PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+          ECC_TEST_FIND_DIR: skillsDir,
+          ECC_TEST_FIND_PARTIAL: path.join(skillsDir, 'active', 'SKILL.md'),
+          ECC_TEST_REAL_FIND: realFind,
+        });
+        assert.strictEqual(result.status, 1, 'A failed find must not publish a partial inventory');
+        assert.strictEqual(result.stdout, '', 'Incomplete discovery must not produce inventory JSON');
+        assert.match(result.stderr, /Error: find encountered errors while scanning/);
+        assert.ok(result.stderr.includes(`fixture find failure: ${skillsDir}`), 'Preserve find stderr');
+        assert.deepStrictEqual(fs.readdirSync(scanTmp), [], 'Clean discovery files on failure');
       });
     }
 
@@ -276,7 +293,6 @@ if (process.platform !== 'win32') {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 }
-
 
 if (process.platform !== 'win32') {
   const skillSource = fs.readFileSync(path.join(repoRoot, 'skills', 'skill-stocktake', 'SKILL.md'), 'utf8');
