@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { EventEmitter } = require('events');
 const { startOwnedChild, withOwnedChildren, withCleanup } = require('./helpers/state-store-worker');
 const { createStateStore } = require('../../scripts/lib/state-store');
 
@@ -60,6 +61,37 @@ async function run() {
   }
 
   console.log('\n=== Testing state-store concurrency ===\n');
+
+  await test('owned fixtures wait for exit, both pipes, and IPC when aggregate close is absent', async () => {
+    const events = ['exit', 'stdout', 'stderr', 'disconnect'];
+    for (const last of events) {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.stdout.destroy = () => child.stdout.emit('close');
+      child.stderr.destroy = () => child.stderr.emit('close');
+      child.connected = true;
+      child.pid = 12345;
+      child.disconnect = () => { child.connected = false; };
+      const signals = [];
+      const client = startOwnedChild(WORKER, [], {
+        fork: () => child, platform: 'linux', kill: (...args) => signals.push(args)
+      });
+      child.emit('spawn');
+      const stopping = client.stop();
+      const emit = event => {
+        if (event === 'exit') child.emit('exit', 0, null);
+        else if (event === 'disconnect') child.emit('disconnect');
+        else child[event].emit('close');
+      };
+      for (const event of events.filter(event => event !== last)) emit(event);
+      assert.strictEqual(client.diagnostics.closed, false, `Must wait for ${last}`);
+      emit(last);
+      await stopping;
+      assert.strictEqual(client.diagnostics.closed, true);
+      assert.deepStrictEqual(signals, [], 'Fully closed fixtures need no forced termination');
+    }
+  });
 
   await test('closing an old reader preserves a task saved by the real CLI', async dbPath => {
     const reader = await createStateStore({ dbPath });

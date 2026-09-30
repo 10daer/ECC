@@ -30,11 +30,12 @@ function startOwnedChild(script, args = [], dependencies = {}) {
   let child;
   try {
     fs.mkdirSync(home); fs.mkdirSync(tmp);
-    const dependencyRoot = path.resolve(path.dirname(require.resolve('sql.js/package.json')), '..');
+    // Absolute fixture paths resolve dependencies from the checkout, even with
+    // an isolated cwd. No package-private metadata or NODE_PATH is needed.
     child = forkChild(script, args, {
       execPath: process.execPath, execArgv: [], shell: false, detached: platform !== 'win32',
       cwd: root, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      env: { PATH: path.dirname(process.execPath), NODE_PATH: dependencyRoot,
+      env: { PATH: path.dirname(process.execPath),
         HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
         TMPDIR: tmp, TMP: tmp, TEMP: tmp, NODE_USE_ENV_PROXY: '0' },
     });
@@ -47,6 +48,8 @@ function startOwnedChild(script, args = [], dependencies = {}) {
   const closeWaiters = new Set();
   let ownedPid = null;
   let closed = false;
+  let ipcClosed = false;
+  const closedStreams = new Set();
   let reaped = false;
   let exitCode = null;
   let exitSignal = null;
@@ -59,17 +62,25 @@ function startOwnedChild(script, args = [], dependencies = {}) {
     if (!failed) { failed = true; failure = error; }
     for (const waiter of [...waiters]) waiter.reject(error);
   };
+  const markClosed = () => {
+    closed = true;
+    for (const done of [...closeWaiters]) done(true);
+  };
+  // Some Node versions omit the aggregate close event after a parent-initiated
+  // IPC disconnect. Require public confirmation of every owned resource instead.
+  const checkClosed = () => {
+    if (reaped && ipcClosed && closedStreams.size === 2) markClosed();
+  };
+  child.once('disconnect', () => { ipcClosed = true; checkClosed(); });
   child.once('spawn', () => { if (Number.isInteger(child.pid) && child.pid > 0) ownedPid = child.pid; });
   child.on('error', fail);
   child.once('exit', (code, signal) => {
     reaped = true; exitCode = code; exitSignal = signal;
     const error = new Error(`Fixture exited (${code}, ${signal || 'no signal'}): ${stderr}`);
     for (const waiter of [...waiters]) waiter.reject(error);
+    checkClosed();
   });
-  child.once('close', () => {
-    closed = true;
-    for (const done of [...closeWaiters]) done(true);
-  });
+  child.once('close', markClosed);
   child.on('message', message => {
     for (const observer of [...observers]) {
       try { observer(message); } catch (error) { fail(error); }
@@ -77,6 +88,7 @@ function startOwnedChild(script, args = [], dependencies = {}) {
     for (const waiter of [...waiters]) waiter.check(message);
   });
   for (const stream of [child.stdout, child.stderr]) {
+    stream.once('close', () => { closedStreams.add(stream); checkClosed(); });
     stream.on('data', data => {
       captured += data.length;
       if (captured > 128 * 1024) { fail(new Error('Fixture output exceeded 128 KiB')); return; }

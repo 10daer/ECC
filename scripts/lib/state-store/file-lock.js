@@ -73,7 +73,10 @@ function acquireLock(dbPath, timeoutMs) {
     try {
       descriptor = fs.openSync(lockPath, 'wx', 0o600);
     } catch (error) {
-      if (!hasCode(error, 'EEXIST')) throw error;
+      // Windows may report EPERM while the previous owner's unlinked file is
+      // pending deletion. Retry exclusive creation within the same deadline.
+      const pendingDelete = process.platform === 'win32' && hasCode(error, 'EPERM');
+      if (!hasCode(error, 'EEXIST') && !pendingDelete) throw error;
       const remaining = deadline - performance.now();
       if (remaining <= 0) {
         const busy = new Error(`State store is busy: ${dbPath}. Retry after the other ECC operation finishes. `
