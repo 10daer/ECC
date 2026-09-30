@@ -547,6 +547,12 @@ impl Config {
         })
     }
 
+    #[cfg(test)]
+    fn legacy_global_config_path() -> PathBuf {
+        Self::config_root().join(".claude").join("ecc2.toml")
+    }
+
+    #[cfg(not(test))]
     fn legacy_global_config_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -1125,6 +1131,17 @@ focus_metrics = "e"
             "tests must never resolve the real user config, got {}",
             path.display()
         );
+    }
+
+    #[test]
+    fn legacy_config_path_under_test_is_sandboxed_away_from_user_home() {
+        let path = Config::legacy_global_config_path();
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "tests must never read the real legacy user config, got {}",
+            path.display()
+        );
+        assert!(path.ends_with(".claude/ecc2.toml"));
     }
 
     #[test]
