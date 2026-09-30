@@ -300,10 +300,14 @@ a switch).
 
 ## Include filters
 
-Basename include globs (`--include`, `-g`, `--glob`, `-name`, PowerShell
-`-Filter`/`-Include`) that all miss the target stop its stem from crediting. An
-include glob past the matching bounds admits the target (the stem, scope and
-exclusion checks still apply); a malformed one does not.
+Include globs (`--include`, `-g`, `--glob`, `-name`, `tree -P`, PowerShell
+`-Filter`/`-Include`, the `Grep` tool's `glob`) that all miss the target stop
+its stem from crediting. A basename glob is matched against the target's file
+name. A glob with a directory part is matched against the target's path
+relative to the search root only for ripgrep and the `Grep` tool, where a
+leading `**/` lets it start at any directory; the other tools match names only,
+so such a glob admits nothing. An include glob that is malformed, past the
+matching bounds, or one of more than 32 filters admits nothing.
 
 ## Glob matching without RegExp
 

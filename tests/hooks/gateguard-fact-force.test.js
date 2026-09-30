@@ -5632,6 +5632,37 @@ function runTests() {
     });
   }
 
+  // --- Directory-qualified include globs restrict the search ---
+  const longInclude = `${'a'.repeat(300)}*.py`;
+  const pathIncludeCases = [
+    ['rg include in another directory', 'lib/fooXjs.js', "rg -g 'src/*.js' fooXjs .", false],
+    ['rg --glob include in another directory', 'src/widget.py', 'rg --glob=docs/*.py widget .', false],
+    ['rg recursive include of another directory', 'src/widget.py', "rg -g 'lib/**' widget .", false],
+    ['rg include anchored at the search root', 'vendor/src/widget.py', "rg -g 'src/*.py' widget .", false],
+    ['rg include that does not cross a directory', 'src/deep/widget.py', "rg -g 'src/*.py' widget .", false],
+    ['rg include relative to a narrower search path', 'src/widget.py', "rg -g 'src/*.py' widget src", false],
+    ['Grep include in another directory', 'src/widget.py', { pattern: 'widget', glob: 'lib/*.py' }, false],
+    ['grep --include matches base names only', 'src/widget.py', 'grep -r --include=src/*.py widget .', false],
+    ['find -name with a slash matches nothing', 'src/widget.py', "find . -name 'src/widget.py'", false],
+    ['PowerShell -Include with a path matches nothing', 'src/widget.py', 'Get-ChildItem -Recurse -Include src/widget.py', false],
+    ['rg include past the length bound admits nothing', 'src/widget.py', `rg -g '${longInclude}' widget .`, false],
+    ['rg include of the target directory', 'src/widget.py', "rg -g 'src/*.py' widget .", true],
+    ['rg include with a leading slash', 'src/widget.py', "rg -g '/src/*.py' widget .", true],
+    ['rg include with a leading **/', 'vendor/src/widget.py', "rg -g '**/src/*.py' widget .", true],
+    ['rg recursive include of the target directory', 'src/deep/widget.py', "rg -g 'src/**' widget .", true],
+    ['rg include relative to the search path', 'src/deep/widget.py', "rg -g 'deep/*.py' widget src", true],
+    ['Grep include of the target directory', 'src/widget.py', { pattern: 'widget', glob: 'src/**/*.py' }, true]
+  ];
+  for (const [label, rel, search, credited] of pathIncludeCases) {
+    gateCase(`path include: ${label}`, () => {
+      const input = typeof search === 'string' ? { command: search } : { ...search, path: creditRoot };
+      const tool = typeof search !== 'string' ? 'Grep' : /^Get-ChildItem/.test(search) ? 'PowerShell' : 'Bash';
+      const out = creditEdit(`${creditRoot}/${rel}`, exclusionTurn(tool, input));
+      if (credited) assertCredited(out, label);
+      else assertNotCredited(out, label);
+    });
+  }
+
   // --- Every PowerShell spelling of -Exclude is an exclusion ---
   const psExcludeDenied = [
     'Get-ChildItem -Recurse -ex widget.py',

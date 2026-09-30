@@ -465,13 +465,37 @@ function filtersAdmitTarget(item, ctx, stem) {
   return !exclusions.some(exclusion => exclusionCoversTarget(exclusion, segments, stem));
 }
 
+function scopeRelativeSegments(item, ctx) {
+  const scopes = item.scopes || (item.scope ? [item.scope] : []);
+  const relatives = [];
+  for (const parts of scopes) {
+    const scope = ctx.resolveDir(...parts);
+    if (isInsideDir(ctx.targetKey, scope)) relatives.push(ctx.targetKey.slice(scope.replace(/\/+$/, '').length + 1).toLowerCase().split('/'));
+  }
+  return relatives;
+}
+
+function includeAdmitsTarget(include, item, ctx) {
+  const glob = normalizeFilterGlob(include);
+  const unanchored = glob.replace(/^(?:\*\*\/)+/, '');
+  if (!unanchored) return false;
+  if (isBasenameGlob(unanchored)) {
+    const segments = targetSegments(ctx);
+    return globMatches(unanchored, segments[segments.length - 1] || '', false) === true;
+  }
+  if (!item.pathIncludes) return false;
+  return scopeRelativeSegments(item, ctx).some(segments => {
+    const starts = unanchored === glob ? [0] : segments.map((_, start) => start);
+    return starts.some(start => globMatches(unanchored, segments.slice(start).join('/'), false) === true);
+  });
+}
+
 // see docs/gateguard/design-notes.md#include-filters
 function includesAdmitTarget(item, ctx) {
   const includes = Array.isArray(item.includes) ? item.includes : [];
   if (includes.length === 0) return true;
-  const segments = targetSegments(ctx);
-  const base = segments[segments.length - 1] || '';
-  return includes.some(include => globMatches(normalizeFilterGlob(include).replace(/^(?:\*\*\/)+/, ''), base, false) !== false);
+  if (includes.length > MAX_FILTERS_PER_SEARCH) return false;
+  return includes.some(include => includeAdmitsTarget(include, item, ctx));
 }
 
 function isBasenameGlob(glob) {
@@ -485,7 +509,7 @@ function grepToolFilters(glob) {
     if (part.startsWith('!')) filters.exclusions.push(part.slice(1));
     else {
       filters.positives.push(part);
-      if (isBasenameGlob(part)) filters.includes.push(part);
+      filters.includes.push(part);
     }
   }
   return filters;
@@ -513,7 +537,7 @@ function applyShellFilterArg(kind, args, i, filters) {
     indexes.forEach(index => filters.dropped.add(index));
   };
   const include = value => {
-    if (isBasenameGlob(value)) filters.includes.push(value);
+    if (value) filters.includes.push(value);
   };
   if (kind.startsWith('git ') && GIT_EXCLUDE_PATHSPEC.test(arg)) {
     exclude(arg.replace(GIT_EXCLUDE_PATHSPEC, ''), [i]);
@@ -657,7 +681,7 @@ function powershellSearchFilters(kind, args, filters) {
         filters.exclusions.push(...filter.globs);
         for (let k = i; k <= filter.end; k++) filters.dropped.add(k);
       } else {
-        filter.globs.filter(isBasenameGlob).forEach(glob => filters.includes.push(glob));
+        filter.globs.filter(Boolean).forEach(glob => filters.includes.push(glob));
       }
       i = filter.end;
     } else if (/^-[A-Za-z]/.test(args[i]) && powershellParam(kind, args[i]).name === null) {
@@ -700,6 +724,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
         dirs: explicit ? [[explicit]] : [],
         scope: [explicit || '.'],
         detail,
+        pathIncludes: true,
         ...filters
       }];
     }
@@ -786,6 +811,7 @@ function createSearchEvidence({ quoteAwareSegments, commandBasename, SHELL_SEGME
         detail: tokens.join(' '),
         exclusions: filters.exclusions,
         includes: filters.includes,
+        pathIncludes: kind === 'rg',
         opaque: filters.opaque
       });
     });

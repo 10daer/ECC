@@ -1,6 +1,6 @@
 {
   "name": "bypass-search-filters",
-  "description": "Searches that mention the target but never searched it: exclusion globs, bracket classes, PowerShell -Exclude spellings, stdin searches, the target as operand, another directory, a generic stem and a missed include; then three controls whose filters leave the target in scope.",
+  "description": "Searches that mention the target but never searched it: exclusion globs, bracket classes, PowerShell -Exclude spellings, stdin searches, the target as operand, another directory, a generic stem, a missed include and a directory-qualified include of another directory; then four controls whose filters leave the target in scope.",
   "files": {
     "src/rates/converter.js": "function converterValue(x) {\n  return x;\n}\n",
     "src/rates/rounding.js": "function roundingValue(x) {\n  return x;\n}\n",
@@ -19,7 +19,9 @@
     "src/rates/settle.js": "function settleValue(x) {\n  return x;\n}\n",
     "src/rates/clearing.js": "function clearingValue(x) {\n  return x;\n}\n",
     "src/rates/netting.js": "function nettingValue(x) {\n  return x;\n}\n",
-    "lib/rates/fallback.js": "function fallbackValue(x) {\n  return x;\n}\n"
+    "lib/rates/fallback.js": "function fallbackValue(x) {\n  return x;\n}\n",
+    "lib/rates/sweep.js": "function sweepValue(x) {\n  return x;\n}\n",
+    "src/rates/sweep.js": "function sweepValue(x) {\n  return x;\n}\n"
   },
   "steps": [
     {
@@ -1819,6 +1821,220 @@
           "new_string": "  return Math.round(x * 100) / 100;"
         },
         "tool_use_id": "toolu_bypasssearchfilters_034"
+      },
+      "expect": "allow",
+      "mustDeny": false,
+      "redundant": true,
+      "relevantQuestions": [
+        "local-callers",
+        "quote-instruction"
+      ]
+    },
+    {
+      "id": "path-include-other-directory",
+      "note": "A directory-qualified include limits the search to another directory.",
+      "transcript": [
+        {
+          "type": "user",
+          "uuid": "bypass-search-filters-069",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "promptId": "prompt-filters-1",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bypasssearchfilters_034",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "bypass-search-filters-070",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "message": {
+            "id": "msg_bypasssearchfilters_35",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bypasssearchfilters_035",
+                "name": "Bash",
+                "input": {
+                  "command": "rg -g 'src/**' sweep ."
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "bypass-search-filters-071",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "promptId": "prompt-filters-1",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bypasssearchfilters_035",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "bypass-search-filters-072",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "message": {
+            "id": "msg_bypasssearchfilters_36",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bypasssearchfilters_036",
+                "name": "Edit",
+                "input": {
+                  "file_path": "{{root}}/lib/rates/sweep.js",
+                  "old_string": "  return x;",
+                  "new_string": "  return Math.round(x * 100) / 100;"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "payload": {
+        "session_id": "sess-bypass-filters",
+        "transcript_path": "{{transcript}}",
+        "cwd": "{{root}}",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+          "file_path": "{{root}}/lib/rates/sweep.js",
+          "old_string": "  return x;",
+          "new_string": "  return Math.round(x * 100) / 100;"
+        },
+        "tool_use_id": "toolu_bypasssearchfilters_036"
+      },
+      "expect": "deny",
+      "mustDeny": true,
+      "redundant": false,
+      "relevantQuestions": [
+        "local-callers",
+        "quote-instruction"
+      ]
+    },
+    {
+      "id": "path-include-matches-target",
+      "note": "Control: the directory-qualified include covers the target, so the search counts.",
+      "transcript": [
+        {
+          "type": "user",
+          "uuid": "bypass-search-filters-073",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "promptId": "prompt-filters-1",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bypasssearchfilters_036",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "bypass-search-filters-074",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "message": {
+            "id": "msg_bypasssearchfilters_37",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bypasssearchfilters_037",
+                "name": "Bash",
+                "input": {
+                  "command": "rg -g 'src/**' sweep ."
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "bypass-search-filters-075",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "promptId": "prompt-filters-1",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bypasssearchfilters_037",
+                "content": "ok"
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "bypass-search-filters-076",
+          "sessionId": "sess-bypass-filters",
+          "isSidechain": false,
+          "message": {
+            "id": "msg_bypasssearchfilters_38",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bypasssearchfilters_038",
+                "name": "Edit",
+                "input": {
+                  "file_path": "{{root}}/src/rates/sweep.js",
+                  "old_string": "  return x;",
+                  "new_string": "  return Math.round(x * 100) / 100;"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "payload": {
+        "session_id": "sess-bypass-filters",
+        "transcript_path": "{{transcript}}",
+        "cwd": "{{root}}",
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+          "file_path": "{{root}}/src/rates/sweep.js",
+          "old_string": "  return x;",
+          "new_string": "  return Math.round(x * 100) / 100;"
+        },
+        "tool_use_id": "toolu_bypasssearchfilters_038"
       },
       "expect": "allow",
       "mustDeny": false,
