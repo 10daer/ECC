@@ -141,6 +141,7 @@ function runTests() {
 
     assert.ok(registration, 'The evaluator should be registered for Stop');
     assert.notStrictEqual(registration.async, true, 'The evaluator must not defer context to a later turn');
+    assert.ok(registration.timeout > 30, 'The synchronous evaluator needs time beyond its 30-second child-process budget');
   })) passed++; else failed++;
 
   if (test('allows a large Stop JSON payload to drain before exiting', () => {
