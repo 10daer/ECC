@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { assertWithinTrustedRoot } = require('../path-safety');
 const { mergeHooksMetadata, metadataPathFor } = require('../hooks-config');
+const { writeFileNoFollow: guardedWriteFile } = require('./guarded-write');
 const { assertClaudeSettingsPath } = require('./claude-settings');
 
 function getManagedDestination(
@@ -124,66 +125,15 @@ function createChangedDestinationError(action) {
   );
 }
 
-function getStableParentStat(filePath, action) {
-  const parentStat = fs.lstatSync(path.dirname(filePath));
-  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
-    throw createChangedDestinationError(action);
-  }
-  return parentStat;
-}
-
-function assertPinnedWriteDestination(
-  filePath,
-  fileDescriptor,
-  expectedParentStat,
-  trustedRoot,
-  action
-) {
-  const liveDestination = getManagedDestination(filePath, trustedRoot, action);
-  if (path.resolve(liveDestination.managedPath) !== path.resolve(filePath)) {
-    throw createChangedDestinationError(action);
-  }
-
-  const liveParentStat = getStableParentStat(filePath, action);
-  if (!hasSameFileIdentity(expectedParentStat, liveParentStat)) {
-    throw createChangedDestinationError(action);
-  }
-
-  const descriptorStat = fs.fstatSync(fileDescriptor);
-  const livePathStat = fs.lstatSync(liveDestination.managedPath);
-  if (
-    !descriptorStat.isFile()
-    || !livePathStat.isFile()
-    || livePathStat.isSymbolicLink()
-    || !hasSameFileIdentity(descriptorStat, livePathStat)
-  ) {
-    throw createChangedDestinationError(action);
-  }
-}
-
-function writeFileNoFollow(filePath, content, mode, trustedRoot, action) {
-  const expectedParentStat = getStableParentStat(filePath, action);
-  const flags = fs.constants.O_WRONLY
-    | fs.constants.O_CREAT
-    | (fs.constants.O_NOFOLLOW || 0);
-  const fileDescriptor = fs.openSync(filePath, flags, mode);
-
-  try {
-    assertPinnedWriteDestination(
-      filePath,
-      fileDescriptor,
-      expectedParentStat,
-      trustedRoot,
-      action
-    );
-    fs.ftruncateSync(fileDescriptor, 0);
-    fs.writeFileSync(fileDescriptor, content);
-    if (mode !== undefined) {
-      fs.fchmodSync(fileDescriptor, mode);
-    }
-  } finally {
-    fs.closeSync(fileDescriptor);
-  }
+function writeFileNoFollow(filePath, content, mode, trustedRoot, action, writeOptions = {}) {
+  return guardedWriteFile(filePath, content, {
+    ...writeOptions,
+    mode,
+    action,
+    validateDestination(destinationPath) {
+      return getManagedDestination(destinationPath, trustedRoot, action).managedPath;
+    },
+  });
 }
 
 function readFileWithMetadataNoFollow(filePath, encoding) {
@@ -228,7 +178,7 @@ function assertClaudeSettingsDestination(operation, trustedRoot, target = null) 
   assertClaudeSettingsPath(operation.destinationPath, trustedRoot);
 }
 
-function writeContainedFile(destinationPath, content, trustedRoot, action, mode) {
+function writeContainedFile(destinationPath, content, trustedRoot, action, mode, writeOptions) {
   const preparedDestination = prepareContainedWriteDestination(destinationPath, trustedRoot, action);
   const finalDestination = getManagedDestination(
     preparedDestination,
@@ -240,7 +190,8 @@ function writeContainedFile(destinationPath, content, trustedRoot, action, mode)
     content,
     mode,
     trustedRoot,
-    action
+    action,
+    writeOptions
   );
   return finalDestination;
 }
@@ -350,14 +301,12 @@ function cleanupEmptyParentDirs(filePath, stopAt) {
 
 module.exports = {
   assertClaudeSettingsDestination,
-  assertPinnedWriteDestination,
   cleanupEmptyParentDirs,
   copyContainedFile,
   createChangedDestinationError,
   ensureContainedParentDir,
   getContainedExistingPath,
   getManagedDestination,
-  getStableParentStat,
   hasSameFileIdentity,
   prepareContainedWriteDestination,
   readFileNoFollow,
@@ -366,5 +315,5 @@ module.exports = {
   readJsonNoFollow,
   removeContainedPath,
   writeContainedFile,
-  writeFileNoFollow,
+  writeFileNoFollow
 };

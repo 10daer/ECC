@@ -118,8 +118,6 @@ function jsonContainsSubset(actualValue, expectedValue) {
   return actualValue === expectedValue;
 }
 
-const JSON_REMOVE_SENTINEL = Symbol('json-remove');
-
 function deepRemoveJsonSubset(currentValue, managedValue) {
   if (isPlainObject(managedValue)) {
     if (!isPlainObject(currentValue)) {
@@ -164,6 +162,8 @@ function deepRemoveJsonSubset(currentValue, managedValue) {
   return currentValue === managedValue ? JSON_REMOVE_SENTINEL : currentValue;
 }
 
+const JSON_REMOVE_SENTINEL = Symbol('json-remove');
+
 module.exports = {
   JSON_REMOVE_SENTINEL,
   cloneJsonValue,
@@ -176,5 +176,5 @@ module.exports = {
   getOperationTextContent,
   isPlainObject,
   jsonContainsSubset,
-  parseJsonLikeValue,
+  parseJsonLikeValue
 };
