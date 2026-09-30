@@ -125,10 +125,15 @@ function run() {
     }
 
     snippets.forEach(snippet => {
+      const encoded = Buffer.from(snippet.code, 'utf8').toString('base64');
       const result = spawnSync(
         python.command,
-        [...python.prefix, '-c', "import sys; compile(sys.stdin.read(), '<bengali-nlp>', 'exec')"],
-        { input: snippet.code, encoding: 'utf8' },
+        [
+          ...python.prefix,
+          '-c',
+          "import base64, sys; compile(base64.b64decode(sys.stdin.buffer.read()).decode('utf-8'), '<bengali-nlp>', 'exec')",
+        ],
+        { input: encoded, encoding: 'utf8' },
       );
       assert.strictEqual(
         result.status,
