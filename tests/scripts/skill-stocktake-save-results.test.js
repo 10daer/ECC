@@ -56,8 +56,10 @@ if (process.platform === 'win32') {
         batch_progress: { completed: 1, total: 2 },
         skills: { unchanged, updated: { verdict: 'Improve' } },
       }));
-      const input = { skills: { updated: { verdict: 'Keep' }, added: { verdict: 'Keep' } } };
-      if (mode) input.mode = mode;
+      const input = {
+        skills: { updated: { verdict: 'Keep' }, added: { verdict: 'Keep' } },
+        ...(mode ? { mode } : {}),
+      };
       const result = save(resultsPath, input);
       assert.strictEqual(result.status, 0, result.stderr);
       const output = readResults(resultsPath);

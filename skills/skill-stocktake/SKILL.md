@@ -40,6 +40,8 @@ If the project has no `.claude/skills/` directory, only global skills and comman
 | Quick Scan | `results.json` exists (default) | 5–10 min |
 | Full Stocktake | `results.json` absent, or `/skill-stocktake full` | 20–30 min |
 
+The shell scripts require Bash, Node.js, and `jq` on `PATH`.
+
 **Results cache:** `~/.claude/skills/skill-stocktake/results.json`
 
 ## Quick Scan Flow
@@ -61,10 +63,30 @@ Re-evaluate only skills that have changed since the last run (5–10 min).
 
 ### Phase 1 — Inventory
 
-Capture the inventory:
+Run this entire block in **one Bash invocation**. It prints the inventory for the agent and initializes a new full run only when there is no unfinished run to resume:
 
 ```bash
-SCAN_JSON=$(bash ~/.claude/skills/skill-stocktake/scripts/scan.sh)
+(
+  set -euo pipefail
+  SCAN_JSON=$(bash ~/.claude/skills/skill-stocktake/scripts/scan.sh)
+  printf '%s\n' "$SCAN_JSON"
+  RESULTS_JSON=~/.claude/skills/skill-stocktake/results.json
+
+  CACHE_STATUS=""
+  if [[ -f "$RESULTS_JSON" ]]; then
+    CACHE_STATUS=$(jq -r '.batch_progress.status // ""' "$RESULTS_JSON")
+  fi
+  if [[ "$CACHE_STATUS" == "in_progress" ]]; then
+    printf '%s\n' 'Resuming existing full evaluation; cache preserved.' >&2
+  else
+    INITIAL_RESULTS=$(printf '%s\n' "$SCAN_JSON" | jq '{
+      mode: "full", skills: {},
+      batch_progress: {total: (.skills | length), evaluated: 0, status: "in_progress"}
+    }')
+    bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
+      "$RESULTS_JSON" --replace <<< "$INITIAL_RESULTS"
+  fi
+)
 ```
 
 The script enumerates skill files, extracts frontmatter, and collects UTC mtimes.
@@ -82,48 +104,40 @@ Scanning:
 
 Usage counts come from the optional `~/.claude/observations.jsonl` file (overridable with `SKILL_STOCKTAKE_OBSERVATIONS`), which Claude Code does not create by default. When the file is absent, `use_7d` and `use_30d` are JSON `null`; display them as **unmeasured** in inventory and summary tables. A numeric `0` means the file exists but contains no matching Read observations in that window. Missing usage data is never evidence for retiring a skill.
 
-After a successful scan, initialize the cache **once at the start of a new Full Stocktake**:
-
-```bash
-INITIAL_RESULTS=$(printf '%s\n' "$SCAN_JSON" | jq '{
-  mode: "full", skills: {},
-  batch_progress: {total: (.skills | length), evaluated: 0, status: "in_progress"}
-}')
-bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
-  ~/.claude/skills/skill-stocktake/results.json --replace <<< "$INITIAL_RESULTS"
-```
-
-`--replace` replaces the entire cached evaluation, removing archived or deleted skills and stale metadata. Do not run initialization when resuming an `in_progress` evaluation. Later chunks, completion updates, and Quick Scans must omit `--replace` so they merge into the current run instead of losing earlier results.
+`--replace` replaces the entire cached evaluation, removing archived or deleted skills and stale metadata. The block skips initialization when resuming an `in_progress` evaluation. Later chunks, completion updates, and Quick Scans must omit `--replace` so they merge into the current run instead of losing earlier results.
 
 ### Phase 2 — Quality Evaluation
 
-Launch an Agent tool subagent (**general-purpose agent**) with the full inventory and checklist:
+Launch an Agent tool subagent (**general-purpose agent**) with the actual JSON emitted by Phase 1 and the checklist below. Copy the inventory values into the prompt itself; shell variables do not carry over into Agent calls. Include the full inventory for overlap checks and explicitly identify the paths in the current batch to evaluate. Do not send literal inventory or checklist placeholders.
 
-```text
-Agent(
-  subagent_type="general-purpose",
-  prompt="
-Evaluate the following skill inventory against the checklist.
+The subagent reads each assigned skill, applies the checklist, and returns a JSON object with a `skills` map keyed by the inventory path. Each entry includes its `path`, scanned `mtime`, `verdict`, and self-contained `reason`. Use the same path keys across all batches so merging results cannot overwrite a different skill with the same name.
 
-[INVENTORY]
+**Chunk guidance:** Process ~20 skills per subagent invocation to keep context manageable. After each chunk, wrap its returned `skills` map with `mode: "full"` and `batch_progress: {total, evaluated, status: "in_progress"}`. Set `total` to the inventory size and `evaluated` to the cumulative number of distinct evaluated paths, including saved batches. Assign this JSON to `CHUNK_RESULTS` and run the following command in the **same Bash invocation as that assignment**:
 
-[CHECKLIST]
+```bash
+bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
+  ~/.claude/skills/skill-stocktake/results.json <<< "$CHUNK_RESULTS"
+```
 
-Return JSON for each skill:
-{ \"verdict\": \"Keep\"|\"Improve\"|\"Update\"|\"Retire\"|\"Merge into [X]\", \"reason\": \"...\" }
-"
+After all skills are evaluated, persist completion before proceeding to Phase 3:
+
+```bash
+(
+  set -euo pipefail
+  RESULTS_JSON=~/.claude/skills/skill-stocktake/results.json
+  COMPLETED_RESULTS=$(jq -e '
+    if (.skills | length) == .batch_progress.total then
+      {skills: {}, mode: "full", batch_progress: (.batch_progress + {
+        evaluated: (.skills | length), status: "completed"
+      })}
+    else error("Inventory still has unevaluated skills") end
+  ' "$RESULTS_JSON")
+  bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
+    "$RESULTS_JSON" <<< "$COMPLETED_RESULTS"
 )
 ```
 
-The subagent reads each skill, applies the checklist, and returns per-skill JSON:
-
-`{ "verdict": "Keep"|"Improve"|"Update"|"Retire"|"Merge into [X]", "reason": "..." }`
-
-**Chunk guidance:** Process ~20 skills per subagent invocation to keep context manageable. Save intermediate results with `save-results.sh RESULTS_JSON` (without `--replace`, `status: "in_progress"`) after each chunk.
-
-After all skills are evaluated: set `status: "completed"`, proceed to Phase 3.
-
-**Resume detection:** If `status: "in_progress"` is found on startup, resume from the first unevaluated skill.
+**Resume detection:** If `status: "in_progress"` is found on startup, read the saved `skills` map and evaluate only inventory paths not already present. Preserve completed batches.
 
 Each skill is evaluated against this checklist:
 
