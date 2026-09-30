@@ -19,7 +19,8 @@ const {
   ensureDir,
   readFile,
   countInFile,
-  log
+  log,
+  output
 } = require('../lib/utils');
 
 // Read hook input from stdin (Claude Code provides transcript_path via stdin JSON)
@@ -44,9 +45,11 @@ process.stdin.on('end', () => {
 async function main() {
   // Parse stdin JSON to get transcript_path
   let transcriptPath = null;
+let stopHookActive = false;
   try {
     const input = JSON.parse(stdinData);
     transcriptPath = input.transcript_path;
+  stopHookActive = input.stop_hook_active === true;
   } catch {
     // Fallback: try env var for backwards compatibility
     transcriptPath = process.env.CLAUDE_TRANSCRIPT_PATH;
@@ -95,6 +98,21 @@ async function main() {
   // Signal to Claude that session should be evaluated for extractable patterns
   log(`[ContinuousLearning] Session has ${messageCount} messages - evaluate for extractable patterns`);
   log(`[ContinuousLearning] Save learned skills to: ${learnedSkillsPath}`);
+
+  // Stop hooks can return additionalContext as non-error feedback. Claude Code
+  // re-runs Stop hooks for that continuation with stop_hook_active=true, so
+  // only emit once to avoid an endless stop/continue loop.
+  if (!stopHookActive) {
+    output({
+      hookSpecificOutput: {
+        hookEventName: 'Stop',
+        additionalContext: [
+          `[ContinuousLearning] Session has ${messageCount} messages - evaluate for extractable patterns`,
+          `[ContinuousLearning] Save learned skills to: ${learnedSkillsPath}`
+        ].join('\n')
+      }
+    });
+  }
 
   process.exit(0);
 }

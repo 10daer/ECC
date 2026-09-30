@@ -103,6 +103,10 @@ function runTests() {
       result.stderr.includes('10 messages') || result.stderr.includes('evaluate'),
       'Should indicate evaluation'
     );
+    const payload = JSON.parse(result.stdout);
+    assert.strictEqual(payload.hookSpecificOutput.hookEventName, 'Stop');
+    assert.match(payload.hookSpecificOutput.additionalContext, /10 messages/);
+    assert.match(payload.hookSpecificOutput.additionalContext, /Save learned skills to:/);
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -113,6 +117,15 @@ function runTests() {
     assert.strictEqual(result.code, 0);
     assert.ok(!result.stderr.includes('too short'), 'Should NOT say too short');
     assert.ok(result.stderr.includes('evaluate'), 'Should trigger evaluation');
+    cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('does not re-emit the Stop nudge during the active stop cycle', () => {
+    const testDir = createTestDir();
+    const transcript = createTranscript(testDir, 10);
+    const result = runEvaluate({ transcript_path: transcript, stop_hook_active: true });
+    assert.strictEqual(result.code, 0, 'Should exit 0');
+    assert.strictEqual(result.stdout, '', 'A Stop hook must not reinject context during its continuation');
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
