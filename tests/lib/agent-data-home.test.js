@@ -551,7 +551,7 @@ function runTests() {
         USERPROFILE: undefined,
       }, () => {
         const agentDataHome = require('../../scripts/lib/agent-data-home');
-        assert.strictEqual(agentDataHome.readProjectConfigAt(configPath), sharedHome);
+        assert.strictEqual(agentDataHome.readProjectConfigAt(configPath), path.join(fs.realpathSync(homeDir), '.claude', 'shared'));
       });
     } finally {
       fs.rmSync(homeDir, { recursive: true, force: true });
