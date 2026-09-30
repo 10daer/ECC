@@ -129,7 +129,7 @@ and hard-linked targets and NotebookEdit calls always get the full questions. Ot
 questions. Each question has a stable id (`importers`, `public-api`,
 `local-callers`, `callers`, `no-duplicate`, `data-schema`,
 `quote-instruction`, and one per class question), listed in
-`docs/gateguard/design-notes.md`.
+`docs/gateguard/change-profile.md`.
 
 ### Questions by target class
 

@@ -21,7 +21,7 @@ with the decision the gate should make and why it matters:
 | `expect` | `deny` or `allow` (allow covers prior-search credit, sibling collapse, trivial edits, read-only shell commands and plain passes) |
 | `mustDeny` | Security-critical: sensitive targets, bypass attempts, mutating or destructive first commands. Any allow is a bypass. |
 | `redundant` | A denial here would repeat investigation the session already did (a scoped search that names the file, a same-turn sibling, a comment-only edit, a read-only first command). |
-| `relevantQuestions` | For code targets, the question ids the change genuinely warrants (see the question table in [design-notes.md](design-notes.md#questions-from-the-change-profile)). |
+| `relevantQuestions` | For code targets, the question ids the change genuinely warrants (see the question table in [design-notes.md](change-profile.md#questions-from-the-change-profile)). |
 
 Metrics per hook:
 
