@@ -523,16 +523,36 @@ impl Config {
         // never overwrite the developer's real config.
         struct TestConfigRoot(PathBuf);
 
+        impl TestConfigRoot {
+            fn new() -> Self {
+                let path = std::env::temp_dir()
+                    .join(format!("ecc2-test-config-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir(&path).expect("create private ECC 2 test config root");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                        .expect("restrict ECC 2 test config root permissions");
+                }
+                Self(path)
+            }
+        }
+
         impl Drop for TestConfigRoot {
             fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
+                if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!(
+                            "failed to remove ECC 2 test config root {}: {error}",
+                            self.0.display()
+                        );
+                    }
+                }
             }
         }
 
         thread_local! {
-            static ROOT: TestConfigRoot = TestConfigRoot(
-                std::env::temp_dir().join(format!("ecc2-test-config-{}", uuid::Uuid::new_v4())),
-            );
+            static ROOT: TestConfigRoot = TestConfigRoot::new();
         }
 
         ROOT.with(|root| root.0.clone())
@@ -1147,6 +1167,16 @@ focus_metrics = "e"
     #[test]
     fn config_path_under_test_is_stable_within_a_test() {
         assert_eq!(Config::config_path(), Config::config_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_root_under_test_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = Config::config_root();
+        let mode = std::fs::metadata(root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

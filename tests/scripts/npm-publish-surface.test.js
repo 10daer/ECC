@@ -36,8 +36,9 @@ function isCoveredByAncestor(target, roots) {
   return false
 }
 
-// `node scripts/<name>.js`, tolerating an optional "$SKILL_DIR/" style prefix.
-const SCRIPT_INVOCATION_RE = /node\s+(?:\$\{?SKILL_DIR\}?\/)?scripts\/([A-Za-z0-9._/-]+\.js)/g
+// `node scripts/<name>.js`, tolerating quoted ECC_ROOT or SKILL_DIR prefixes.
+const SCRIPT_INVOCATION_RE =
+  /node\s+["']?(?:\$\{?(?:ECC_ROOT|SKILL_DIR)\}?\/)?scripts\/([A-Za-z0-9._/-]+\.js)["']?/g
 
 function collectCommandScriptReferences(repoRoot) {
   const commandsDir = path.join(repoRoot, "commands")
@@ -269,6 +270,7 @@ function main() {
         "scripts/codex-git-hooks/pre-commit",
         "scripts/codex-git-hooks/pre-push",
         "scripts/setup.js",
+        "scripts/github-coordination.js",
         "scripts/codex/check-plugin-cache.js",
         ".gemini/GEMINI.md",
         ".qwen/QWEN.md",
