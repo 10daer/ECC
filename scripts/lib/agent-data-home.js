@@ -92,6 +92,8 @@ function getDefaultCursorAgentDataHome() {
 }
 
 function getDefaultClaudeAgentDataHome() {
+  const fromClaudeConfigDir = expandHomePath(process.env.CLAUDE_CONFIG_DIR);
+  if (fromClaudeConfigDir) return fromClaudeConfigDir;
   return path.join(getHomeDirFromEnv(), DEFAULT_CLAUDE_DIR_NAME);
 }
 

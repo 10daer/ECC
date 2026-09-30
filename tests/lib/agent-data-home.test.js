@@ -485,6 +485,55 @@ function runTests() {
     }
   })) passed++; else failed++;
 
+  if (test('uses CLAUDE_CONFIG_DIR outside Cursor when ECC_AGENT_DATA_HOME is unset', () => {
+    withIsolatedCwd(() => {
+      const configDir = path.join(os.tmpdir(), 'ecc-claude-config-profile');
+      withEnv({
+        ECC_AGENT_DATA_HOME: undefined,
+        CLAUDE_CONFIG_DIR: configDir,
+        CURSOR_VERSION: undefined,
+        CURSOR_PROJECT_DIR: undefined,
+      }, () => {
+        const agentDataHome = require('../../scripts/lib/agent-data-home');
+        assert.strictEqual(agentDataHome.resolveAgentDataHome(), configDir);
+        assert.strictEqual(agentDataHome.getDefaultClaudeAgentDataHome(), configDir);
+        const utils = require('../../scripts/lib/utils');
+        assert.strictEqual(utils.getClaudeDir(), configDir);
+      });
+    });
+  })) passed++; else failed++;
+
+  if (test('ECC_AGENT_DATA_HOME takes precedence over CLAUDE_CONFIG_DIR', () => {
+    withIsolatedCwd(() => {
+      const explicitHome = path.join(os.tmpdir(), 'ecc-explicit-agent-data-home');
+      withEnv({
+        ECC_AGENT_DATA_HOME: explicitHome,
+        CLAUDE_CONFIG_DIR: path.join(os.tmpdir(), 'ecc-claude-config-profile'),
+        CURSOR_VERSION: undefined,
+        CURSOR_PROJECT_DIR: undefined,
+      }, () => {
+        const agentDataHome = require('../../scripts/lib/agent-data-home');
+        assert.strictEqual(agentDataHome.resolveAgentDataHome(), explicitHome);
+      });
+    });
+  })) passed++; else failed++;
+
+  if (test('CLAUDE_CONFIG_DIR does not override the Cursor default', () => {
+    withIsolatedCwd(() => {
+      withEnv({
+        ECC_AGENT_DATA_HOME: undefined,
+        CLAUDE_CONFIG_DIR: path.join(os.tmpdir(), 'ecc-claude-config-profile'),
+        CURSOR_VERSION: '1.0.0',
+      }, () => {
+        const agentDataHome = require('../../scripts/lib/agent-data-home');
+        assert.strictEqual(
+          agentDataHome.resolveAgentDataHome(),
+          path.join(os.homedir(), '.cursor', 'ecc')
+        );
+      });
+    });
+  })) passed++; else failed++;
+
   if (test('ensureAgentDataHomeEnv sets process.env when unset', () => {
     withEnv({
       ECC_AGENT_DATA_HOME: undefined,
