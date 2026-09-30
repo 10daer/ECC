@@ -190,6 +190,7 @@ git fetch upstream main
 node scripts/dev/gateguard-eval.js --markdown
 node scripts/dev/gateguard-eval.js --markdown --baseline upstream/main --baseline 58a4a0d0
 node scripts/dev/gateguard-eval.js --json > gateguard-eval.json
+node scripts/dev/gateguard-eval.js --baseline upstream/main --sarif gateguard-eval.sarif
 node tests/hooks/gateguard-scenarios.test.js
 ```
 
@@ -198,6 +199,10 @@ node tests/hooks/gateguard-scenarios.test.js
 against it. `--corpus <dir>` points at another
 scenario directory. The script exits non-zero when the working tree has a
 mismatch, a must-deny bypass, an explicit `allow` decision or a thrown error.
+`--sarif <file>` also writes those working-tree failures as SARIF 2.1.0
+(bypasses, explicit allows and errors as `error`, other mismatches as
+`warning`) with each hook's totals in the run properties. Timing is left out,
+so the file is identical across reruns of the same tree and corpus.
 
 ## Corpus format
 

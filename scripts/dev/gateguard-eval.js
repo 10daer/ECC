@@ -396,6 +396,7 @@ function summarize(runs, table = questionTextTable()) {
       if (result.error) totals.errors += 1;
       steps.push({
         scenario: run.scenario.name,
+        file: run.scenario.file,
         step: step.id,
         expect: step.expect,
         decision: result.decision,
@@ -407,6 +408,7 @@ function summarize(runs, table = questionTextTable()) {
         irrelevant,
         missed,
         latencyMs: Number(result.latencyMs.toFixed(3)),
+        ...(result.explicitAllow ? { explicitAllow: true } : {}),
         ...(result.error ? { error: result.error } : {})
       });
     });
@@ -474,27 +476,121 @@ function renderMarkdown(report) {
   return `${lines.join('\n')}\n`;
 }
 
+const SARIF_RULES = Object.freeze([
+  {
+    id: 'gateguard/must-deny-bypass',
+    level: 'error',
+    name: 'MustDenyBypass',
+    text: 'A step that must be denied (sensitive target, bypass attempt, or mutating first command) was allowed.'
+  },
+  {
+    id: 'gateguard/explicit-allow',
+    level: 'error',
+    name: 'ExplicitAllow',
+    text: 'The hook emitted permissionDecision "allow", which skips the host permission prompt.'
+  },
+  {
+    id: 'gateguard/hook-error',
+    level: 'error',
+    name: 'HookError',
+    text: 'The hook threw or produced unparseable output for a step.'
+  },
+  {
+    id: 'gateguard/expectation-mismatch',
+    level: 'warning',
+    name: 'ExpectationMismatch',
+    text: 'The hook decision differs from the decision the scenario expects.'
+  }
+]);
+
+function sarifFindings(step) {
+  const findings = [];
+  if (step.mustDeny && step.decision !== 'deny') findings.push('gateguard/must-deny-bypass');
+  if (step.explicitAllow) findings.push('gateguard/explicit-allow');
+  if (step.error) findings.push('gateguard/hook-error');
+  if (step.decision !== step.expect && findings.length === 0) findings.push('gateguard/expectation-mismatch');
+  return findings;
+}
+
+function sarifTotals(summary) {
+  const { steps, denials, mustDenyBypasses, mismatches, explicitAllows, errors, skippedScenarios } = summary.totals;
+  return { steps, denials, mustDenyBypasses, mismatches, explicitAllows, errors, skippedScenarios };
+}
+
+/** SARIF 2.1.0 log of working-tree gate failures, with per-hook totals; timing is omitted so output is reproducible. */
+function renderSarif(report) {
+  const working = report.hooks[0].summary;
+  const levels = new Map(SARIF_RULES.map(rule => [rule.id, rule.level]));
+  const results = [];
+  for (const step of working.steps) {
+    for (const ruleId of sarifFindings(step)) {
+      results.push({
+        ruleId,
+        level: levels.get(ruleId),
+        message: { text: `${step.scenario} / ${step.step}: expected ${step.expect}, got ${step.decision} (${step.kind})` },
+        locations: [
+          {
+            physicalLocation: {
+              artifactLocation: { uri: `tests/fixtures/gateguard-scenarios/${step.file}`, uriBaseId: '%SRCROOT%' }
+            }
+          }
+        ]
+      });
+    }
+  }
+  const log = {
+    version: '2.1.0',
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    runs: [
+      {
+        tool: {
+          driver: {
+            name: 'gateguard-eval',
+            informationUri: 'https://github.com/affaan-m/ECC/blob/main/docs/gateguard/evaluation.md',
+            rules: SARIF_RULES.map(rule => ({
+              id: rule.id,
+              name: rule.name,
+              shortDescription: { text: rule.text },
+              defaultConfiguration: { level: rule.level }
+            }))
+          }
+        },
+        automationDetails: { id: 'gateguard/scenario-corpus' },
+        invocations: [{ executionSuccessful: true }],
+        properties: {
+          corpus: report.corpus,
+          hooks: report.hooks.map(hook => ({ label: hook.label, totals: sarifTotals(hook.summary) }))
+        },
+        results
+      }
+    ]
+  };
+  return `${JSON.stringify(log, null, 2)}\n`;
+}
+
 // --- CLI ---
 
 const USAGE = [
-  'Usage: node scripts/dev/gateguard-eval.js [--markdown | --json] [--baseline <ref>]... [--corpus <dir>]',
+  'Usage: node scripts/dev/gateguard-eval.js [--markdown | --json] [--baseline <ref>]... [--corpus <dir>] [--sarif <file>]',
   '',
   '  --baseline <ref>  git ref whose hook is compared with the working tree (repeatable;',
   `                    default ${DEFAULT_BASELINE})`,
   '  --corpus <dir>    scenario directory (default tests/fixtures/gateguard-scenarios)',
   '  --markdown        print markdown tables (default)',
-  '  --json            print the full report as JSON'
+  '  --json            print the full report as JSON',
+  '  --sarif <file>    also write working-tree gate failures as SARIF 2.1.0'
 ].join('\n');
 
 function parseArgs(argv) {
-  const options = { format: 'markdown', baselines: [], corpus: DEFAULT_CORPUS_DIR, help: false };
+  const options = { format: 'markdown', baselines: [], corpus: DEFAULT_CORPUS_DIR, sarif: null, help: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--markdown') options.format = 'markdown';
     else if (arg === '--json') options.format = 'json';
     else if (arg === '--help' || arg === '-h') options.help = true;
-    else if ((arg === '--baseline' || arg === '--corpus') && i + 1 < argv.length) {
+    else if ((arg === '--baseline' || arg === '--corpus' || arg === '--sarif') && i + 1 < argv.length) {
       if (arg === '--baseline') options.baselines.push(argv[++i]);
+      else if (arg === '--sarif') options.sarif = path.resolve(argv[++i]);
       else options.corpus = path.resolve(argv[++i]);
     } else fail(`unknown or incomplete argument: ${arg}\n\n${USAGE}`);
   }
@@ -533,6 +629,7 @@ async function main() {
   }
   const report = await evaluate(options);
   process.stdout.write(options.format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderMarkdown(report));
+  if (options.sarif) fs.writeFileSync(options.sarif, renderSarif(report), 'utf8');
   const working = report.hooks[0].summary.totals;
   if (working.mustDenyBypasses > 0 || working.mismatches > 0 || working.explicitAllows > 0 || working.errors > 0) {
     process.exitCode = 1;
@@ -548,4 +645,4 @@ if (!isMainThread && workerData && workerData.gateguardEval) {
   });
 }
 
-module.exports = { loadCorpus, materializeHook, runCorpus, summarize, questionsAsked, renderMarkdown, evaluate };
+module.exports = { loadCorpus, materializeHook, runCorpus, summarize, questionsAsked, renderMarkdown, renderSarif, parseArgs, evaluate };
