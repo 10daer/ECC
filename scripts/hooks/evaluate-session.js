@@ -45,11 +45,11 @@ process.stdin.on('end', () => {
 async function main() {
   // Parse stdin JSON to get transcript_path
   let transcriptPath = null;
-let stopHookActive = false;
+  let stopHookActive = false;
   try {
     const input = JSON.parse(stdinData);
     transcriptPath = input.transcript_path;
-  stopHookActive = input.stop_hook_active === true;
+    stopHookActive = input.stop_hook_active === true;
   } catch {
     // Fallback: try env var for backwards compatibility
     transcriptPath = process.env.CLAUDE_TRANSCRIPT_PATH;
@@ -114,5 +114,5 @@ let stopHookActive = false;
     });
   }
 
-  process.exit(0);
+  process.exitCode = 0;
 }

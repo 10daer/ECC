@@ -57,11 +57,13 @@ function createTranscript(dir, messageCount) {
  * Uses spawnSync to capture both stdout and stderr regardless of exit code.
  * Returns { code, stdout, stderr }.
  */
-function runEvaluate(stdinJson) {
-  const result = spawnSync('node', [evaluateScript], {
+function runEvaluate(stdinJson, preloadPath) {
+  const args = preloadPath ? ['--require', preloadPath, evaluateScript] : [evaluateScript];
+  const result = spawnSync('node', args, {
     encoding: 'utf8',
     input: JSON.stringify(stdinJson),
     timeout: 10000,
+    maxBuffer: 2 * 1024 * 1024,
   });
   return {
     code: result.status || 0,
@@ -107,6 +109,7 @@ function runTests() {
     assert.strictEqual(payload.hookSpecificOutput.hookEventName, 'Stop');
     assert.match(payload.hookSpecificOutput.additionalContext, /10 messages/);
     assert.match(payload.hookSpecificOutput.additionalContext, /Save learned skills to:/);
+    assert.ok(!result.stdout.includes('Message 1'), 'Context should not include transcript message contents');
     cleanupTestDir(testDir);
   })) passed++; else failed++;
 
@@ -127,6 +130,49 @@ function runTests() {
     assert.strictEqual(result.code, 0, 'Should exit 0');
     assert.strictEqual(result.stdout, '', 'A Stop hook must not reinject context during its continuation');
     cleanupTestDir(testDir);
+  })) passed++; else failed++;
+
+  if (test('registers the evaluator synchronously so Stop context reaches the current turn', () => {
+    const hooksPath = path.join(__dirname, '..', '..', 'hooks', 'hooks.json');
+    const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+    const registration = hooks.hooks.Stop
+      .flatMap(group => group.hooks)
+      .find(hook => hook.command.includes('stop:evaluate-session'));
+
+    assert.ok(registration, 'The evaluator should be registered for Stop');
+    assert.notStrictEqual(registration.async, true, 'The evaluator must not defer context to a later turn');
+  })) passed++; else failed++;
+
+  if (test('allows a large Stop JSON payload to drain before exiting', () => {
+    const testDir = createTestDir();
+    const transcript = createTranscript(testDir, 10);
+    const preloadPath = path.join(testDir, 'large-output-preload.js');
+    const utilsPath = path.join(__dirname, '..', '..', 'scripts', 'lib', 'utils.js');
+    const payloadSize = 512 * 1024;
+    fs.writeFileSync(preloadPath, `
+      const utils = require(${JSON.stringify(utilsPath)});
+      utils.output = payload => process.stdout.write(JSON.stringify({
+        ...payload,
+        hookSpecificOutput: {
+          ...payload.hookSpecificOutput,
+          additionalContext: 'x'.repeat(${payloadSize})
+        }
+      }) + '\\n');
+      process.exit = code => {
+        process.stderr.write('Immediate process.exit called after Stop output\\n');
+        process.exitCode = code;
+      };
+    `);
+
+    try {
+      const result = runEvaluate({ transcript_path: transcript }, preloadPath);
+      assert.strictEqual(result.code, 0, 'Should exit successfully after writing context');
+      assert.ok(!result.stderr.includes('Immediate process.exit'), 'Should let stdout drain naturally');
+      const payload = JSON.parse(result.stdout);
+      assert.strictEqual(payload.hookSpecificOutput.additionalContext.length, payloadSize);
+    } finally {
+      cleanupTestDir(testDir);
+    }
   })) passed++; else failed++;
 
   // Edge cases
