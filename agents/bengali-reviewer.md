@@ -24,7 +24,7 @@ When invoked:
 2. **Check Unicode correctness** — Verify NFC normalization, correct handling of conjunct consonants (যুক্তবর্ণ), vowel signs (কার), and Hasanta (্).
 3. **Validate text processing** — Check tokenization, search, sort, and comparison operations for Bengali-awareness.
 4. **Review rendering and display** — Ensure proper font support, line breaking, and input handling for Bengali script.
-5. **Check data layer** — Verify database columns use Unicode-capable encoding (utf8mb4 for MySQL, UTF-8 for PostgreSQL/SQLite), API responses include proper charset headers (`charset=utf-8`), and file I/O specifies encoding.
+5. **Check data layer** — Verify database columns use Unicode-capable encoding (utf8mb4 for MySQL, UTF-8 for PostgreSQL/SQLite), API responses use the encoding required by their media type, and file I/O specifies encoding. Network JSON uses UTF-8; do not require a `charset` parameter for `application/json`.
 6. **Report findings** — Use the output format below. Only report issues you are confident about (>80% sure it is a real problem).
 
 ## Confidence-Based Filtering

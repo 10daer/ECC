@@ -31,6 +31,7 @@ U+0985–U+0994  Independent vowels (অ আ ই ঈ উ ঊ ঋ ঌ এ ঐ ও
 U+0995–U+09B0  Consonants (ক–র)
 U+09B2         ল
 U+09B6–U+09B9  শ ষ স হ
+U+09DC, U+09DD, U+09DF  Additional consonants (ড়, ঢ়, য়)
 U+09BC         Nukta
 U+09BE–U+09C8  Dependent vowel signs (কার): া ি ী ু ূ ৃ ে ৈ
 U+09CB–U+09CC  Dependent vowel signs: ো ৌ
@@ -56,9 +57,10 @@ def normalize_bangla(text: str) -> str:
     """Normalize Bengali text to NFC form."""
     return unicodedata.normalize("NFC", text)
 
-# NFC composes characters: base + combining mark -> precomposed
-text_nfd = "বাংলা"  # may be decomposed
+# NFC composes characters: base + combining marks -> precomposed
+text_nfd = "ক\u09C7\u09BE"  # decomposed form of "কো"
 text_nfc = normalize_bangla(text_nfd)
+assert text_nfc == "কো"
 assert text_nfc == normalize_bangla(text_nfc)  # idempotent
 ```
 
@@ -130,7 +132,7 @@ import re
 def tokenize_bangla(text: str) -> list[str]:
     """Basic Bengali tokenizer — split on whitespace and punctuation."""
     # Remove Bengali and ASCII punctuation
-    text = re.sub(r'[।,;:!?\-\'"()\[\]{}]', ' ', text)
+    text = re.sub(r'[।,;:!?.\-\'"()\[\]{}]', ' ', text)
     return [token for token in text.split() if token]
 
 # For production, use a trained tokenizer:
@@ -221,6 +223,8 @@ const sortedWords = [...words].sort(collator.compare);
 ### Search with Normalization
 
 ```python
+import unicodedata
+
 def bangla_search(query: str, corpus: list[str]) -> list[str]:
     """Search Bengali text with normalization."""
     query = unicodedata.normalize("NFC", query.strip().lower())
@@ -309,6 +313,9 @@ def detect_banglish(text: str) -> bool:
 ### Dataset Preparation
 
 ```python
+import re
+import unicodedata
+
 def prepare_bangla_dataset(texts: list[str]) -> list[str]:
     """Clean and normalize Bengali text for ML training."""
     cleaned = []

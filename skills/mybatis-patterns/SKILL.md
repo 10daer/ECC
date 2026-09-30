@@ -14,7 +14,7 @@ Pair this skill with `springboot-patterns` for application structure,
 `mysql-patterns` for engine-specific SQL, and `security-review` for untrusted
 input and access-control concerns.
 
-## When to Use
+## When to Activate
 
 - Adding or reviewing MyBatis mapper interfaces or XML files
 - Choosing between XML mappers, annotation mappers, and generated SQL
@@ -196,9 +196,16 @@ public List<UserSummary> search(UserSearchRequest request) {
   if (request.ids() != null && request.ids().isEmpty()) {
     return Collections.emptyList();
   }
-  return userMapper.search(request);
+  UserSearchRequest prepared = request.query() == null
+      ? request
+      : request.withQueryPattern(buildLikePattern(request.query()));
+  return userMapper.search(prepared);
 }
 ```
+
+Here `withQueryPattern` returns a copy of the request, and `buildLikePattern`
+adds the intended wildcards while escaping literal `%` and `_` according to the
+database dialect. Do not pass raw search text as `queryPattern`.
 
 The mapper retains the `ids.size() > 0` guard as defense in depth. That guard
 omits the entire ID predicate for an empty list, which broadens the query. The
