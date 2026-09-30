@@ -200,6 +200,25 @@ if (process.platform !== 'win32') {
       assert.ok(output.every(skill => skill.is_new === true));
     });
 
+    for (const [scope, skillsDir] of [['global', globalSkills], ['project', projectSkills]]) {
+      test(`scan rejects incomplete ${scope} discovery and cleans temporary files`, () => {
+        const cyclePath = path.join(skillsDir, 'cycle');
+        const scanTmp = path.join(tempRoot, `${scope}-scan-tmp`);
+        fs.mkdirSync(scanTmp);
+        fs.symlinkSync(skillsDir, cyclePath, 'dir');
+        try {
+          const result = runBash(scanScript, [], { ...env, TMPDIR: scanTmp });
+          assert.strictEqual(result.status, 1, 'A failed find must not publish a partial inventory');
+          assert.strictEqual(result.stdout, '', 'Incomplete discovery must not produce inventory JSON');
+          assert.match(result.stderr, /Error: find encountered errors while scanning/);
+          assert.ok(result.stderr.includes(cyclePath), 'Preserve the failing path from find stderr');
+          assert.deepStrictEqual(fs.readdirSync(scanTmp), [], 'Clean discovery files on failure');
+        } finally {
+          fs.unlinkSync(cyclePath);
+        }
+      });
+    }
+
     for (const name of ['project-active', 'space-skill', 'newline-skill']) {
       test(`scan reports unknown usage for ${name} when observations are missing`, () => {
         const result = runBash(scanScript, [], env);

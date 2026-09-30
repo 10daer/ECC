@@ -77,7 +77,20 @@ Run this entire block in **one Bash invocation**. It prints the inventory for th
     CACHE_STATUS=$(jq -r '.batch_progress.status // ""' "$RESULTS_JSON")
   fi
   if [[ "$CACHE_STATUS" == "in_progress" ]]; then
-    printf '%s\n' 'Resuming existing full evaluation; cache preserved.' >&2
+    RESUMED_RESULTS=$(jq --slurpfile saved "$RESULTS_JSON" '
+      . as $inventory | $saved[0]
+      | .skills = (.skills | to_entries
+        | map(.key = (.value.path // .key))
+        | map(select(.key as $p | any($inventory.skills[]; .path == $p)))
+        | from_entries)
+      | .mode = "full"
+      | .batch_progress = {
+          total: ($inventory.skills | length),
+          evaluated: (.skills | length), status: "in_progress"
+        }
+    ' <<< "$SCAN_JSON")
+    bash ~/.claude/skills/skill-stocktake/scripts/save-results.sh \
+      "$RESULTS_JSON" --replace <<< "$RESUMED_RESULTS"
   else
     INITIAL_RESULTS=$(printf '%s\n' "$SCAN_JSON" | jq '{
       mode: "full", skills: {},
@@ -104,7 +117,7 @@ Scanning:
 
 Usage counts come from the optional `~/.claude/observations.jsonl` file (overridable with `SKILL_STOCKTAKE_OBSERVATIONS`), which Claude Code does not create by default. When the file is absent, `use_7d` and `use_30d` are JSON `null`; display them as **unmeasured** in inventory and summary tables. A numeric `0` means the file exists but contains no matching Read observations in that window. Missing usage data is never evidence for retiring a skill.
 
-`--replace` replaces the entire cached evaluation, removing archived or deleted skills and stale metadata. The block skips initialization when resuming an `in_progress` evaluation. Later chunks, completion updates, and Quick Scans must omit `--replace` so they merge into the current run instead of losing earlier results.
+`--replace` writes a complete cache snapshot. A new run starts with an empty evaluation; a resumed run instead keeps every saved evaluation whose path is still in the live inventory, removes archived/deleted entries, and refreshes the progress counts even when no new batch remains. Existing name-keyed entries are normalized using their saved `path`. Never use the empty initialization payload for a resume. Later chunks, completion updates, and Quick Scans must omit `--replace` so they merge into the current run instead of losing earlier results.
 
 ### Phase 2 — Quality Evaluation
 
@@ -137,7 +150,7 @@ After all skills are evaluated, persist completion before proceeding to Phase 3:
 )
 ```
 
-**Resume detection:** If `status: "in_progress"` is found on startup, read the saved `skills` map and evaluate only inventory paths not already present. Preserve completed batches.
+**Resume detection:** If `status: "in_progress"` is found on startup, run Phase 1 to reconcile the saved results with the fresh inventory, then evaluate only paths absent from the reconciled `skills` map. If none remain, persist completion immediately. Completed evaluations for surviving paths are preserved; newly added paths still require evaluation.
 
 Each skill is evaluated against this checklist:
 
@@ -213,7 +226,7 @@ Obtain via Bash: `date -u +%Y-%m-%dT%H:%M:%SZ`. Never use a date-only approximat
     "status": "completed"
   },
   "skills": {
-    "skill-name": {
+    "~/.claude/skills/skill-name/SKILL.md": {
       "path": "~/.claude/skills/skill-name/SKILL.md",
       "verdict": "Keep",
       "reason": "Concrete, actionable, unique value for X workflow",
