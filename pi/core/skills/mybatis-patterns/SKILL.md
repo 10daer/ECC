@@ -200,15 +200,17 @@ public List<UserSummary> search(UserSearchRequest request) {
 }
 ```
 
-The mapper retains the `ids.size() > 0` guard as defense in depth, but callers
-must not rely on an empty `<foreach>` to define query semantics. The service
-boundary must ensure this query is reached only with a non-empty list or a
-deliberate `null` meaning "no ID filter".
+The mapper retains the `ids.size() > 0` guard as defense in depth. That guard
+omits the entire ID predicate for an empty list, which broadens the query. The
+service must short-circuit empty lists before calling the mapper, and any caller
+that bypasses the service must reject empty IDs before query execution. Reserve
+`null` for the deliberate "no ID filter" case.
 
 - Prefer `<where>`, `<set>`, `<trim>`, `<choose>`, and `<foreach>` to manual
   string concatenation.
-- Define the empty-list behavior in the service. Return no rows, skip the
-  query, or apply an explicit false predicate; never rely on `IN ()` behavior.
+- Define the empty-list behavior in the service. Return no rows, skip the query,
+  or apply an explicit false predicate; never let an empty list silently remove
+  the ID predicate or rely on `IN ()` behavior.
 - Keep the allowed shape of dynamic SQL small. If a query has many branches,
   split it into named statements or move carefully selected alternatives into
   separate mapper methods.
