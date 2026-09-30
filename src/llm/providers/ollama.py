@@ -78,6 +78,8 @@ class OllamaProvider(LLMProvider):
                 options["num_predict"] = input.max_tokens
             if options:
                 payload["options"] = options
+            if input.tools:
+                payload["tools"] = [tool.to_openai_tool() for tool in input.tools]
 
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})

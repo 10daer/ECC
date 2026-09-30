@@ -168,6 +168,37 @@ def test_ollama_provider_serializes_generation_options(
     assert output.stop_reason == "stop"
 
 
+def test_ollama_provider_serializes_tools_and_parses_tool_calls(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return BytesIO(
+            b'{"message": {"content": "", "tool_calls": [{"function": '
+            b'{"name": "search", "arguments": {"query": "ollama"}}}]}, "done_reason": "stop"}'
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    provider = OllamaProvider(base_url="http://localhost:11434", default_model="qwen3")
+
+    output = provider.generate(LLMInput(messages=[Message(role=Role.USER, content="hi")], tools=[_tool()]))
+
+    assert json.loads(requests[0].data)["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search",
+                "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                "strict": True,
+            },
+        }
+    ]
+    assert output.has_tool_calls
+    assert output.tool_calls[0].name == "search"
+    assert output.tool_calls[0].arguments == {"query": "ollama"}
+
+
 def test_claude_provider_serializes_tools_for_messages_api():
     provider = ClaudeProvider(api_key="test")
     client = _AnthropicClient()
