@@ -281,6 +281,7 @@ module.exports = {
   DEFAULT_CONTEXT_THRESHOLD_LARGE,
   DEFAULT_CONTEXT_INTERVAL_TOKENS,
   DEFAULT_TRANSCRIPT_TAIL_BYTES,
+  readFileTail,
   readLatestContextTokens,
   resolveContextWindow,
   resolveContextWindowTokens,
