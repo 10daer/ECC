@@ -81,7 +81,10 @@ Run this entire block in **one Bash invocation**. It prints the inventory for th
       . as $inventory | $saved[0]
       | .skills = (.skills | to_entries
         | map(.key = (.value.path // .key))
-        | map(select(.key as $p | any($inventory.skills[]; .path == $p)))
+        | map(select(. as $entry
+          | $entry.value.mtime != null
+            and any($inventory.skills[];
+              .path == $entry.key and .mtime == $entry.value.mtime)))
         | from_entries)
       | .mode = "full"
       | .batch_progress = {
@@ -117,7 +120,7 @@ Scanning:
 
 Usage counts come from the optional `~/.claude/observations.jsonl` file (overridable with `SKILL_STOCKTAKE_OBSERVATIONS`), which Claude Code does not create by default. When the file is absent, `use_7d` and `use_30d` are JSON `null`; display them as **unmeasured** in inventory and summary tables. A numeric `0` means the file exists but contains no matching Read observations in that window. Missing usage data is never evidence for retiring a skill.
 
-`--replace` writes a complete cache snapshot. A new run starts with an empty evaluation; a resumed run instead keeps every saved evaluation whose path is still in the live inventory, removes archived/deleted entries, and refreshes the progress counts even when no new batch remains. Existing name-keyed entries are normalized using their saved `path`. Never use the empty initialization payload for a resume. Later chunks, completion updates, and Quick Scans must omit `--replace` so they merge into the current run instead of losing earlier results.
+`--replace` writes a complete cache snapshot. A new run starts with an empty evaluation; a resumed run instead keeps a saved evaluation only when its path is still live and its saved, non-null mtime matches the fresh inventory. Changed skills and entries without an mtime require re-evaluation. It removes archived/deleted entries and refreshes the progress counts even when no new batch remains. Existing name-keyed entries are normalized using their saved `path`. Never use the empty initialization payload for a resume. Later chunks, completion updates, and Quick Scans must omit `--replace` so they merge into the current run instead of losing earlier results.
 
 ### Phase 2 — Quality Evaluation
 
@@ -150,7 +153,7 @@ After all skills are evaluated, persist completion before proceeding to Phase 3:
 )
 ```
 
-**Resume detection:** If `status: "in_progress"` is found on startup, run Phase 1 to reconcile the saved results with the fresh inventory, then evaluate only paths absent from the reconciled `skills` map. If none remain, persist completion immediately. Completed evaluations for surviving paths are preserved; newly added paths still require evaluation.
+**Resume detection:** If `status: "in_progress"` is found on startup, run Phase 1 to reconcile the saved results with the fresh inventory, then evaluate only paths absent from the reconciled `skills` map. If none remain, persist completion immediately. Completed evaluations are preserved only for surviving paths with matching, non-null mtimes; new or changed skills and entries without an mtime require evaluation.
 
 Each skill is evaluated against this checklist:
 

@@ -277,6 +277,66 @@ if (process.platform !== 'win32') {
   }
 }
 
+
+if (process.platform !== 'win32') {
+  const skillSource = fs.readFileSync(path.join(repoRoot, 'skills', 'skill-stocktake', 'SKILL.md'), 'utf8');
+  const inventorySection = skillSource.split('### Phase 1')[1].split('### Phase 2')[0];
+  const inventoryBlock = inventorySection.match(/```bash\n([\s\S]*?)\n```/)[1];
+  for (const scenario of ['changed', 'missing mtime', 'null mtime', 'matching', 'legacy matching']) {
+    test('documented resume reevaluates stale skills and preserves current evaluations (' + scenario + ')', () => {
+      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-stocktake-resume-'));
+      try {
+        const home = path.join(tempRoot, 'home');
+        const skills = path.join(home, '.claude', 'skills');
+        const stocktake = path.join(skills, 'skill-stocktake');
+        fs.mkdirSync(stocktake, { recursive: true });
+        fs.cpSync(path.dirname(scanScript), path.join(stocktake, 'scripts'), { recursive: true });
+        const skillDir = path.join(skills, 'live');
+        writeSkill(skillDir, 'live');
+        const skillPath = path.join(skillDir, 'SKILL.md');
+        fs.utimesSync(skillPath, new Date('2025-01-01T00:00:00Z'), new Date('2025-01-01T00:00:00Z'));
+        const env = {
+          ...process.env,
+          HOME: home,
+          SKILL_STOCKTAKE_GLOBAL_DIR: skills,
+          SKILL_STOCKTAKE_PROJECT_DIR: path.join(tempRoot, 'missing-project'),
+          SKILL_STOCKTAKE_OBSERVATIONS: path.join(tempRoot, 'missing-observations'),
+        };
+        const runInventory = () => spawnSync('bash', ['-c', inventoryBlock], {
+          cwd: tempRoot, env, encoding: 'utf8', timeout: 30000,
+        });
+        const initial = runInventory();
+        assert.strictEqual(initial.status, 0, initial.stderr);
+        const scanned = JSON.parse(initial.stdout).skills[0];
+        const entry = {
+          path: scanned.path, verdict: 'Keep', reason: 'Preserve the reviewed content',
+          ...(scenario === 'missing mtime' ? {} : { mtime: scenario === 'null mtime' ? null : scanned.mtime }),
+        };
+        const resultsPath = path.join(stocktake, 'results.json');
+        fs.writeFileSync(resultsPath, JSON.stringify({
+          mode: 'full',
+          skills: { [scenario === 'legacy matching' ? 'live' : scanned.path]: entry },
+          batch_progress: { total: 1, evaluated: 1, status: 'in_progress' },
+        }));
+        if (scenario === 'changed') {
+          fs.appendFileSync(skillPath, '\nContent changed after its evaluation.\n');
+          fs.utimesSync(skillPath, new Date('2025-01-02T00:00:00Z'), new Date('2025-01-02T00:00:00Z'));
+        }
+        const resumed = runInventory();
+        assert.strictEqual(resumed.status, 0, resumed.stderr);
+        const output = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+        const preserved = scenario === 'matching' || scenario === 'legacy matching';
+        assert.deepStrictEqual(output.skills, preserved ? { [scanned.path]: entry } : {});
+        assert.deepStrictEqual(output.batch_progress, {
+          total: 1, evaluated: preserved ? 1 : 0, status: 'in_progress',
+        });
+      } finally {
+        fs.rmSync(tempRoot, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 console.log(`\nPassed: ${passed}`);
 console.log(`Failed: ${failed}`);
 process.exit(failed > 0 ? 1 : 0);
