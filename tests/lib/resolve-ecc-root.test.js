@@ -271,7 +271,7 @@ function runTests() {
         path.join(expected, 'scripts/lib/resolve-ecc-root.js'));
       fs.writeFileSync(path.join(homeDir, '.claude/plugins/cache/everything-claude-code/0-not-an-org'), 'unrelated');
       const { execFileSync } = require('child_process');
-      const result = execFileSync(process.execPath, ['-e', `console.log(${INLINE_RESOLVE})`], {
+      const result = execFileSync(process.execPath, ['-e', `process.stdout.write(String(${INLINE_RESOLVE}))`], {
         env: { PATH: process.env.PATH, HOME: homeDir, USERPROFILE: homeDir },
         encoding: 'utf8',
       }).trim();
@@ -280,6 +280,28 @@ function runTests() {
       fs.rmSync(homeDir, { recursive: true, force: true });
     }
   })) passed++; else failed++;
+
+  for (const complete of [true, false]) {
+    if (test(`INLINE_RESOLVE handles an older cached resolver fallback (complete=${complete})`, () => {
+      const homeDir = createTempDir();
+      try {
+        const cacheRoot = setupPluginCache(homeDir, 'everything-claude-code', 'legacy-org', '1.7.0');
+        if (!complete) fs.rmSync(path.join(cacheRoot, ECC_SKILL_SENTINEL), { recursive: true });
+        // Older cached resolvers can return the home fallback when the current
+        // cache is absent. The inline must recognize a complete discovered root.
+        fs.writeFileSync(path.join(cacheRoot, 'scripts/lib/resolve-ecc-root.js'),
+          "module.exports = { resolveEccRoot() { return require('path').join(require('os').homedir(), '.claude'); } };\n");
+        const { execFileSync } = require('child_process');
+        const result = execFileSync(process.execPath, ['-e', `process.stdout.write(String(${INLINE_RESOLVE}))`], {
+          env: { PATH: process.env.PATH, HOME: homeDir, USERPROFILE: homeDir },
+          encoding: 'utf8',
+        });
+        assert.strictEqual(result, complete ? cacheRoot : path.join(homeDir, '.claude'));
+      } finally {
+        fs.rmSync(homeDir, { recursive: true, force: true });
+      }
+    })) passed++; else failed++;
+  }
 
   if (test('falls back to ~/.claude/ when nothing is found', () => {
     const homeDir = createTempDir();
