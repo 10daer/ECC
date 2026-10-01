@@ -552,10 +552,14 @@ function isGitRepo() {
 function getGitModifiedFiles(patterns = []) {
   if (!isGitRepo()) return [];
 
-  const result = runCommand('git diff --name-only HEAD');
-  if (!result.success) return [];
+  const result = spawnSync('git', ['diff', '--name-only', '-z', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  if (result.error || result.status !== 0) return [];
 
-  let files = result.output.split('\n').filter(Boolean);
+  // NUL-delimited output preserves quoted characters, Unicode and whitespace.
+  let files = result.stdout.split('\0').filter(Boolean);
 
   if (patterns.length > 0) {
     // Pre-compile patterns, skipping invalid ones
