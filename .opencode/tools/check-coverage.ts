@@ -128,45 +128,64 @@ interface CoverageResult {
   suggestion?: string
 }
 
-function parseCoverageData(data: unknown): CoverageSummary {
-  // Handle istanbul/nyc format
-  if (typeof data === "object" && data !== null && "total" in data) {
-    const istanbulData = data as Record<string, unknown>
-    const total = istanbulData.total as Record<string, { total: number; covered: number }>
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
 
-    const files: CoverageSummary["files"] = []
-
-    for (const [key, value] of Object.entries(istanbulData)) {
-      if (key !== "total" && typeof value === "object" && value !== null) {
-        const fileData = value as Record<string, { total: number; covered: number }>
-        if (fileData.lines) {
-          files.push({
-            file: key,
-            lines: fileData.lines.total,
-            covered: fileData.lines.covered,
-            percentage: fileData.lines.total > 0
-              ? (fileData.lines.covered / fileData.lines.total) * 100
-              : 100,
-          })
-        }
-      }
-    }
-
-    return {
-      total: {
-        lines: total.lines?.total || 0,
-        covered: total.lines?.covered || 0,
-        percentage: total.lines?.total
-          ? (total.lines.covered / total.lines.total) * 100
-          : 0,
-      },
-      files,
-    }
+function lineMetrics(lines: number, covered: number): CoverageSummary["total"] {
+  if (!Number.isInteger(lines) || !Number.isInteger(covered) || lines < 0 || covered < 0 || covered > lines) {
+    throw new Error("Invalid coverage line metrics")
   }
+  return { lines, covered, percentage: lines > 0 ? (covered / lines) * 100 : 100 }
+}
 
-  // Default empty result
+function summaryMetrics(value: unknown): CoverageSummary["total"] {
+  if (!isRecord(value) || !isRecord(value.lines)
+    || typeof value.lines.total !== "number" || typeof value.lines.covered !== "number") {
+    throw new Error("Invalid coverage summary")
+  }
+  return lineMetrics(value.lines.total, value.lines.covered)
+}
+
+function rawMetrics(value: unknown): CoverageSummary["total"] {
+  if (!isRecord(value) || !isRecord(value.statementMap) || !isRecord(value.s)) {
+    throw new Error("Unsupported coverage report")
+  }
+  const hitsByLine = new Map<number, number>()
+  for (const [statementId, hits] of Object.entries(value.s)) {
+    if (typeof hits !== "number" || !Number.isFinite(hits) || hits < 0) {
+      throw new Error("Invalid coverage statement hits")
+    }
+    const location = value.statementMap[statementId]
+    // Istanbul's getLineCoverage uses statement start lines and the maximum
+    // hit count when multiple statements share a line, rather than end ranges.
+    if (location === undefined) continue
+    if (!isRecord(location) || !isRecord(location.start)
+      || typeof location.start.line !== "number" || !Number.isInteger(location.start.line) || location.start.line < 1) {
+      throw new Error("Invalid coverage statement location")
+    }
+    const line = location.start.line
+    hitsByLine.set(line, Math.max(hitsByLine.get(line) || 0, hits))
+  }
+  return lineMetrics(hitsByLine.size, [...hitsByLine.values()].filter(hits => hits > 0).length)
+}
+
+function parseCoverageData(data: unknown): CoverageSummary {
+  if (!isRecord(data)) throw new Error("Unsupported coverage report")
+  const files: CoverageSummary["files"] = []
+  if ("total" in data) {
+    for (const [file, value] of Object.entries(data)) {
+      if (file !== "total") files.push({ file, ...summaryMetrics(value) })
+    }
+    return { total: summaryMetrics(data.total), files }
+  }
+  if (Object.keys(data).length === 0) throw new Error("Empty coverage report")
+  for (const [file, value] of Object.entries(data)) files.push({ file, ...rawMetrics(value) })
   return {
-    total: { lines: 0, covered: 0, percentage: 0 },
-    files: [],
+    total: lineMetrics(
+      files.reduce((sum, file) => sum + file.lines, 0),
+      files.reduce((sum, file) => sum + file.covered, 0)
+    ),
+    files,
   }
 }
