@@ -274,7 +274,7 @@ pub fn git_status_entries(worktree: &WorktreeInfo) -> Result<Vec<GitStatusEntry>
     let output = Command::new("git")
         .arg("-C")
         .arg(&worktree.path)
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .output()
         .context("Failed to load git status entries")?;
 
@@ -283,10 +283,7 @@ pub fn git_status_entries(worktree: &WorktreeInfo) -> Result<Vec<GitStatusEntry>
         anyhow::bail!("git status failed: {stderr}");
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_git_status_entry)
-        .collect())
+    parse_git_status_entries(&output.stdout)
 }
 
 pub fn stage_path(worktree: &WorktreeInfo, path: &str) -> Result<()> {
@@ -1495,38 +1492,48 @@ fn validate_branch_name(repo_root: &Path, branch: &str) -> Result<()> {
     }
 }
 
-fn parse_git_status_entry(line: &str) -> Option<GitStatusEntry> {
-    if line.len() < 4 {
-        return None;
+fn parse_git_status_entries(stdout: &[u8]) -> Result<Vec<GitStatusEntry>> {
+    let text = std::str::from_utf8(stdout).context("Git status contains a non-UTF-8 filename")?;
+    let mut records = text.split_terminator('\0');
+    let mut entries = Vec::new();
+    while let Some(record) = records.next() {
+        let bytes = record.as_bytes();
+        if bytes.len() < 4 || bytes[2] != b' ' {
+            anyhow::bail!("Malformed Git status record");
+        }
+        let index_status = bytes[0] as char;
+        let worktree_status = bytes[1] as char;
+        let path = record
+            .get(3..)
+            .context("Malformed Git status path")?
+            .to_string();
+        // Porcelain -z emits destination first, then a separate source for renames/copies.
+        let display_path =
+            if matches!(index_status, 'R' | 'C') || matches!(worktree_status, 'R' | 'C') {
+                let source = records
+                    .next()
+                    .filter(|source| !source.is_empty())
+                    .context("Missing Git status rename/copy source")?;
+                format!("{source} -> {path}")
+            } else {
+                path.clone()
+            };
+        let conflicted = matches!(
+            (index_status, worktree_status),
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D')
+        );
+        entries.push(GitStatusEntry {
+            path,
+            display_path,
+            index_status,
+            worktree_status,
+            staged: index_status != ' ' && index_status != '?',
+            unstaged: worktree_status != ' ' && worktree_status != '?',
+            untracked: index_status == '?' && worktree_status == '?',
+            conflicted,
+        });
     }
-    let bytes = line.as_bytes();
-    let index_status = bytes[0] as char;
-    let worktree_status = bytes[1] as char;
-    let raw_path = line.get(3..)?.trim();
-    if raw_path.is_empty() {
-        return None;
-    }
-    let display_path = raw_path.to_string();
-    let normalized_path = raw_path
-        .split(" -> ")
-        .last()
-        .unwrap_or(raw_path)
-        .trim()
-        .to_string();
-    let conflicted = matches!(
-        (index_status, worktree_status),
-        ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D')
-    );
-    Some(GitStatusEntry {
-        path: normalized_path,
-        display_path,
-        index_status,
-        worktree_status,
-        staged: index_status != ' ' && index_status != '?',
-        unstaged: worktree_status != ' ' && worktree_status != '?',
-        untracked: index_status == '?' && worktree_status == '?',
-        conflicted,
-    })
+    Ok(entries)
 }
 
 fn parse_nonempty_lines(stdout: &[u8]) -> Vec<String> {
@@ -2140,6 +2147,92 @@ mod tests {
             .args(["worktree", "remove", "--force"])
             .arg(&right_dir)
             .output();
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn git_status_parser_handles_nul_paths_and_rename_order() -> Result<()> {
+        let entries = super::parse_git_status_entries(
+            b"?? name -> destination.txt\0?? tab\tname.txt\0?? line\nname.txt\0?? trailing \0R  new name.txt\0old name.txt\0 M next.txt\0",
+        )?;
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0].path, "name -> destination.txt");
+        assert_eq!(entries[1].path, "tab\tname.txt");
+        assert_eq!(entries[2].path, "line\nname.txt");
+        assert_eq!(entries[3].path, "trailing ");
+        assert_eq!(entries[4].path, "new name.txt");
+        assert_eq!(entries[4].display_path, "old name.txt -> new name.txt");
+        assert!(entries[4].staged);
+        assert_eq!(entries[5].path, "next.txt");
+        assert!(super::parse_git_status_entries(b"R  destination\0").is_err());
+        assert!(super::parse_git_status_entries(b"?? invalid\xff\0").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn git_status_helpers_preserve_rename_destination() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("ecc2-status-rename-{}", Uuid::new_v4()));
+        let repo = init_repo(&root)?;
+        let worktree = WorktreeInfo {
+            path: repo.clone(),
+            branch: "main".to_string(),
+            base_branch: "main".to_string(),
+        };
+        let destination = "renamed 中文.md";
+        let moved = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["mv", "README.md", destination])
+            .output()?;
+        assert!(moved.status.success());
+        fs::write(repo.join("next.txt"), "next\n")?;
+        let entries = git_status_entries(&worktree)?;
+        assert_eq!(entries.len(), 2);
+        let renamed = entries
+            .iter()
+            .find(|entry| entry.index_status == 'R')
+            .expect("staged rename");
+        assert_eq!(renamed.path, destination);
+        assert_eq!(renamed.display_path, format!("README.md -> {destination}"));
+        assert!(entries.iter().any(|entry| entry.path == "next.txt"));
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn git_status_helpers_preserve_special_filenames() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("ecc2-status-names-{}", Uuid::new_v4()));
+        let repo = init_repo(&root)?;
+        let worktree = WorktreeInfo {
+            path: repo.clone(),
+            branch: "main".to_string(),
+            base_branch: "main".to_string(),
+        };
+        let mut names = vec!["中文.txt", "space name.txt"];
+        if !cfg!(windows) {
+            names.extend([
+                "name -> destination.txt",
+                "tab\tname.txt",
+                "line\nname.txt",
+                " trailing ",
+            ]);
+        }
+        for name in &names {
+            fs::write(repo.join(name), "draft\n")?;
+        }
+        let entries = git_status_entries(&worktree)?;
+        for name in &names {
+            let entry = entries
+                .iter()
+                .find(|entry| entry.path == *name)
+                .unwrap_or_else(|| panic!("missing exact filename {name:?}: {entries:?}"));
+            assert!(entry.untracked);
+            stage_path(&worktree, &entry.path)?;
+            unstage_path(&worktree, &entry.path)?;
+            reset_path(&worktree, entry)?;
+            assert!(!repo.join(name).exists());
+        }
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
