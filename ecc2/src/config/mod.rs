@@ -1158,6 +1158,15 @@ focus_metrics = "e"
     }
 
     #[test]
+    fn config_path_under_test_is_distinct_across_test_threads() {
+        let current = Config::config_path();
+        let other = std::thread::spawn(Config::config_path)
+            .join()
+            .expect("config path thread should complete");
+        assert_ne!(current, other);
+    }
+
+    #[test]
     fn primary_config_path_uses_xdg_style_location() {
         let path = Config::config_path();
         assert!(path.ends_with("ecc2/config.toml"));
