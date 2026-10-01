@@ -26,6 +26,8 @@ Run ECC on the DeepSeek Harness. Full guide: `docs/DEEPSEEK-HARNESS-GUIDE.md`.
 
    Root priority (project `.dsh` and `.agents` roots beat `~/.dsh`): skip
    linking skills whose names already exist in a higher-priority root.
+   Substitute real skill names for the placeholders; the angle brackets are
+   not shell syntax.
 
 2. **Hooks go through the first-party bridge.** Generate a DSH-format config
    from the canonical ECC hooks file:
@@ -57,11 +59,15 @@ Run ECC on the DeepSeek Harness. Full guide: `docs/DEEPSEEK-HARNESS-GUIDE.md`.
 4. **Validate by composing, then verify live.**
 
    ```bash
-   cd ~/.dsh && dsh --profile web --dump-config > /dev/null && echo OK
+   cd ~/.dsh && dsh --profile web --dump-config > /tmp/dump.yml
+   grep ecc-hooks /tmp/dump.yml
    ```
 
-   A live GateGuard denial on the session's first edit/write/bash is the
-   visible signal the bridge is active.
+   Compose exit status stays 0 even when the loader drops or rejects an
+   entry — those problems are only reported on stderr. Confirm the entry id
+   appears in the dump and stderr is empty. A live GateGuard denial on the
+   session's first edit/write/bash is the visible signal the bridge is
+   active.
 
 ## Updating
 

@@ -45,8 +45,15 @@ function parseArgs(argv) {
   const opts = { eccRoot: null, out: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--ecc-root') opts.eccRoot = argv[++i];
-    else if (a === '--out') opts.out = argv[++i];
+    if (a === '--ecc-root' || a === '--out') {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) {
+        process.stderr.write('Missing value for ' + a + '\n');
+        process.exit(2);
+      }
+      if (a === '--ecc-root') opts.eccRoot = value;
+      else opts.out = value;
+    }
     else {
       process.stderr.write('Unknown argument: ' + a + '\n');
       process.exit(2);
@@ -64,7 +71,7 @@ function mapMatcher(matcher) {
   if (typeof matcher !== 'string' || matcher.length === 0) return matcher;
   const parts = matcher.split('|').map(function (t) {
     const v = t.trim();
-    if (v === '' || v === '.*' || v === '^mcp__') return v;
+    if (v === '' || /^\^?mcp__/.test(v) || /[\\^$.*+?()[\]{}]/.test(v)) return v;
     const mapped = TOOL_NAME_MAP[v];
     return mapped !== undefined ? mapped : v.toLowerCase();
   });
@@ -81,9 +88,13 @@ function mapMatcher(matcher) {
  * CLAUDE_PLUGIN_ROOT environment variable, so prefixing the variables
  * inline (env-prefix form) is the only required change.
  */
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
 function mapCommand(command, eccRoot) {
-  const prefix = 'CLAUDE_PLUGIN_ROOT=' + JSON.stringify(eccRoot) +
-    ' ECC_PLUGIN_ROOT=' + JSON.stringify(eccRoot) + ' ';
+  const prefix = 'CLAUDE_PLUGIN_ROOT=' + shellQuote(eccRoot) +
+    ' ECC_PLUGIN_ROOT=' + shellQuote(eccRoot) + ' ';
   return prefix + command;
 }
 
@@ -149,6 +160,6 @@ function main() {
   if (notes.length) process.stderr.write(notes.join('; ') + '\n');
 }
 
-module.exports = { generateConfig, mapMatcher, mapCommand, SUPPORTED_EVENTS, TOOL_NAME_MAP };
+module.exports = { generateConfig, mapMatcher, mapCommand, shellQuote, SUPPORTED_EVENTS, TOOL_NAME_MAP };
 
 if (require.main === module) main();

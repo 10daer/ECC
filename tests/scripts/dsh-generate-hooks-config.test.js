@@ -43,12 +43,12 @@ function runTests() {
   if (test('mapCommand prefixes plugin-root env vars and keeps the resolver intact', () => {
     const cmd = 'node -e "resolver" pretooluse:bash:check-console-log scripts/hooks/check-console-log.js standard';
     const out = gen.mapCommand(cmd, '/ecc');
-    assert.strictEqual(out, 'CLAUDE_PLUGIN_ROOT="/ecc" ECC_PLUGIN_ROOT="/ecc" ' + cmd);
+    assert.strictEqual(out, 'CLAUDE_PLUGIN_ROOT=\'/ecc\' ECC_PLUGIN_ROOT=\'/ecc\' ' + cmd);
   })) passed++; else failed++;
 
   if (test('mapCommand passes through non-resolver commands with prefix only', () => {
     const out = gen.mapCommand('echo hi', '/ecc');
-    assert.strictEqual(out, 'CLAUDE_PLUGIN_ROOT="/ecc" ECC_PLUGIN_ROOT="/ecc" echo hi');
+    assert.strictEqual(out, 'CLAUDE_PLUGIN_ROOT=\'/ecc\' ECC_PLUGIN_ROOT=\'/ecc\' echo hi');
   })) passed++; else failed++;
 
   if (test('generateConfig skips unsupported events and reports them', () => {
@@ -78,6 +78,28 @@ function runTests() {
   if (test('generateConfig supports the bridge-only Subagent events', () => {
     assert.ok(gen.SUPPORTED_EVENTS.has('SubagentStart'));
     assert.ok(gen.SUPPORTED_EVENTS.has('SubagentStop'));
+  })) passed++; else failed++;
+
+  if (test('mapMatcher preserves case-sensitive regex tokens with metacharacters', () => {
+    assert.strictEqual(gen.mapMatcher('^mcp__GitHub__.*'), '^mcp__GitHub__.*');
+    assert.strictEqual(gen.mapMatcher('\\S'), '\\S');
+  })) passed++; else failed++;
+
+  if (test('mapCommand shell-quotes dangerous path characters', () => {
+    const dollar = gen.mapCommand('echo hi', '/home/u/$proj');
+    assert.ok(dollar.startsWith("CLAUDE_PLUGIN_ROOT='/home/u/$proj' "), 'literal inside single quotes: ' + dollar);
+    const quoted = gen.mapCommand('echo hi', "/home/u'z");
+    assert.ok(quoted.startsWith("CLAUDE_PLUGIN_ROOT='/home/u'\\''z' "), 'embedded quote escaped: ' + quoted);
+  })) passed++; else failed++;
+
+  if (test('CLI rejects missing flag values with exit code 2', () => {
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const res = spawnSync('node', [
+      path.join(repoRoot, 'scripts', 'dsh', 'generate-hooks-config.js'),
+      '--ecc-root',
+    ], { encoding: 'utf8' });
+    assert.strictEqual(res.status, 2, 'exit 2 on missing value, stderr: ' + res.stderr);
+    assert.ok(res.stderr.includes('Missing value for --ecc-root'));
   })) passed++; else failed++;
 
   if (test('CLI end-to-end writes valid JSON to --out', () => {

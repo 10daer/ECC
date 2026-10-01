@@ -35,6 +35,10 @@ To expose the full curated set in every project, link the catalog once:
 ln -s /path/to/ECC/skills/<skill-name> ~/.dsh/skills/<skill-name>
 ```
 
+Run this per skill with real names substituted for both placeholders (for
+example `ln -s ~/ECC/skills/tdd-workflow ~/.dsh/skills/tdd-workflow`); the
+angle brackets are placeholders, not shell syntax.
+
 DSH reads `SKILL.md` frontmatter (name/description), which matches the ECC skill
 format, so no conversion is needed. Name conflicts with pre-existing user skills
 are resolved by root priority; skip those skills when linking.
@@ -96,13 +100,20 @@ Configuration notes from practice:
 ### Verify
 
 ```bash
-# Compose check (no session boot)
-cd ~/.dsh && dsh --profile web --dump-config > /dev/null && echo OK
+# Compose check (no session boot). Keep stderr visible: silently dropped or
+# rejected patch entries are reported there while the exit status stays 0.
+cd ~/.dsh && dsh --profile web --dump-config > /tmp/dump.yml
+
+grep ecc-hooks /tmp/dump.yml
 
 # End-to-end: fire a SessionStart hook in a one-shot headless session
 # (uses a test config with a single marker-writing hook)
 dsh --profile headless --patch /tmp/ecc-patch-test.yml 'Reply with exactly: BOOT-OK'
 ```
+
+A successful compose does not prove the entry mounted: dropped entries and
+"is not a group" rejections only appear on stderr, never in the exit status.
+Confirm the entry id exists in the dump and that stderr was empty.
 
 In a live web session, the GateGuard fact-forcing hook denies the first
 edit/write/bash attempt until facts are presented — a visible signal that the

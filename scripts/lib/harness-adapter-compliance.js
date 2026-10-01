@@ -284,7 +284,7 @@ const ADAPTER_RECORDS = Object.freeze([
       'Keep the tool-name matcher mapping (Bash to bash, Edit/MultiEdit to edit) in sync with DSH tool names',
       'A plain top-level patch entry is silently dropped; additions require a bare insert entry',
     ],
-    last_verified_at: '2026-10-02',
+    last_verified_at: '2026-10-01',
     owner: 'ECC maintainers',
     source_docs: [
       'docs/DEEPSEEK-HARNESS-GUIDE.md',
