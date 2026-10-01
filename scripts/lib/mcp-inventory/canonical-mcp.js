@@ -150,8 +150,9 @@ function buildSignature({ transport, command, args, url }) {
     return `${transport}:${url || ''}`;
   }
 
-  const argString = asStringArray(args).join(' ');
-  return `stdio:${[command, argString].filter(Boolean).join(' ')}`.trim();
+  // Preserve argv boundaries, including empty arguments and spaces in the
+  // executable path. Shell-style joining aliases distinct process invocations.
+  return `stdio:${JSON.stringify([command || null, asStringArray(args)])}`;
 }
 
 // Normalize a single raw server entry (from any reader) to ecc.mcp.v1 shape.
