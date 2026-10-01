@@ -319,6 +319,9 @@ for (const query of [
   'Should we use the feature skill?',
   'Why use the feature skill?',
   'The README says to use the feature skill.',
+  'The docs say use feature.',
+  'The docs say to use feature.',
+  'The docs said use feature.',
   '"Use the feature skill" is an example.',
 ]) {
   test('indirect name citation needs an agent decision: ' + query, () => withFixture(repoRoot => {
@@ -372,7 +375,7 @@ test('routing policy changes invalidate receipts created by the old citation pol
   const { compileContextProfile } = require('../../scripts/lib/context-profiles');
   const plan = compileContextProfile({ repoRoot, selectionMode: 'auto' });
   const bindingDigest = digestObject({ sessionId: 'session-1', taskId: 'task-1', revision: 1,
-    phase: 'implement', planDigest: plan.planDigest, routingPolicyVersion: 4,
+    phase: 'implement', planDigest: plan.planDigest, routingPolicyVersion: 5,
     triggersDigest: digestObject({}), queryDigest: digestObject(query) });
   const { receiptDigest: _receiptDigest, ...receipt } = first.receipt;
   const oldReceipt = { ...receipt, bindingDigest, explicitIds: [],
@@ -382,3 +385,62 @@ test('routing policy changes invalidate receipts created by the old citation pol
   assert.equal(result.reused, false);
   assert.deepEqual(result.loadedIds, []);
 }));
+
+for (const query of [
+  'Should we use feature? Use feature.',
+  'Use feature. Should we use feature?',
+  'The docs say use feature. Use feature.',
+  'Use feature. The docs say use feature.',
+  'The phrase "Use feature." is an example. Use feature.',
+  'The docs say "Use feature." Use feature.',
+  'The docs say "Should we use feature?" Use feature.',
+  `Use feature. The docs say "don’t use feature."`,
+  'Use feature. The phrase "Use feature." is an example.',
+  "Don't use feature. Use feature.",
+  'The docs say never use feature. Use feature.',
+  'Use feature. The docs say never use feature.',
+  'Use feature to inspect the essay.',
+]) {
+  test('a genuine directive survives surrounding discussion: ' + query, () => withFixture(repoRoot => {
+    const result = resolve(repoRoot, { query }, { load: true });
+    assert.deepEqual(result.loadedIds, ['skill:feature']);
+    assert.equal(result.reason, 'auto-selection');
+    assert.equal(result.receipt.autoSelection.exact, true);
+  }));
+}
+
+for (const query of [
+  "Use feature. Don't use feature.",
+  'Use feature. Never use feature.',
+  "Use feature. Don't use feature. Should we use feature?",
+]) {
+  test('a later rejection withdraws an earlier directive: ' + query, () => withFixture(repoRoot => {
+    const result = resolve(repoRoot, { query }, { load: true });
+    assert.deepEqual(result.loadedIds, []);
+    assert.equal(result.fallback, null);
+  }));
+}
+
+for (const prefix of [
+  "Don't use the database migration skill.",
+  'Don\u2019t use the database migration skill.',
+  'Never use database migration.',
+  'Should we use the database migration skill?',
+  'The docs say use the database migration skill.',
+]) {
+  test('singular named references cannot bypass citation review: ' + prefix, () => {
+    const query = prefix + ' Review a PostgreSQL migration that adds an indexed nullable column without downtime.';
+    const result = resolveTaskContext({ task: task({ query }), load: true });
+    const candidate = result.candidates.find(value => value.id === 'skill:database-migrations');
+    assert.ok(candidate && candidate.bm25 >= 20, 'Exercise the BM25 auto-admission threshold');
+    assert.equal(candidate.exact, false, 'Exercise the non-exact candidate path');
+    assert.deepEqual(result.loadedIds, []);
+    assert.equal(result.fallback, null);
+  });
+}
+
+test('singular forms do not create exact directive admission', () => {
+  const result = resolveTaskContext({ task: task({ query: 'Use the database migration skill.' }), load: true });
+  assert.ok(result.candidates.some(candidate => candidate.id === 'skill:database-migrations'));
+  assert.ok(!result.receipt.autoSelection || !result.receipt.autoSelection.exact);
+});
