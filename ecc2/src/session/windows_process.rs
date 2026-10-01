@@ -120,12 +120,9 @@ where
         return Ok(()); // The recorded process has gone; do not target its replacement.
     }
     // Holding this verified handle prevents PID reuse until taskkill completes.
-    // The process can still exit before taskkill runs; an error then is harmless
-    // only when the same handle confirms that this process has exited.
-    match terminate() {
-        Err(_) if handle.has_exited() => Ok(()),
-        result => result,
-    }
+    // Parent exit alone cannot prove that taskkill /T terminated descendants;
+    // preserve every tree-termination error instead of reporting success.
+    terminate()
 }
 
 fn retain_after_open_error(error: u32) -> bool {
@@ -156,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn termination_error_after_verified_exit_is_success() {
+    fn tree_termination_error_is_preserved_after_parent_exit() {
         let mut child = std::process::Command::new("cmd")
             .args(["/C", "pause"])
             .stdin(std::process::Stdio::piped())
@@ -173,7 +170,10 @@ mod tests {
         });
         let _ = child.kill();
         let _ = child.wait();
-        result.unwrap();
+        assert!(
+            result.is_err(),
+            "parent exit does not prove descendant termination"
+        );
     }
 
     #[test]

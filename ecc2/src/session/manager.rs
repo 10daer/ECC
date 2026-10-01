@@ -2319,6 +2319,15 @@ fn classify_merge_queue_report(
 pub async fn delete_session(db: &StateStore, id: &str) -> Result<()> {
     let session = resolve_session(db, id)?;
 
+    // Stale/failed sessions may still track a process after termination failed.
+    // Require stop to reconcile it before removing its record or working files.
+    if session.pid.is_some() {
+        anyhow::bail!(
+            "Cannot delete session {} with a tracked process; stop it first",
+            session.id
+        );
+    }
+
     if matches!(
         session.state,
         SessionState::Pending | SessionState::Running | SessionState::Idle
@@ -5089,6 +5098,51 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn delete_stale_windows_session_preserves_tracked_process_and_worktree() -> Result<()> {
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let result = async {
+            let root = TestDir::new("stale-delete-process")?;
+            let db = StateStore::open(&root.path().join("state.db"))?;
+            let mut session = build_session_record(
+                &db,
+                "task",
+                "claude",
+                false,
+                &build_config(root.path()),
+                root.path(),
+                SessionGrouping::default(),
+            )?;
+            let worktree = root.path().join("retained-worktree");
+            fs::create_dir_all(&worktree)?;
+            let marker = worktree.join("pending.txt");
+            fs::write(&marker, "retain while process is tracked")?;
+            session.state = SessionState::Stale;
+            session.pid = Some(child.id());
+            session.worktree = Some(super::super::WorktreeInfo {
+                path: worktree,
+                branch: "fixture".into(),
+                base_branch: "main".into(),
+            });
+            db.insert_session(&session)?;
+            let result = delete_session(&db, &session.id).await;
+            assert!(result.is_err(), "tracked PID must prevent deletion");
+            assert!(db.get_session(&session.id)?.is_some());
+            assert!(marker.exists());
+            assert!(child.try_wait()?.is_none());
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        let _ = child.kill();
+        let _ = child.wait();
+        result
     }
 
     #[cfg(windows)]
