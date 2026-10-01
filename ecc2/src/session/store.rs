@@ -2889,7 +2889,7 @@ impl StateStore {
             "UPDATE messages SET read = 1 WHERE to_session = ?1 AND read = 0 AND msg_type <> 'task_handoff'",
             rusqlite::params![session_id],
         )?;
-        self.refresh_session_board_meta()?;
+        // Non-handoff read flags do not affect board layout or handoff activity.
         Ok(updated)
     }
 
@@ -7520,6 +7520,40 @@ mod tests {
             .iter()
             .any(|detail| detail.contains("INTEGER PRIMARY KEY") && detail.contains("rowid>?")));
 
+        Ok(())
+    }
+
+    #[test]
+    fn viewed_messages_do_not_rewrite_board_metadata() -> Result<()> {
+        let tempdir = TestDir::new("store-viewed-message-board")?;
+        let db = StateStore::open(&tempdir.path().join("state.db"))?;
+        db.insert_session(&build_session("worker", SessionState::Pending))?;
+        db.insert_session(&build_session("unrelated", SessionState::Running))?;
+        db.send_message(
+            "planner",
+            "worker",
+            r#"{"task":"pending work"}"#,
+            "task_handoff",
+        )?;
+        db.send_message("planner", "worker", "Question", "query")?;
+        db.conn.execute_batch(
+            "CREATE TEMP TABLE board_updates (session_id TEXT);
+             CREATE TEMP TRIGGER track_board_updates AFTER UPDATE ON session_board
+             BEGIN INSERT INTO board_updates VALUES (NEW.session_id); END;",
+        )?;
+
+        assert_eq!(db.mark_non_handoff_messages_read("worker")?, 1);
+        assert_eq!(db.mark_non_handoff_messages_read("worker")?, 0);
+        assert_eq!(db.mark_non_handoff_messages_read("unrelated")?, 0);
+        assert_eq!(db.unread_task_handoff_count("worker")?, 1);
+        let updates: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM board_updates", [], |row| row.get(0))?;
+        assert_eq!(
+            updates, 0,
+            "viewing non-handoff messages does not change board activity"
+        );
+        assert_eq!(db.list_session_board_meta()?["worker"].handoff_backlog, 1);
         Ok(())
     }
 
