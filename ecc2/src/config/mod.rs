@@ -525,14 +525,22 @@ impl Config {
 
         impl Drop for TestConfigRoot {
             fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
+                if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                    eprintln!(
+                        "failed to remove test config root {}: {error}",
+                        self.0.display()
+                    );
+                }
             }
         }
 
         thread_local! {
-            static ROOT: TestConfigRoot = TestConfigRoot(
-                std::env::temp_dir().join(format!("ecc2-test-config-{}", uuid::Uuid::new_v4())),
-            );
+            static ROOT: TestConfigRoot = {
+                let root = std::env::temp_dir()
+                    .join(format!("ecc2-test-config-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&root).expect("create test config root");
+                TestConfigRoot(root)
+            };
         }
 
         ROOT.with(|root| root.0.clone())
