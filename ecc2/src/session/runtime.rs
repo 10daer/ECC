@@ -13,6 +13,17 @@ use super::SessionState;
 
 type DbAck = std::result::Result<(), String>;
 
+#[derive(Default)]
+struct CaptureTasks(Vec<tokio::task::AbortHandle>);
+
+impl Drop for CaptureTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 enum DbMessage {
     UpdateState {
         state: SessionState,
@@ -153,13 +164,21 @@ pub async fn capture_command_output(
 ) -> Result<ExitStatus> {
     let db_writer = DbWriter::start(db_path, session_id.clone());
 
+    let mut child = match command
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = db_writer.update_state(SessionState::Failed).await;
+            return Err(error)
+                .with_context(|| format!("Failed to start process for session {}", session_id));
+        }
+    };
+    let mut tasks = CaptureTasks::default();
     let result = async {
-        let mut child = command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("Failed to start process for session {}", session_id))?;
-
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
@@ -202,6 +221,7 @@ pub async fn capture_command_output(
                 }
             }
         });
+        tasks.0.push(heartbeat_task.abort_handle());
 
         let stdout_task = tokio::spawn(capture_stream(
             session_id.clone(),
@@ -210,6 +230,7 @@ pub async fn capture_command_output(
             output_store.clone(),
             db_writer.clone(),
         ));
+        tasks.0.push(stdout_task.abort_handle());
         let stderr_task = tokio::spawn(capture_stream(
             session_id.clone(),
             stderr,
@@ -217,6 +238,7 @@ pub async fn capture_command_output(
             output_store,
             db_writer.clone(),
         ));
+        tasks.0.push(stderr_task.abort_handle());
 
         let status = child.wait().await?;
         heartbeat_task.abort();
@@ -236,9 +258,22 @@ pub async fn capture_command_output(
     }
     .await;
 
-    if result.is_err() {
+    if let Err(error) = result {
+        // Keep the owned child available until exit is confirmed. A database
+        // failure must not turn a still-running process into an untracked one.
+        let termination = match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => child.kill().await,
+        };
+        if let Err(termination_error) = termination {
+            let _ = db_writer.update_state(SessionState::Stale).await;
+            return Err(error.context(format!(
+                "Could not confirm session child termination; existing process tracking was not cleared: {termination_error}"
+            )));
+        }
         let _ = db_writer.update_pid(None, None).await;
         let _ = db_writer.update_state(SessionState::Failed).await;
+        return Err(error);
     }
 
     result
@@ -278,6 +313,87 @@ mod tests {
     use crate::session::output::{SessionOutputStore, OUTPUT_BUFFER_LIMIT};
     use crate::session::store::StateStore;
     use crate::session::{Session, SessionMetrics, SessionState};
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn capture_command_output_stops_child_after_startup_database_failure() -> Result<()> {
+        let db_path = env::temp_dir().join(format!("ecc2-runtime-startup-{}.db", Uuid::new_v4()));
+        let db = StateStore::open(&db_path)?;
+        let now = Utc::now();
+        db.insert_session(&Session {
+            id: "startup-failure".into(),
+            task: "startup failure".into(),
+            project: "workspace".into(),
+            task_group: "general".into(),
+            agent_type: "test".into(),
+            working_dir: env::temp_dir(),
+            state: SessionState::Pending,
+            pid: None,
+            worktree: None,
+            created_at: now,
+            updated_at: now,
+            last_heartbeat_at: now,
+            metrics: SessionMetrics::default(),
+        })?;
+        let fixture = rusqlite::Connection::open(&db_path)?;
+        fixture.execute_batch(
+            "CREATE TABLE observed_child (pid INTEGER, creation_time TEXT);
+             CREATE TRIGGER observe_child AFTER UPDATE OF pid ON sessions
+             WHEN NEW.pid IS NOT NULL BEGIN
+                 INSERT INTO observed_child VALUES (NEW.pid, NEW.pid_creation_time);
+             END;
+             CREATE TRIGGER reject_running BEFORE UPDATE OF state ON sessions
+             WHEN NEW.state = 'running' BEGIN
+                 SELECT RAISE(FAIL, 'injected startup state failure');
+             END;",
+        )?;
+        let mut command = Command::new("cmd");
+        command.args(["/C", "ping -n 5 127.0.0.1 >nul"]);
+        let result = capture_command_output(
+            db_path.clone(),
+            "startup-failure".into(),
+            command,
+            SessionOutputStore::default(),
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+        let (pid, creation): (u32, String) = fixture.query_row(
+            "SELECT pid, creation_time FROM observed_child LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let creation = Some(creation.parse::<u64>()?);
+        let alive = super::super::windows_process::session_process_is_alive(pid, creation);
+        if alive {
+            // Only terminate the freshly spawned fixture after verifying its identity.
+            super::super::windows_process::with_verified_process(pid, creation, || {
+                let status = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output()?
+                    .status;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::other("fixture cleanup failed"))
+                }
+            })?;
+        }
+        let session = db.get_session("startup-failure")?.unwrap();
+        drop(fixture);
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("injected startup state failure"));
+        assert!(
+            !alive,
+            "startup failure must not leave an untracked child alive"
+        );
+        assert_eq!(session.state, SessionState::Failed);
+        assert_eq!(session.pid, None);
+        Ok(())
+    }
 
     #[cfg(windows)]
     #[tokio::test]
@@ -368,7 +484,15 @@ mod tests {
 
         let output_store = SessionOutputStore::default();
         let mut rx = output_store.subscribe();
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "echo alpha&echo beta>&2"]);
+            command
+        };
+        #[cfg(not(windows))]
         let mut command = Command::new("/bin/sh");
+        #[cfg(not(windows))]
         command
             .arg("-c")
             .arg("printf 'alpha\\n'; printf 'beta\\n' >&2");
@@ -434,7 +558,15 @@ mod tests {
             metrics: SessionMetrics::default(),
         })?;
 
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping -n 2 127.0.0.1 >nul"]);
+            command
+        };
+        #[cfg(not(windows))]
         let mut command = Command::new("/bin/sh");
+        #[cfg(not(windows))]
         command.arg("-c").arg("sleep 0.05");
 
         let _ = capture_command_output(
