@@ -5876,8 +5876,7 @@ fn build_legacy_schedule_draft(
 fn json_string_candidates(value: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
     paths
         .iter()
-        .find_map(|path| json_lookup(value, path))
-        .and_then(json_to_string)
+        .find_map(|path| json_lookup(value, path).and_then(json_to_string))
 }
 
 fn json_bool_candidates(value: &serde_json::Value, paths: &[&[&str]]) -> Option<bool> {
@@ -11021,6 +11020,38 @@ mod tests {
     }
 
     #[test]
+    fn json_string_candidates_skips_unusable_values() {
+        for unusable in [
+            serde_json::Value::Null,
+            serde_json::json!(true),
+            serde_json::json!({}),
+            serde_json::json!([]),
+            serde_json::json!("   "),
+        ] {
+            let value = serde_json::json!({"task": unusable, "prompt": " fallback "});
+            assert_eq!(
+                json_string_candidates(&value, &[&["task"], &["prompt"]]),
+                Some("fallback".to_string())
+            );
+        }
+        let value = serde_json::json!({"task": {"prompt": "nested task"}, "cron": null, "schedule": "*/15 * * * *"});
+        let draft = build_legacy_schedule_draft(&value, 0, "cron/jobs.json");
+        assert_eq!(draft.task.as_deref(), Some("nested task"));
+        assert_eq!(draft.cron_expr.as_deref(), Some("*/15 * * * *"));
+        assert_eq!(
+            json_string_candidates(
+                &serde_json::json!({"task": "first", "prompt": "later"}),
+                &[&["task"], &["prompt"]]
+            ),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            json_string_candidates(&serde_json::json!({"id": 42}), &[&["id"]]),
+            Some("42".to_string())
+        );
+    }
+
+    #[test]
     fn import_legacy_schedules_dry_run_reports_ready_disabled_and_invalid_jobs() -> Result<()> {
         let tempdir = TestDir::new("legacy-schedule-import-dry-run")?;
         let root = tempdir.path();
@@ -11032,7 +11063,7 @@ mod tests {
                     {
                         "name": "portal-recovery",
                         "cron": "*/15 * * * *",
-                        "prompt": "Check portal-first recovery flow",
+                        "task": {"prompt": "Check portal-first recovery flow"},
                         "agent": "codex",
                         "project": "billing-web",
                         "task_group": "recovery",
@@ -11085,7 +11116,7 @@ mod tests {
                     {
                         "name": "portal-recovery",
                         "cron": "*/15 * * * *",
-                        "prompt": "Check portal-first recovery flow",
+                        "task": {"prompt": "Check portal-first recovery flow"},
                         "agent": "codex",
                         "project": "billing-web",
                         "task_group": "recovery",
