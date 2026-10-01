@@ -180,7 +180,8 @@ async function asyncTest(name, fn) {
 // Run a script and capture output
 function runScript(scriptPath, input = '', env = {}, cwd = process.cwd()) {
   const learningEnv = ['evaluate-session.js', 'eval-wrapper.js'].includes(path.basename(scriptPath))
-    ? { ECC_LEARNING_STOP_ENABLED: '1', ECC_LEARNING_STOP_MODE: 'v1', ECC_HOOK_PROFILE: 'standard' }
+    ? { ECC_LEARNING_STOP_ENABLED: '1', ECC_LEARNING_STOP_MODE: 'v1', ECC_HOOK_PROFILE: 'standard',
+      ECC_HOOKS_ENABLED: 'true', ECC_DISABLED_HOOKS: '' }
     : {};
   return new Promise((resolve, reject) => {
     const proc = spawn('node', [scriptPath], {

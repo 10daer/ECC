@@ -65,7 +65,8 @@ function runEvaluate(stdinJson, preloadPath) {
     timeout: 10000,
     maxBuffer: 2 * 1024 * 1024,
     env: { ...process.env, ECC_LEARNING_STOP_ENABLED: '1',
-      ECC_LEARNING_STOP_MODE: 'v1', ECC_HOOK_PROFILE: 'standard' },
+      ECC_LEARNING_STOP_MODE: 'v1', ECC_HOOK_PROFILE: 'standard',
+      ECC_HOOKS_ENABLED: 'true', ECC_DISABLED_HOOKS: '' },
   });
   return {
     code: result.status,
@@ -110,6 +111,33 @@ function runTests() {
   }
 
   // Threshold boundary tests (default minSessionLength = 10)
+  for (const profile of ['standard', 'strict']) {
+    for (const humanCount of [2, 9, 10]) {
+      if (test(`v2 counts human prompts instead of tool-result carriers (${profile}, ${humanCount})`, () => {
+        const dir = createTestDir();
+        try {
+          const transcript = path.join(dir, 'nested.jsonl');
+          const entries = Array.from({ length: humanCount }, (_, i) => ({
+            type: 'user', isMeta: i === 0,
+            message: { role: 'user', content: [{ type: 'text', text: 'Human prompt' }] }
+          }));
+          entries.push(...Array.from({ length: 8 }, () => ({ type: 'user',
+            message: { role: 'user', content: [{ type: 'tool_result', content: 'Tool output' }] } })));
+          entries.push({ type: 'user', content: '<system-reminder>not a human ask</system-reminder>' });
+          entries.push(null, { type: 'user' }, { type: 'user', content: [{ type: 'image' }] });
+          fs.writeFileSync(transcript, entries.map(entry => JSON.stringify(entry)).join('\n') + '\ninvalid JSON\n\n');
+          const result = spawnSync(process.execPath, [evaluateScript], {
+            encoding: 'utf8', input: JSON.stringify({ transcript_path: transcript }),
+            env: { ...process.env, ECC_LEARNING_STOP_ENABLED: '1', ECC_LEARNING_STOP_MODE: 'v2',
+              ECC_HOOK_PROFILE: profile, ECC_HOOKS_ENABLED: 'true', ECC_DISABLED_HOOKS: '' }
+          });
+          assert.strictEqual(result.status, 0);
+          assert.strictEqual(Boolean(result.stdout.trim()), humanCount >= 10);
+        } finally { cleanupTestDir(dir); }
+      })) passed++; else failed++;
+    }
+  }
+
   for (const profile of ['standard', 'strict']) {
     for (const boundary of ['active-stop', 'short-session', 'disabled-hook', 'disabled-all', 'unknown-mode']) {
       if (test(`v2 fails closed without writes (${profile}, ${boundary})`, () => {
@@ -388,7 +416,7 @@ function runTests() {
       timeout: 10000,
       env: { ...process.env, CLAUDE_TRANSCRIPT_PATH: transcript,
         ECC_LEARNING_STOP_ENABLED: '1', ECC_LEARNING_STOP_MODE: 'v1',
-        ECC_HOOK_PROFILE: 'standard' }
+        ECC_HOOK_PROFILE: 'standard', ECC_HOOKS_ENABLED: 'true', ECC_DISABLED_HOOKS: '' }
     });
 
     assert.strictEqual(result.status, 0, 'Should exit 0');

@@ -232,6 +232,8 @@ The hook itself does not write instincts or initialize learning directories, and
 does not enable the separate background observer. Model continuation can consume
 tokens and write local learning state; choose this setting only if you want that
 behavior. `stop_hook_active=true` prevents repeated delivery during that continuation.
+The threshold counts human prompts (including genuine metadata-marked prompts),
+excluding tool-result carriers, malformed records, empty turns, and harness echoes.
 
 For existing v1 workflows only, explicitly set **both**
 `ECC_LEARNING_STOP_ENABLED=1` and `ECC_LEARNING_STOP_MODE=v1`. That compatibility

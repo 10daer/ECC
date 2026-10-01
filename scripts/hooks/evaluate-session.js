@@ -20,9 +20,32 @@ const {
   ensureDir,
   readFile,
   countInFile,
+  stripAnsi,
   log,
   output
 } = require('../lib/utils');
+
+function countHumanMessages(transcriptPath) {
+  const content = readFile(transcriptPath);
+  if (!content) return 0;
+  let count = 0;
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (!entry || (entry.type !== 'user' && entry.role !== 'user' && entry.message?.role !== 'user')) continue;
+      const raw = entry.message?.content ?? entry.content;
+      if (Array.isArray(raw) && raw.some(block => block?.type === 'tool_result')) continue;
+      const text = typeof raw === 'string' ? raw : Array.isArray(raw)
+        ? raw.filter(block => block?.type === 'text').map(block => block.text || '').join(' ') : '';
+      const cleaned = stripAnsi(text).trim();
+      if (cleaned && !/^<(local-command-caveat|local-command-stdout|command-name|command-message|command-args|system-reminder|task-notification)/i.test(cleaned)) count++;
+    } catch {
+      // Ignore malformed transcript records; do not count text inside them.
+    }
+  }
+  return count;
+}
 
 // Read hook input from stdin (Claude Code provides transcript_path via stdin JSON)
 const MAX_STDIN = 1024 * 1024;
@@ -66,7 +89,7 @@ async function main() {
   if (stopHookActive || !transcriptPath || !fs.existsSync(transcriptPath)) return;
 
   if (mode === 'v2') {
-    const messageCount = countInFile(transcriptPath, /"type"\s*:\s*"user"/g);
+    const messageCount = countHumanMessages(transcriptPath);
     if (messageCount < 10) return;
     output({
       hookSpecificOutput: {
