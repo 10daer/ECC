@@ -248,6 +248,39 @@ function runTests() {
 
   // ─── Fallback ───
 
+  for (const currentCache of ['missing', 'file']) {
+    if (test(`discovers a legacy-only cache when the current cache is ${currentCache}`, () => {
+      const homeDir = createTempDir();
+      try {
+        const expected = setupPluginCache(homeDir, 'everything-claude-code', 'legacy-org', '1.7.0');
+        if (currentCache === 'file') {
+          fs.writeFileSync(path.join(homeDir, '.claude', 'plugins', 'cache', 'ecc'), 'not a directory');
+        }
+        assert.strictEqual(resolveEccRoot({ envRoot: '', homeDir }), expected);
+      } finally {
+        fs.rmSync(homeDir, { recursive: true, force: true });
+      }
+    })) passed++; else failed++;
+  }
+
+  if (test('INLINE_RESOLVE discovers a legacy-only cache past unrelated non-directory entries', () => {
+    const homeDir = createTempDir();
+    try {
+      const expected = setupPluginCache(homeDir, 'everything-claude-code', 'legacy-org', '1.7.0');
+      fs.copyFileSync(path.join(__dirname, '../../scripts/lib/resolve-ecc-root.js'),
+        path.join(expected, 'scripts/lib/resolve-ecc-root.js'));
+      fs.writeFileSync(path.join(homeDir, '.claude/plugins/cache/everything-claude-code/0-not-an-org'), 'unrelated');
+      const { execFileSync } = require('child_process');
+      const result = execFileSync(process.execPath, ['-e', `console.log(${INLINE_RESOLVE})`], {
+        env: { PATH: process.env.PATH, HOME: homeDir, USERPROFILE: homeDir },
+        encoding: 'utf8',
+      }).trim();
+      assert.strictEqual(result, expected);
+    } finally {
+      fs.rmSync(homeDir, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
   if (test('falls back to ~/.claude/ when nothing is found', () => {
     const homeDir = createTempDir();
     try {
