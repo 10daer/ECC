@@ -1,8 +1,17 @@
 use std::ffi::c_void;
+use std::io;
 
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const WAIT_OBJECT_0: u32 = 0;
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+#[repr(C)]
+#[derive(Default)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -12,8 +21,107 @@ extern "system" {
     fn wait_for_single_object(handle: *mut c_void, milliseconds: u32) -> u32;
     #[link_name = "CloseHandle"]
     fn close_handle(handle: *mut c_void) -> i32;
-    #[link_name = "GetLastError"]
-    fn get_last_error() -> u32;
+    #[link_name = "GetProcessTimes"]
+    fn get_process_times(
+        handle: *mut c_void,
+        creation: *mut FileTime,
+        exit: *mut FileTime,
+        kernel: *mut FileTime,
+        user: *mut FileTime,
+    ) -> i32;
+}
+
+struct ProcessHandle(*mut c_void);
+
+impl ProcessHandle {
+    fn open(pid: u32) -> io::Result<Self> {
+        // SAFETY: opens a non-inherited process handle for read-only queries.
+        let handle =
+            unsafe { open_process(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(handle))
+    }
+
+    fn has_exited(&self) -> bool {
+        // SAFETY: the owned handle stays open throughout the zero-timeout wait.
+        unsafe { wait_for_single_object(self.0, 0) == WAIT_OBJECT_0 }
+    }
+}
+
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        // SAFETY: closes this uniquely owned handle exactly once.
+        unsafe { close_handle(self.0) };
+    }
+}
+
+/// Read the exact process creation FILETIME from the spawned child's handle.
+///
+/// # Safety
+/// `handle` must be a valid process handle kept open by its owner for this call.
+pub(super) unsafe fn creation_time_from_handle(handle: *mut c_void) -> io::Result<u64> {
+    let mut creation = FileTime::default();
+    let mut exit = FileTime::default();
+    let mut kernel = FileTime::default();
+    let mut user = FileTime::default();
+    if get_process_times(handle, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((u64::from(creation.high) << 32) | u64::from(creation.low))
+}
+
+pub(super) fn session_process_is_alive(pid: u32, expected_creation: Option<u64>) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let handle = match ProcessHandle::open(pid) {
+        Ok(handle) => handle,
+        Err(error) => return retain_after_open_error(error.raw_os_error().unwrap_or(0) as u32),
+    };
+    if handle.has_exited() {
+        return false;
+    }
+    match expected_creation {
+        // Missing legacy identity or a failed query is uncertain, not death.
+        // Termination independently requires a confirmed identity below.
+        None => true,
+        Some(expected) => unsafe { creation_time_from_handle(handle.0) }
+            .map(|actual| actual == expected)
+            .unwrap_or(true),
+    }
+}
+
+pub(super) fn with_verified_process<F>(
+    pid: u32,
+    expected_creation: Option<u64>,
+    terminate: F,
+) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let expected = expected_creation.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Session process identity is unverified",
+        )
+    })?;
+    let handle = match ProcessHandle::open(pid) {
+        Ok(handle) => handle,
+        Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if handle.has_exited() {
+        return Ok(());
+    }
+    // SAFETY: the owned handle remains open for the query and termination.
+    if unsafe { creation_time_from_handle(handle.0) }? != expected {
+        return Ok(()); // The recorded process has gone; do not target its replacement.
+    }
+    // Holding the verified process handle prevents PID reuse until taskkill
+    // completes, even if the process exits between this check and invocation.
+    terminate()
 }
 
 fn retain_after_open_error(error: u32) -> bool {
@@ -22,39 +130,79 @@ fn retain_after_open_error(error: u32) -> bool {
     error != ERROR_INVALID_PARAMETER
 }
 
-pub(super) fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-
-    // SAFETY: request only synchronization access to an existing process;
-    // the handle is never inherited and no signal or mutation is performed.
-    let handle = unsafe { open_process(SYNCHRONIZE, 0, pid) };
-    if handle.is_null() {
-        // SAFETY: read the error immediately after the failed Win32 call.
-        return retain_after_open_error(unsafe { get_last_error() });
-    }
-
-    // SAFETY: this is a valid owned process handle, kept open through the
-    // zero-timeout wait and closed exactly once afterward. A signaled process
-    // has terminated; timeout or unknown wait failure conservatively retains it.
-    let outcome = unsafe { wait_for_single_object(handle, 0) };
-    unsafe { close_handle(handle) };
-    outcome != WAIT_OBJECT_0
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{pid_is_alive, retain_after_open_error};
+    use super::{
+        creation_time_from_handle, retain_after_open_error, session_process_is_alive,
+        with_verified_process,
+    };
+    use std::os::windows::io::AsRawHandle;
+
+    #[test]
+    fn reused_identity_is_not_recovered_or_terminated() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("isolated child");
+        let creation = unsafe { creation_time_from_handle(child.as_raw_handle()) }.unwrap();
+        let alive = session_process_is_alive(child.id(), Some(creation + 1));
+        let called = std::cell::Cell::new(false);
+        let result = with_verified_process(child.id(), Some(creation + 1), || {
+            called.set(true);
+            Ok(())
+        });
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!alive);
+        result.unwrap();
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn missing_identity_refuses_termination() {
+        let called = std::cell::Cell::new(false);
+        assert!(with_verified_process(std::process::id(), None, || {
+            called.set(true);
+            Ok(())
+        })
+        .is_err());
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn exact_child_identity_allows_termination() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("isolated child");
+        let creation = unsafe { creation_time_from_handle(child.as_raw_handle()) }.unwrap();
+        let alive = session_process_is_alive(child.id(), Some(creation));
+        let called = std::cell::Cell::new(false);
+        let result = with_verified_process(child.id(), Some(creation), || {
+            called.set(true);
+            child.kill()
+        });
+        if result.is_err() {
+            let _ = child.kill();
+        }
+        child.wait().unwrap();
+        assert!(alive);
+        result.unwrap();
+        assert!(called.get());
+    }
 
     #[test]
     fn current_process_is_alive() {
-        assert!(pid_is_alive(std::process::id()));
+        assert!(session_process_is_alive(std::process::id(), None));
     }
 
     #[test]
     fn zero_is_not_a_session_process() {
-        assert!(!pid_is_alive(0));
+        assert!(!session_process_is_alive(0, None));
     }
 
     #[test]
@@ -65,7 +213,7 @@ mod tests {
             .expect("start isolated child");
         let pid = child.id();
         child.wait().expect("wait for isolated child");
-        assert!(!pid_is_alive(pid));
+        assert!(!session_process_is_alive(pid, None));
     }
 
     #[test]
@@ -76,7 +224,7 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .expect("start isolated live child");
-        let alive = pid_is_alive(child.id());
+        let alive = session_process_is_alive(child.id(), None);
         child.kill().expect("stop isolated live child");
         child.wait().expect("reap isolated live child");
         assert!(alive);

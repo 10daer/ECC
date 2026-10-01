@@ -20,6 +20,7 @@ enum DbMessage {
     },
     UpdatePid {
         pid: Option<u32>,
+        creation_time: Option<u64>,
         ack: oneshot::Sender<DbAck>,
     },
     AppendOutputLine {
@@ -48,8 +49,13 @@ impl DbWriter {
         self.send(|ack| DbMessage::UpdateState { state, ack }).await
     }
 
-    async fn update_pid(&self, pid: Option<u32>) -> Result<()> {
-        self.send(|ack| DbMessage::UpdatePid { pid, ack }).await
+    async fn update_pid(&self, pid: Option<u32>, creation_time: Option<u64>) -> Result<()> {
+        self.send(|ack| DbMessage::UpdatePid {
+            pid,
+            creation_time,
+            ack,
+        })
+        .await
     }
 
     async fn append_output_line(&self, stream: OutputStream, line: String) -> Result<()> {
@@ -97,10 +103,14 @@ fn run_db_writer(db_path: PathBuf, session_id: String, mut rx: mpsc::UnboundedRe
                 };
                 let _ = ack.send(result);
             }
-            DbMessage::UpdatePid { pid, ack } => {
+            DbMessage::UpdatePid {
+                pid,
+                creation_time,
+                ack,
+            } => {
                 let result = match opened.as_ref() {
                     Some(db) => db
-                        .update_pid(&session_id, pid)
+                        .update_pid_with_creation_time(&session_id, pid, creation_time)
                         .map_err(|error| error.to_string()),
                     None => Err(open_error
                         .clone()
@@ -170,7 +180,14 @@ pub async fn capture_command_output(
         let pid = child
             .id()
             .ok_or_else(|| anyhow::anyhow!("Spawned process did not expose a process id"))?;
-        db_writer.update_pid(Some(pid)).await?;
+        #[cfg(windows)]
+        let creation_time = child.raw_handle().and_then(|handle| {
+            // SAFETY: child owns this handle through the database acknowledgement.
+            unsafe { super::windows_process::creation_time_from_handle(handle) }.ok()
+        });
+        #[cfg(not(windows))]
+        let creation_time = None;
+        db_writer.update_pid(Some(pid), creation_time).await?;
         db_writer.update_state(SessionState::Running).await?;
         db_writer.touch_heartbeat().await?;
 
@@ -212,7 +229,7 @@ pub async fn capture_command_output(
         } else {
             SessionState::Failed
         };
-        db_writer.update_pid(None).await?;
+        db_writer.update_pid(None, None).await?;
         db_writer.update_state(final_state).await?;
 
         Ok(status)
@@ -220,7 +237,7 @@ pub async fn capture_command_output(
     .await;
 
     if result.is_err() {
-        let _ = db_writer.update_pid(None).await;
+        let _ = db_writer.update_pid(None, None).await;
         let _ = db_writer.update_state(SessionState::Failed).await;
     }
 
@@ -261,6 +278,70 @@ mod tests {
     use crate::session::output::{SessionOutputStore, OUTPUT_BUFFER_LIMIT};
     use crate::session::store::StateStore;
     use crate::session::{Session, SessionMetrics, SessionState};
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn capture_command_output_records_windows_process_identity() -> Result<()> {
+        let db_path = env::temp_dir().join(format!("ecc2-runtime-identity-{}.db", Uuid::new_v4()));
+        let db = StateStore::open(&db_path)?;
+        let now = Utc::now();
+        db.insert_session(&Session {
+            id: "identity".to_string(),
+            task: "quiet process".to_string(),
+            project: "workspace".to_string(),
+            task_group: "general".to_string(),
+            agent_type: "test".to_string(),
+            working_dir: env::temp_dir(),
+            state: SessionState::Pending,
+            pid: None,
+            worktree: None,
+            created_at: now,
+            updated_at: now,
+            last_heartbeat_at: now,
+            metrics: SessionMetrics::default(),
+        })?;
+        let mut command = Command::new("cmd");
+        command.args(["/C", "ping -n 3 127.0.0.1 >nul"]);
+        let child_path = db_path.clone();
+        let task = tokio::spawn(capture_command_output(
+            child_path,
+            "identity".to_string(),
+            command,
+            SessionOutputStore::default(),
+            std::time::Duration::from_millis(20),
+        ));
+        let observed = async {
+            for _ in 0..100 {
+                let session = db.get_session("identity")?.unwrap();
+                if session.state == SessionState::Running {
+                    if let Some(pid) = session.pid {
+                        if let Some(creation) = db.process_creation_time("identity", pid)? {
+                            return Ok::<_, anyhow::Error>(
+                                super::super::windows_process::session_process_is_alive(
+                                    pid,
+                                    Some(creation),
+                                ),
+                            );
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Ok(false)
+        }
+        .await;
+        let completed = task.await;
+        let finished = db.get_session("identity")?;
+        drop(db);
+        let _ = std::fs::remove_file(db_path);
+        assert!(
+            observed?,
+            "runtime must persist the exact child identity while running"
+        );
+        assert!(completed??.success());
+        assert_eq!(finished.unwrap().pid, None);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn capture_command_output_persists_lines_and_events() -> Result<()> {

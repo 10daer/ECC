@@ -56,7 +56,22 @@ pub async fn run(db: StateStore, cfg: Config) -> Result<()> {
 }
 
 pub fn resume_crashed_sessions(db: &StateStore) -> Result<()> {
-    let failed_sessions = resume_crashed_sessions_with(db, pid_is_alive)?;
+    let failed_sessions = resume_crashed_sessions_with(db, |session| {
+        let Some(pid) = session.pid else {
+            return Ok(false);
+        };
+        #[cfg(windows)]
+        {
+            let creation = db.process_creation_time(&session.id, pid)?;
+            Ok(super::windows_process::session_process_is_alive(
+                pid, creation,
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(pid_is_alive(pid))
+        }
+    })?;
     if failed_sessions > 0 {
         tracing::warn!("Marked {failed_sessions} crashed sessions as failed during daemon startup");
     }
@@ -65,7 +80,7 @@ pub fn resume_crashed_sessions(db: &StateStore) -> Result<()> {
 
 fn resume_crashed_sessions_with<F>(db: &StateStore, is_pid_alive: F) -> Result<usize>
 where
-    F: Fn(u32) -> bool,
+    F: Fn(&super::Session) -> Result<bool>,
 {
     let sessions = db.list_sessions()?;
     let mut failed_sessions = 0;
@@ -75,7 +90,7 @@ where
             continue;
         }
 
-        let is_alive = session.pid.is_some_and(&is_pid_alive);
+        let is_alive = session.pid.is_some() && is_pid_alive(&session)?;
         if is_alive {
             continue;
         }
@@ -490,11 +505,6 @@ fn pid_is_alive(pid: u32) -> bool {
     )
 }
 
-#[cfg(windows)]
-fn pid_is_alive(pid: u32) -> bool {
-    super::windows_process::pid_is_alive(pid)
-}
-
 #[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> bool {
     false
@@ -544,7 +554,7 @@ mod tests {
             Some(4242),
         ))?;
 
-        resume_crashed_sessions_with(&store, |_| false)?;
+        resume_crashed_sessions_with(&store, |_| Ok(false))?;
 
         let session = store
             .get_session("deadbeef")?
@@ -566,7 +576,7 @@ mod tests {
             Some(7777),
         ))?;
 
-        resume_crashed_sessions_with(&store, |_| true)?;
+        resume_crashed_sessions_with(&store, |_| Ok(true))?;
 
         let session = store
             .get_session("alive123")?
@@ -600,6 +610,35 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_file(path);
         Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resume_crashed_sessions_rejects_reused_windows_identity() -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()?;
+        let path = temp_db_path();
+        let result = (|| -> Result<()> {
+            let creation = unsafe {
+                super::super::windows_process::creation_time_from_handle(child.as_raw_handle())
+            }?;
+            let store = StateStore::open(&path)?;
+            store.insert_session(&sample_session("reused", SessionState::Running, None))?;
+            store.update_pid_with_creation_time("reused", Some(child.id()), Some(creation + 1))?;
+            resume_crashed_sessions(&store)?;
+            let session = store.get_session("reused")?.unwrap();
+            assert_eq!(session.state, SessionState::Failed);
+            assert_eq!(session.pid, None);
+            Ok(())
+        })();
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(path);
+        result
     }
 
     #[tokio::test]

@@ -788,7 +788,7 @@ pub fn enforce_session_heartbeats(
     db: &StateStore,
     cfg: &Config,
 ) -> Result<HeartbeatEnforcementOutcome> {
-    enforce_session_heartbeats_with(db, cfg, kill_process)
+    enforce_session_heartbeats_with(db, cfg, |session| kill_session_process(db, session))
 }
 
 fn enforce_session_heartbeats_with<F>(
@@ -797,7 +797,7 @@ fn enforce_session_heartbeats_with<F>(
     terminate_pid: F,
 ) -> Result<HeartbeatEnforcementOutcome>
 where
-    F: Fn(u32) -> Result<()>,
+    F: Fn(&Session) -> Result<()>,
 {
     let timeout = chrono::Duration::seconds(cfg.session_timeout_secs as i64);
     let now = chrono::Utc::now();
@@ -813,8 +813,14 @@ where
         }
 
         if cfg.auto_terminate_stale_sessions {
-            if let Some(pid) = session.pid {
-                let _ = terminate_pid(pid);
+            if session.pid.is_some() {
+                if let Err(error) = terminate_pid(&session) {
+                    tracing::warn!(
+                        "Session {} could not be safely terminated: {error}",
+                        session.id
+                    );
+                    continue;
+                }
             }
             db.update_state_and_pid(&session.id, &SessionState::Failed, None)?;
             outcome.auto_terminated_sessions.push(session.id);
@@ -2731,8 +2737,18 @@ async fn create_session_in_dir(
         .unwrap_or(repo_root);
 
     match spawn_claude_code(agent_program, task, &session.id, working_dir).await {
-        Ok(pid) => {
-            db.update_pid(&session.id, Some(pid))?;
+        Ok(child) => {
+            let pid = child
+                .id()
+                .ok_or_else(|| anyhow::anyhow!("Claude Code did not expose a process id"))?;
+            #[cfg(windows)]
+            let creation_time = child.raw_handle().and_then(|handle| {
+                // SAFETY: child owns this process handle through the store update.
+                unsafe { super::windows_process::creation_time_from_handle(handle) }.ok()
+            });
+            #[cfg(not(windows))]
+            let creation_time = None;
+            db.update_pid_with_creation_time(&session.id, Some(pid), creation_time)?;
             db.update_state(&session.id, &SessionState::Running)?;
             Ok(session.id)
         }
@@ -3064,7 +3080,9 @@ fn configure_background_runner_command(command: &mut Command) {
     {
         use std::os::windows::process::CommandExt;
 
-        command.as_std_mut().creation_flags(detached_creation_flags());
+        command
+            .as_std_mut()
+            .creation_flags(detached_creation_flags());
     }
 }
 
@@ -3544,7 +3562,7 @@ async fn spawn_claude_code(
     task: &str,
     session_id: &str,
     working_dir: &Path,
-) -> Result<u32> {
+) -> Result<tokio::process::Child> {
     let mut command = build_agent_command(
         &Config::default(),
         "claude",
@@ -3565,9 +3583,7 @@ async fn spawn_claude_code(
             )
         })?;
 
-    child
-        .id()
-        .ok_or_else(|| anyhow::anyhow!("Claude Code did not expose a process id"))
+    Ok(child)
 }
 
 async fn stop_session_with_options(
@@ -3580,8 +3596,8 @@ async fn stop_session_with_options(
 }
 
 fn stop_session_recorded(db: &StateStore, session: &Session, cleanup_worktree: bool) -> Result<()> {
-    if let Some(pid) = session.pid {
-        kill_process(pid)?;
+    if session.pid.is_some() {
+        kill_session_process(db, session)?;
     }
 
     db.update_pid(&session.id, None)?;
@@ -3605,17 +3621,37 @@ fn kill_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn kill_process(pid: u32) -> Result<()> {
-    let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status()
-        .with_context(|| format!("Failed to invoke taskkill for process {pid}"))?;
+fn kill_session_process(db: &StateStore, session: &Session) -> Result<()> {
+    let Some(pid) = session.pid else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        let _ = db;
+        kill_process(pid)
+    }
+    #[cfg(windows)]
+    {
+        let expected = db.process_creation_time(&session.id, pid)?;
+        super::windows_process::with_verified_process(pid, expected, || {
+            let status = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .status()?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("taskkill exited with status {status}"))
+            if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "taskkill exited with status {status}"
+                )))
+            }
+        })
+        .with_context(|| {
+            format!(
+                "Could not safely terminate session {} process {pid}",
+                session.id
+            )
+        })
     }
 }
 
@@ -4217,6 +4253,7 @@ mod tests {
     use anyhow::{Context, Result};
     use chrono::{Duration, Utc};
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command as StdCommand;
@@ -4976,8 +5013,8 @@ mod tests {
             metrics: SessionMetrics::default(),
         })?;
 
-        let outcome = enforce_session_heartbeats_with(&db, &cfg, move |pid| {
-            killed_clone.lock().unwrap().push(pid);
+        let outcome = enforce_session_heartbeats_with(&db, &cfg, move |session| {
+            killed_clone.lock().unwrap().push(session.pid.unwrap());
             Ok(())
         })?;
         let session = db.get_session("stale-2")?.expect("session should exist");
@@ -5048,6 +5085,95 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn stop_and_heartbeat_do_not_terminate_unverified_windows_processes() -> Result<()> {
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let result = (|| -> Result<()> {
+            let root = TestDir::new("unverified-process")?;
+            let db = StateStore::open(&root.path().join("state.db"))?;
+            let mut session = build_session_record(
+                &db,
+                "task",
+                "claude",
+                false,
+                &build_config(root.path()),
+                root.path(),
+                SessionGrouping::default(),
+            )?;
+            session.state = SessionState::Running;
+            session.pid = Some(child.id());
+            session.last_heartbeat_at = Utc::now() - Duration::hours(1);
+            db.insert_session(&session)?;
+            assert!(stop_session_recorded(&db, &session, false).is_err());
+            let mut cfg = build_config(root.path());
+            cfg.auto_terminate_stale_sessions = true;
+            let outcome = enforce_session_heartbeats(&db, &cfg)?;
+            assert!(outcome.auto_terminated_sessions.is_empty());
+            assert_eq!(
+                db.get_session(&session.id)?.unwrap().state,
+                SessionState::Running
+            );
+            assert!(child.try_wait()?.is_none());
+            Ok(())
+        })();
+        let _ = child.kill();
+        let _ = child.wait();
+        result
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stop_windows_process_requires_the_recorded_creation_time() -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        let mut child = StdCommand::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()?;
+        let result = (|| -> Result<()> {
+            let creation = unsafe {
+                super::super::windows_process::creation_time_from_handle(child.as_raw_handle())
+            }?;
+            let root = TestDir::new("verified-process")?;
+            let db = StateStore::open(&root.path().join("state.db"))?;
+            let cfg = build_config(root.path());
+            let mut session = build_session_record(
+                &db,
+                "task",
+                "claude",
+                false,
+                &cfg,
+                root.path(),
+                SessionGrouping::default(),
+            )?;
+            session.state = SessionState::Running;
+            db.insert_session(&session)?;
+            db.update_pid_with_creation_time(&session.id, Some(child.id()), Some(creation + 1))?;
+            let session = db.get_session(&session.id)?.unwrap();
+            stop_session_recorded(&db, &session, false)?;
+            assert!(
+                child.try_wait()?.is_none(),
+                "replacement process must survive"
+            );
+            db.update_pid_with_creation_time(&session.id, Some(child.id()), Some(creation))?;
+            let session = db.get_session(&session.id)?.unwrap();
+            // This fixture uses the direct process path to avoid a second stop
+            // state transition while exercising the real taskkill dispatch.
+            kill_session_process(&db, &session)?;
+            child.wait()?;
+            assert!(child.try_wait()?.is_some());
+            Ok(())
+        })();
+        let _ = child.kill();
+        let _ = child.wait();
+        result
+    }
+
     fn write_fake_claude(root: &Path) -> Result<(PathBuf, PathBuf)> {
         let script_path = root.join("fake-claude.sh");
         let log_path = root.join("fake-claude.log");
@@ -5057,9 +5183,12 @@ mod tests {
         );
 
         fs::write(&script_path, script)?;
-        let mut permissions = fs::metadata(&script_path)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions)?;
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path)?.permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions)?;
+        }
 
         Ok((script_path, log_path))
     }
@@ -5154,8 +5283,7 @@ mod tests {
 
     #[test]
     fn background_runner_stderr_log_path_is_session_scoped() {
-        let path =
-            background_runner_stderr_log_path(Path::new("/tmp/ecc-repo"), "session-123");
+        let path = background_runner_stderr_log_path(Path::new("/tmp/ecc-repo"), "session-123");
         assert_eq!(
             path,
             PathBuf::from("/tmp/ecc-repo/.claude/ecc2/logs/session-123.runner-stderr.log")
