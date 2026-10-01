@@ -210,6 +210,9 @@ function createSessionStore({ stateDir = resolveStateDir() } = {}) {
   function end(key, endedBy) {
     const session = get(key);
     if (!session) return null;
+    // A later program end must not erase the user's sticky close decision.
+    // Only open(..., { reopen: true }) clears that decision.
+    if (session.status === 'ended' && session.endedBy === 'user') return session;
     session.status = 'ended';
     session.endedBy = endedBy === 'user' ? 'user' : 'agent';
     session.updatedAt = nowIso();
