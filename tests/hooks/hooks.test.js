@@ -6105,18 +6105,19 @@ async function runTests() {
 
   if (
     await asyncTest('evaluate-session exits 0 with error message when HOME is non-directory', async () => {
-      if (process.platform === 'win32') {
-        console.log('    (skipped — /dev/null not available on Windows)');
-        return;
-      }
-      // HOME=/dev/null makes ensureDir(learnedSkillsPath) throw ENOTDIR,
-      // which propagates to main().catch — the top-level error boundary
-      const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'), '{}', {
-        HOME: '/dev/null',
-        USERPROFILE: '/dev/null'
-      });
-      assert.strictEqual(result.code, 0, `Should exit 0 (don't block on errors), got ${result.code}`);
-      assert.ok(result.stderr.includes('[ContinuousLearning] Error:'), `stderr should contain [ContinuousLearning] Error:, got: ${result.stderr}`);
+      const testDir = createTestDir();
+      try {
+        const home = path.join(testDir, 'not-a-directory');
+        const transcript = path.join(testDir, 'transcript.jsonl');
+        fs.writeFileSync(home, 'fixture');
+        fs.writeFileSync(transcript, '{"type":"user"}\n'.repeat(12));
+        // A valid transcript enters opted-in v1 compatibility; only then should
+        // its directory error reach the fail-open boundary. Missing input is inert.
+        const result = await runScript(path.join(scriptsDir, 'evaluate-session.js'),
+          JSON.stringify({ transcript_path: transcript }), { HOME: home, USERPROFILE: home });
+        assert.strictEqual(result.code, 0, `Should exit 0 (don't block on errors), got ${result.code}`);
+        assert.ok(result.stderr.includes('[ContinuousLearning] Error:'), `stderr should contain [ContinuousLearning] Error:, got: ${result.stderr}`);
+      } finally { cleanupTestDir(testDir); }
     })
   )
     passed++;
