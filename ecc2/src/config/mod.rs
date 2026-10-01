@@ -1169,6 +1169,15 @@ focus_metrics = "e"
         assert_eq!(Config::config_path(), Config::config_path());
     }
 
+    #[test]
+    fn config_path_under_test_is_distinct_across_test_threads() {
+        let current = Config::config_path();
+        let other = std::thread::spawn(Config::config_path)
+            .join()
+            .expect("config path thread should complete");
+        assert_ne!(current, other);
+    }
+
     #[cfg(unix)]
     #[test]
     fn config_root_under_test_is_owner_only() {
