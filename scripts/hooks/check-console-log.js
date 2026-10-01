@@ -29,7 +29,7 @@ const EXCLUDED_PATTERNS = [
 function displayPath(file) {
   // Keep filesystem paths intact while making each warning one safe text line.
   // eslint-disable-next-line no-control-regex
-  return file.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g,
+  return file.replace(/\\/g, '\\\\').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g,
     character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
