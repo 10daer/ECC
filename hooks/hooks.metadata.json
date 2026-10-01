@@ -5,134 +5,134 @@
       {
         "id": "pre:bash:dispatcher",
         "description": "Consolidated Bash preflight dispatcher for quality, tmux, push, and GateGuard checks",
-        "fingerprint": "0d30f37d2148"
+        "fingerprint": "0039abcfc944"
       },
       {
         "id": "pre:powershell:gateguard-fact-force",
         "description": "PowerShell fact-forcing gate: inspect destructive commands without running unrelated Bash-only preflight hooks",
-        "fingerprint": "63877b632223"
+        "fingerprint": "a7618e98c2ef"
       },
       {
         "id": "pre:write:doc-file-warning",
         "description": "Doc file warning: warn about non-standard documentation files (exit code 0; warns only)",
-        "fingerprint": "595406f864e2"
+        "fingerprint": "71822b344e74"
       },
       {
         "id": "pre:edit-write:suggest-compact",
         "description": "Suggest manual compaction at logical intervals",
-        "fingerprint": "d99998a8f039"
+        "fingerprint": "293f47a7725b"
       },
       {
         "id": "pre:observe:continuous-learning",
         "description": "Capture tool use observations for continuous learning",
-        "fingerprint": "17f73ac2a883"
+        "fingerprint": "d5919c4995bf"
       },
       {
         "id": "pre:governance-capture",
         "description": "Capture governance events (secrets, policy violations, approval requests). Enable with ECC_GOVERNANCE_CAPTURE=1",
-        "fingerprint": "ffa978692652"
+        "fingerprint": "76194f557be7"
       },
       {
         "id": "pre:config-protection",
         "description": "Block modifications to linter/formatter config files. Steers agent to fix code instead of weakening configs.",
-        "fingerprint": "2b2be80bbeb3"
+        "fingerprint": "a24d0eb78c3d"
       },
       {
         "id": "pre:mcp-health-check",
         "description": "Check MCP server health before MCP tool execution and block unhealthy MCP calls",
-        "fingerprint": "a68881c27a83"
+        "fingerprint": "a722b41fc797"
       },
       {
         "id": "pre:edit-write:gateguard-fact-force",
         "description": "Fact-forcing gate: block first Edit/Write/MultiEdit per file and demand investigation (importers, data schemas, user instruction) before allowing",
-        "fingerprint": "32c4a312b4c2"
+        "fingerprint": "34e49fbb1df8"
       }
     ],
     "PreCompact": [
       {
         "id": "pre:compact",
         "description": "Save state before context compaction",
-        "fingerprint": "5a4ef4aaa985"
+        "fingerprint": "364d34db2aa2"
       }
     ],
     "SessionStart": [
       {
         "id": "session:start",
         "description": "Load previous context and detect package manager on new session",
-        "fingerprint": "3bbe414382a5"
+        "fingerprint": "b9c75059ffec"
       },
       {
         "id": "session-start:plan-canvas-sessions",
         "description": "Surface open Plan Canvas review sessions so a fresh session can resume the loop",
-        "fingerprint": "ad75ab423357"
+        "fingerprint": "7ac9ff1212fb"
       }
     ],
     "PostToolUse": [
       {
         "id": "post:dispatcher:sync",
         "description": "Run synchronous PostToolUse hooks in one process while preserving per-hook controls",
-        "fingerprint": "69422cb651aa"
+        "fingerprint": "295394d9c742"
       },
       {
         "id": "post:dispatcher:async",
         "description": "Run background PostToolUse hooks in one process while preserving per-hook controls",
-        "fingerprint": "01af98da6841"
+        "fingerprint": "59e0ac4f3e6d"
       }
     ],
     "PostToolUseFailure": [
       {
         "id": "post:mcp-health-check",
         "description": "Track failed MCP tool calls, mark unhealthy servers, and attempt reconnect",
-        "fingerprint": "edbf5346288f"
+        "fingerprint": "54dd411536c2"
       },
       {
         "id": "post:skill:track",
         "description": "Record hard Skill tool failures for skill-health telemetry",
-        "fingerprint": "a4dbe0729f30"
+        "fingerprint": "2750493d43ff"
       }
     ],
     "Stop": [
       {
         "id": "stop:plan-canvas-pending",
         "description": "Deliver undelivered Plan Canvas browser feedback before the agent stops",
-        "fingerprint": "5953e0fed81c"
+        "fingerprint": "e576a06504e1"
       },
       {
         "id": "stop:format-typecheck",
         "description": "Batch format (Biome/Prettier) and typecheck (tsc) all JS/TS files edited this response — runs once at Stop instead of after every Edit",
-        "fingerprint": "a9d9bb04e060"
+        "fingerprint": "7cbfb29d0aa4"
       },
       {
         "id": "stop:check-console-log",
         "description": "Check for console.log in modified files after each response",
-        "fingerprint": "a675a517c549"
+        "fingerprint": "d685fa53b51a"
       },
       {
         "id": "stop:session-end",
         "description": "Persist session state after each response (Stop carries transcript_path)",
-        "fingerprint": "d094692bee01"
+        "fingerprint": "aa9fc41f7a30"
       },
       {
         "id": "stop:evaluate-session",
         "description": "Evaluate session for extractable patterns",
-        "fingerprint": "664eec4bb68f"
+        "fingerprint": "ff55b5893ccd"
       },
       {
         "id": "stop:cost-tracker",
         "description": "Track token and cost metrics per session",
-        "fingerprint": "5c5fe7253e20"
+        "fingerprint": "cab010a8ca41"
       },
       {
         "id": "stop:desktop-notify",
         "description": "Send desktop notification (macOS/WSL) with task summary when Claude responds",
-        "fingerprint": "7a492e898bf6"
+        "fingerprint": "9d3af448527a"
       }
     ],
     "SessionEnd": [
       {
         "id": "session:end:marker",
         "description": "Session end lifecycle marker (non-blocking)",
-        "fingerprint": "9270863f2935"
+        "fingerprint": "c27fb5998cb1"
       }
     ]
   }
