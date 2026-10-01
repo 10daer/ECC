@@ -4516,9 +4516,7 @@ impl Dashboard {
         self.session_output_generations = active_session_generations;
 
         let batch = match self.output_cursor {
-            Some(cursor) => self
-                .db
-                .get_output_since(cursor, OUTPUT_DELTA_BATCH_LIMIT),
+            Some(cursor) => self.db.get_output_since(cursor, OUTPUT_DELTA_BATCH_LIMIT),
             None => self.db.get_output_snapshot(OUTPUT_BUFFER_LIMIT),
         };
         let batch = match batch {
@@ -4923,10 +4921,18 @@ impl Dashboard {
             .copied()
             .unwrap_or(0);
         if unread_count > 0 {
-            match self.db.mark_messages_read(&session_id) {
-                Ok(_) => {
-                    self.unread_message_counts.insert(session_id.clone(), 0);
-                }
+            match self.db.mark_non_handoff_messages_read(&session_id) {
+                Ok(_) => match self.db.unread_task_handoff_count(&session_id) {
+                    Ok(remaining) => {
+                        self.unread_message_counts
+                            .insert(session_id.clone(), remaining);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "Failed to refresh unread handoffs for {session_id}: {error}"
+                        );
+                    }
+                },
                 Err(error) => {
                     tracing::warn!(
                         "Failed to mark session {} messages as read: {error}",
@@ -6595,7 +6601,10 @@ impl Dashboard {
                     format!(" | {branch}")
                 }
             ));
-            lines.push(format!("Task {}", truncate_for_dashboard(&session.task, 48)));
+            lines.push(format!(
+                "Task {}",
+                truncate_for_dashboard(&session.task, 48)
+            ));
             if let Some(meta) = meta {
                 lines.push(format!(
                     "Progress {:>3}% {}",
@@ -6645,7 +6654,14 @@ impl Dashboard {
             }
         }
 
-        let lanes = ["Inbox", "In Progress", "Review", "Blocked", "Done", "Stopped"];
+        let lanes = [
+            "Inbox",
+            "In Progress",
+            "Review",
+            "Blocked",
+            "Done",
+            "Stopped",
+        ];
         for label in lanes {
             let mut lane_sessions = self
                 .sessions
@@ -6771,7 +6787,10 @@ impl Dashboard {
                     session.agent_type,
                     meta.progress_percent,
                     board_progress_bar(meta.progress_percent),
-                    truncate_for_dashboard(meta.status_detail.as_deref().unwrap_or(&session.task), 18),
+                    truncate_for_dashboard(
+                        meta.status_detail.as_deref().unwrap_or(&session.task),
+                        18
+                    ),
                     activity_suffix,
                     backlog_suffix,
                     branch_suffix
@@ -8645,10 +8664,9 @@ fn board_codename(session: &Session) -> String {
         "Fox", "Kite", "Lynx", "Otter", "Rook", "Sprite", "Wisp", "Wolf",
     ];
 
-    let seed = session
-        .id
-        .bytes()
-        .fold(0usize, |acc, byte| acc.wrapping_mul(33).wrapping_add(byte as usize));
+    let seed = session.id.bytes().fold(0usize, |acc, byte| {
+        acc.wrapping_mul(33).wrapping_add(byte as usize)
+    });
     format!(
         "{} {}",
         ADJECTIVES[seed % ADJECTIVES.len()],
@@ -9603,10 +9621,35 @@ mod tests {
                 "query",
             )
             .unwrap();
+        dashboard
+            .db
+            .send_message(
+                "lead-12345678",
+                "worker-123456",
+                "{\"task\":\"Review auth flow\"}",
+                "task_handoff",
+            )
+            .unwrap();
         dashboard.unread_message_counts = dashboard.db.unread_message_counts().unwrap();
 
         dashboard.sync_selected_messages();
+        dashboard.sync_selected_messages();
 
+        let pending = dashboard
+            .db
+            .unread_task_handoffs_for_session("worker-123456", 10)
+            .unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "viewing messages must not consume queued work"
+        );
+        assert_eq!(pending[0].msg_type, "task_handoff");
+        assert!(pending[0].content.contains("Review auth flow"));
+        assert_eq!(
+            dashboard.unread_message_counts.get("worker-123456"),
+            Some(&1)
+        );
         assert_eq!(dashboard.approval_queue_counts.get("worker-123456"), None);
         assert!(dashboard.approval_queue_preview.is_empty());
     }

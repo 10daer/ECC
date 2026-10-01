@@ -2883,6 +2883,16 @@ impl StateStore {
         Ok(updated)
     }
 
+    /// Mark viewed messages read without consuming work awaiting dispatch.
+    pub fn mark_non_handoff_messages_read(&self, session_id: &str) -> Result<usize> {
+        let updated = self.conn.execute(
+            "UPDATE messages SET read = 1 WHERE to_session = ?1 AND read = 0 AND msg_type <> 'task_handoff'",
+            rusqlite::params![session_id],
+        )?;
+        self.refresh_session_board_meta()?;
+        Ok(updated)
+    }
+
     pub fn mark_message_read(&self, message_id: i64) -> Result<usize> {
         let updated = self.conn.execute(
             "UPDATE messages SET read = 1 WHERE id = ?1 AND read = 0",
@@ -4050,11 +4060,7 @@ impl StateStore {
     }
 
     /// Returns at most `limit` output rows newer than `cursor` in insertion order.
-    pub(crate) fn get_output_since(
-        &self,
-        cursor: i64,
-        limit: usize,
-    ) -> Result<SessionOutputBatch> {
+    pub(crate) fn get_output_since(&self, cursor: i64, limit: usize) -> Result<SessionOutputBatch> {
         let cursor = cursor.max(0);
         let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
