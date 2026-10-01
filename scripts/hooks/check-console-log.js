@@ -26,6 +26,13 @@ const EXCLUDED_PATTERNS = [
   /__mocks__\//,
 ];
 
+function displayPath(file) {
+  // Keep filesystem paths intact while making each warning one safe text line.
+  // eslint-disable-next-line no-control-regex
+  return file.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g,
+    character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+
 const MAX_DIRECT_STDIN_BYTES = 16 * 1024 * 1024;
 let data = '';
 let stdinBytes = 0;
@@ -75,7 +82,7 @@ process.stdin.on('end', () => {
     for (const file of files) {
       const content = readFile(file);
       if (content && content.includes('console.log')) {
-        log(`[Hook] WARNING: console.log found in ${file}`);
+        log(`[Hook] WARNING: console.log found in ${displayPath(file)}`);
         hasConsole = true;
       }
     }
