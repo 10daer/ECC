@@ -3,8 +3,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { resolveInvocationEnvironment } = require('../../invocation-environment');
 
-// Codex stores MCP servers in ~/.codex/config.toml as TOML tables:
+// Codex stores MCP servers in $CODEX_HOME/config.toml (default ~/.codex):
 //   [mcp_servers.NAME]
 //   command = "npx"
 //   args = ["-y", "pkg"]
@@ -49,7 +50,11 @@ function mapCodexServer(name, raw, configPath) {
 
 function readCodexMcp(options = {}) {
   const homeDir = options.homeDir || os.homedir();
-  const configPath = options.configPath || path.join(homeDir, '.codex', 'config.toml');
+  const environment = resolveInvocationEnvironment(options);
+  const codexHome = typeof environment.CODEX_HOME === 'string' && environment.CODEX_HOME !== ''
+    ? path.resolve(environment.CODEX_HOME)
+    : path.join(homeDir, '.codex');
+  const configPath = options.configPath || path.join(codexHome, 'config.toml');
 
   if (!fs.existsSync(configPath) || !fs.statSync(configPath).isFile()) {
     return [];
