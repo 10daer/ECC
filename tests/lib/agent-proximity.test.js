@@ -8,6 +8,8 @@ const assert = require('assert');
 const { treeDistance, lineRangeOverlap, graphDistance, collisionRisk, advise, closureRate } = require('../../scripts/lib/agent-proximity/distance');
 const { buildDependencyGraphFromSources, extractRelativeSpecifiers } = require('../../scripts/lib/agent-proximity/graph');
 const { scanAirspace, embedAgents } = require('../../scripts/lib/agent-proximity');
+const { buildProximitySnapshot } = require('../../scripts/lib/control-pane/proximity');
+const { buildControlPlaneView } = require('../../scripts/lib/control-pane/control-plane-view');
 
 let passed = 0;
 let failed = 0;
@@ -140,6 +142,29 @@ test('advise: deterministic — same inputs give same maneuver', () => {
   const v1 = advise(a, b, {});
   const v2 = advise(a, b, {});
   assert.deepStrictEqual({ s: v1.steer, h: v1.hold, l: v1.level }, { s: v2.steer, h: v2.hold, l: v2.level });
+});
+
+test('equal-start priority stays deterministic across clock ticks and session order', () => {
+  const originalNow = Date.now;
+  let now = Date.parse('2026-01-02T00:00:00Z');
+  Date.now = () => now++;
+  try {
+    for (const order of [['a', 'b'], ['b', 'a']]) {
+      const sessions = order.map(id => ({ id, state: 'running', createdAt: '2026-01-01T00:00:00Z' }));
+      const proximity = buildProximitySnapshot(sessions, {
+        workingSetFor: () => [{ path: 'src/shared.js', lines: [[1, 20]] }],
+        graph: {},
+      });
+      assert.strictEqual(proximity.advisories.length, 1);
+      assert.strictEqual(proximity.advisories[0].hold, 'a');
+      assert.strictEqual(proximity.advisories[0].steer, 'b');
+      assert.strictEqual(proximity.triggers.find(t => t.type === 'proximity_steer').to, 'b');
+      const view = buildControlPlaneView({ sessions, proximity }, { now: '2026-01-02T00:00:00Z' });
+      assert.deepStrictEqual(view.events[0].action, { type: 'steer', steer: 'b', hold: 'a' });
+    }
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 // ── closure rate ──

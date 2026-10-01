@@ -263,11 +263,11 @@ function collisionRisk(a, b, graph = {}, options = {}) {
  * Right-of-way priority: the agent with more committed work and the earlier
  * start holds course; the other steers. Higher number = higher priority.
  */
-function agentPriority(agent) {
+function agentPriority(agent, nowMs = Date.now()) {
   const progress = (agent.files || []).reduce((s, f) => s + (f.weight ?? 1), 0);
   const startedAt = agent.startedAt ? Date.parse(agent.startedAt) || 0 : 0;
   // Earlier start ⇒ larger right-of-way term (negative ms, so earlier = larger).
-  return { progress, ageMs: startedAt ? Date.now() - startedAt : 0 };
+  return { progress, ageMs: startedAt ? nowMs - startedAt : 0 };
 }
 
 /**
@@ -276,8 +276,9 @@ function agentPriority(agent) {
  * is coordinated. Returns { hold, steer } as agentIds.
  */
 function rightOfWay(a, b) {
-  const pa = agentPriority(a);
-  const pb = agentPriority(b);
+  const nowMs = Date.now();
+  const pa = agentPriority(a, nowMs);
+  const pb = agentPriority(b, nowMs);
   let aHasPriority;
   if (pa.progress !== pb.progress) aHasPriority = pa.progress > pb.progress;
   else if (pa.ageMs !== pb.ageMs) aHasPriority = pa.ageMs > pb.ageMs;
