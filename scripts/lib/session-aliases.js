@@ -85,6 +85,16 @@ function loadAliases() {
 // by the outer transaction's snapshot.
 const activeWrites = new Set();
 
+/**
+ * Run a synchronous alias transaction with exclusive access to its snapshot.
+ * Lock acquisition or reentry failure returns the caller's failure value.
+ * Release errors are logged without replacing the callback's result or error:
+ * a successfully published snapshot remains committed even if cleanup fails.
+ * @template T
+ * @param {function(): T} callback - Transaction to execute while holding the lock
+ * @param {T} failure - Result when the transaction cannot start
+ * @returns {T} The transaction result, or failure if it could not start
+ */
 function withAliasesLock(callback, failure) {
   const aliasesPath = path.resolve(getAliasesPath());
   if (activeWrites.has(aliasesPath)) {
@@ -118,17 +128,18 @@ function withAliasesLock(callback, failure) {
     }
     activeWrites.delete(aliasesPath);
   }
-  if (callbackFailed) {
-    if (releaseError) log(`[Aliases] Error releasing aliases lock: ${releaseError.message}`);
-    throw primaryError;
-  }
   if (releaseError) {
     log(`[Aliases] Error releasing aliases lock: ${releaseError.message}`);
-    return failure;
   }
+  if (callbackFailed) throw primaryError;
   return result;
 }
 
+/**
+ * Publish a complete alias snapshot while the caller holds the transaction lock.
+ * @param {object} aliases - Snapshot to publish without mutating the caller
+ * @returns {boolean} Whether atomic replacement succeeded
+ */
 function saveAliasesUnlocked(aliases) {
   try {
     const snapshot = {
@@ -467,26 +478,56 @@ function cleanupAliasesUnlocked(sessionExists) {
   };
 }
 
+/**
+ * Create or update an alias using the latest snapshot under the transaction lock.
+ * @param {string} alias - Alias name (alphanumeric, dash, underscore)
+ * @param {string} sessionPath - Session directory path
+ * @param {string|null} title - Optional title for the alias
+ * @returns {object} Result with success status and the saved alias details
+ */
 function setAlias(alias, sessionPath, title = null) {
   return withAliasesLock(() => setAliasUnlocked(alias, sessionPath, title),
     { success: false, error: 'Failed to save alias' });
 }
 
+/**
+ * Delete an alias without overwriting other writers' completed changes.
+ * @param {string} alias - Alias name to delete
+ * @returns {object} Result with success status and the deleted session path
+ */
 function deleteAlias(alias) {
   return withAliasesLock(() => deleteAliasUnlocked(alias),
     { success: false, error: 'Failed to delete alias' });
 }
 
+/**
+ * Rename an existing alias in one locked read-modify-write transaction.
+ * @param {string} oldAlias - Current alias name
+ * @param {string} newAlias - New unused alias name
+ * @returns {object} Result with success status and the renamed alias details
+ */
 function renameAlias(oldAlias, newAlias) {
   return withAliasesLock(() => renameAliasUnlocked(oldAlias, newAlias),
     { success: false, error: 'Failed to save renamed alias' });
 }
 
+/**
+ * Update an existing alias title using the latest locked snapshot.
+ * @param {string} alias - Alias name
+ * @param {string|null} title - New title, or null to clear it
+ * @returns {object} Result with success status and the updated title
+ */
 function updateAliasTitle(alias, title) {
   return withAliasesLock(() => updateAliasTitleUnlocked(alias, title),
     { success: false, error: 'Failed to update alias title' });
 }
 
+/**
+ * Remove aliases whose sessions no longer exist in a single locked transaction.
+ * The synchronous callback must not write aliases; its exceptions propagate.
+ * @param {function(string): boolean} sessionExists - Check whether a session exists
+ * @returns {object} Checked count, removed aliases, and any operation failure
+ */
 function cleanupAliases(sessionExists) {
   return withAliasesLock(() => cleanupAliasesUnlocked(sessionExists),
     { success: false, totalChecked: 0, removed: 0, removedAliases: [], error: 'Failed to save after cleanup' });

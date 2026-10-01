@@ -141,6 +141,15 @@ function recoverSettingsLock(lockPath, label = 'Claude settings') {
   }
 }
 
+/**
+ * Acquire exclusive settings access, optionally waiting for another writer.
+ * A recovery guard (`.ecc.lock.recover`) is never removed by a contender: if its
+ * owner crashes during recovery, inspect and remove the orphaned guard manually
+ * only after confirming no ECC process is active.
+ * @param {string} settingsPath - Settings file protected by the lock
+ * @param {object} options - Diagnostic label and bounded wait duration
+ * @returns {Function} Release callback for the acquired lock
+ */
 function acquireSettingsLock(settingsPath, { label = 'Claude settings', timeoutMs = 0 } = {}) {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
     throw new TypeError('Lock timeoutMs must be a finite non-negative number.');

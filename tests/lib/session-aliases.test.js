@@ -1856,6 +1856,86 @@ function runTests() {
     assert.strictEqual(aliases.setAlias('after-release-error', '/next').success, true);
   })) passed++; else failed++;
 
+  if (test('successful writes keep their results when releasing the lock fails', () => {
+    const cases = [
+      {
+        run: () => aliases.setAlias('added', '/added', 'Added'),
+        expected: { success: true, isNew: true, alias: 'added', sessionPath: '/added', title: 'Added' },
+        verify: data => assert.strictEqual(data.added.sessionPath, '/added')
+      },
+      {
+        run: () => aliases.deleteAlias('existing'),
+        expected: { success: true, alias: 'existing', deletedSessionPath: '/existing' },
+        verify: data => assert.deepStrictEqual(data, {})
+      },
+      {
+        run: () => aliases.renameAlias('existing', 'renamed'),
+        expected: { success: true, oldAlias: 'existing', newAlias: 'renamed', sessionPath: '/existing' },
+        verify: data => assert.deepStrictEqual(Object.keys(data), ['renamed'])
+      },
+      {
+        run: () => aliases.updateAliasTitle('existing', 'Updated'),
+        expected: { success: true, alias: 'existing', title: 'Updated' },
+        verify: data => assert.strictEqual(data.existing.title, 'Updated')
+      },
+      {
+        run: () => aliases.cleanupAliases(() => false),
+        expected: { success: true, totalChecked: 1, removed: 1,
+          removedAliases: [{ name: 'existing', sessionPath: '/existing' }] },
+        verify: data => assert.deepStrictEqual(data, {})
+      },
+      {
+        run: () => aliases.saveAliases({ aliases: { replacement: { sessionPath: '/replacement' } } }),
+        expected: true,
+        verify: data => assert.deepStrictEqual(data, { replacement: { sessionPath: '/replacement' } })
+      }
+    ];
+    for (const entry of cases) {
+      resetAliases();
+      aliases.setAlias('existing', '/existing');
+      const lockPath = aliases.getAliasesPath() + '.ecc.lock';
+      const originalRename = fs.renameSync;
+      const originalError = console.error;
+      const warnings = [];
+      try {
+        fs.renameSync = function (source) {
+          if (source === lockPath) throw new Error('release denied');
+          return originalRename.apply(this, arguments);
+        };
+        console.error = message => warnings.push(message);
+        assert.deepStrictEqual(entry.run(), entry.expected);
+        entry.verify(aliases.loadAliases().aliases);
+        assert.ok(warnings.some(message => message.includes('release denied')),
+          'A release failure remains visible to the caller');
+      } finally {
+        fs.renameSync = originalRename;
+        console.error = originalError;
+        fs.rmSync(lockPath, { force: true });
+      }
+      assert.strictEqual(aliases.setAlias('after-release-error', '/next').success, true,
+        'The local reentry guard is cleared after a release failure');
+    }
+  })) passed++; else failed++;
+
+  if (test('a release failure preserves the original operation failure result', () => {
+    resetAliases();
+    aliases.setAlias('existing', '/existing');
+    const lockPath = aliases.getAliasesPath() + '.ecc.lock';
+    const originalRename = fs.renameSync;
+    try {
+      fs.renameSync = function (source) {
+        if (source === lockPath) throw new Error('release denied');
+        return originalRename.apply(this, arguments);
+      };
+      assert.deepStrictEqual(aliases.deleteAlias('missing'),
+        { success: false, error: "Alias 'missing' not found" });
+      assert.ok(aliases.resolveAlias('existing'));
+    } finally {
+      fs.renameSync = originalRename;
+      fs.rmSync(lockPath, { force: true });
+    }
+  })) passed++; else failed++;
+
   if (test('saveAliases replaces its complete snapshot without mutating the caller', () => {
     resetAliases();
     aliases.setAlias('existing', '/existing');
