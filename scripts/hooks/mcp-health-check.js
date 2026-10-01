@@ -844,7 +844,8 @@ async function main() {
     return;
   }
 
-  const eventName = process.env.CLAUDE_HOOK_EVENT_NAME || 'PreToolUse';
+  // Native hook payloads carry the event; retain the env fallback for older callers.
+  const eventName = input.hook_event_name || process.env.CLAUDE_HOOK_EVENT_NAME || 'PreToolUse';
   const now = Date.now();
   const statePathValue = stateFilePath();
 
