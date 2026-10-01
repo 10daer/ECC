@@ -1554,9 +1554,11 @@ function isChecked(key) {
 
 // --- Sanitize file path against injection ---
 
-// Unicode policy for sanitizePath, mirroring the repo-wide dangerous set in
-// scripts/ci/check-unicode-safety.js. Named so the ranges stay auditable and
-// drift against the CI policy is visible in one place.
+// Unicode policy for sanitizePath starts with the repo-wide dangerous set in
+// scripts/ci/check-unicode-safety.js and adds display-ambiguity characters such
+// as soft hyphen. Source text may use those legitimately, but denial paths must
+// remain visually unambiguous. Named constants keep that stricter boundary
+// auditable.
 const ASCII_CONTROL_MAX = 0x1f;
 const ASCII_DELETE = 0x7f;
 const C1_CONTROLS = [0x80, 0x9f]; // Unicode C1 control block (U+0080..U+009F)
@@ -1566,6 +1568,7 @@ const BIDI_ISOLATES = [0x2066, 0x2069]; // LRI..PDI
 const ZERO_WIDTHS = [0x200b, 0x200d]; // ZWSP..ZWJ
 const WORD_JOINER = 0x2060;
 const BYTE_ORDER_MARK = 0xfeff;
+const SOFT_HYPHEN = 0x00ad;
 const VARIATION_SELECTORS = [0xfe00, 0xfe0f];
 const VARIATION_SUPPLEMENTS = [0xe0100, 0xe01ef]; // MONGOLIAN..TAGS (VS17..VS256)
 const TAG_BLOCK = [0xe0000, 0xe007f]; // ASCII-smuggling tag characters
@@ -1599,6 +1602,7 @@ function sanitizePath(filePath) {
       inRange(code, ZERO_WIDTHS) ||
       code === WORD_JOINER ||
       code === BYTE_ORDER_MARK ||
+      code === SOFT_HYPHEN ||
       inRange(code, VARIATION_SELECTORS) ||
       inRange(code, VARIATION_SUPPLEMENTS) ||
       inRange(code, TAG_BLOCK) ||

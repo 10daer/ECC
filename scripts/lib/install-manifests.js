@@ -15,7 +15,7 @@ const COMPONENT_FAMILY_PREFIXES = {
   skill: 'skill:',
   locale: 'locale:',
 };
-const SUPPORTED_LOCALES = Object.freeze(['ja', 'zh-CN', 'ko-KR', 'pt-BR', 'ru', 'tr', 'vi-VN', 'zh-TW', 'de-DE', 'uk-UA', 'pl']);
+const SUPPORTED_LOCALES = Object.freeze(['ja', 'zh-CN', 'ko-KR', 'pt-BR', 'ru', 'tr', 'vi-VN', 'zh-TW', 'de-DE', 'uk-UA', 'pl', 'bn']);
 const LOCALE_ALIAS_TO_COMPONENT_ID = Object.freeze({
   'ja': 'locale:ja',
   'ja-JP': 'locale:ja',
@@ -35,7 +35,9 @@ const LOCALE_ALIAS_TO_COMPONENT_ID = Object.freeze({
   'uk-UA': 'locale:uk-ua',
   'uk': 'locale:uk-ua',
   'pl': 'locale:pl',
-  'pl-PL': 'locale:pl'
+  'pl-PL': 'locale:pl',
+  'bn': 'locale:bn',
+  'bn-BD': 'locale:bn'
 });
 
 function listSupportedLocales() {

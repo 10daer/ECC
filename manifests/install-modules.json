@@ -158,6 +158,7 @@
         "skills/angular-developer",
         "skills/api-design",
         "skills/backend-patterns",
+        "skills/bengali-nlp",
         "skills/coding-standards",
         "skills/compose-multiplatform-patterns",
         "skills/contract-first",
@@ -255,6 +256,7 @@
         "skills/clickhouse-io",
         "skills/database-migrations",
         "skills/jpa-patterns",
+        "skills/mybatis-patterns",
         "skills/mysql-patterns",
         "skills/postgres-patterns",
         "skills/prisma-patterns",
@@ -1145,6 +1147,22 @@
       "dependencies": [],
       "defaultInstall": false,
       "cost": "heavy",
+      "stability": "stable"
+    },
+    {
+      "id": "docs-bn",
+      "kind": "docs",
+      "description": "Bengali (bn) translated reference documentation.",
+      "paths": [
+        "docs/bn"
+      ],
+      "targets": [
+        "claude",
+        "claude-project"
+      ],
+      "dependencies": [],
+      "defaultInstall": false,
+      "cost": "light",
       "stability": "stable"
     },
     {

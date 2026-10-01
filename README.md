@@ -32,7 +32,8 @@
   <a href="docs/de-DE/README.md">Deutsch</a> |
   <a href="docs/es/README.md">Español</a> |
   <a href="docs/uk-UA/README.md">Українська</a> |
-  <a href="docs/pl/README.md">Polski</a>
+  <a href="docs/pl/README.md">Polski</a> |
+  <a href="docs/bn/README.md">বাংলা</a>
 </p>
 
 <p align="center">
@@ -139,12 +140,12 @@ Instead of rebuilding that process in every prompt, you install it once and make
 
 ECC is MIT-licensed open source. It works best with Claude Code today, has a supported Codex sync path, and provides capability-limited adapters for Cursor, OpenCode, Gemini, Zed, GitHub Copilot, Antigravity, Qwen, and other harnesses. See the [support status matrix](#platform-support) before assuming feature parity.
 
-Access to 68 agents, 293 skills, and 94 legacy command shims, plus hooks, rules, memory, continuous learning, and AgentShield security scanning. The agents are specialized for planning, review, build repair, security, architecture, and domain work.
+Access to 69 agents, 295 skills, and 94 legacy command shims, plus hooks, rules, memory, continuous learning, and AgentShield security scanning. The agents are specialized for planning, review, build repair, security, architecture, and domain work.
 
 | Included         |       Count | What it gives you                                                                    |
 | ---------------- | ----------: | ------------------------------------------------------------------------------------ |
-| Agents           |   68 agents | Planning, review, build repair, security, architecture, and domain work              |
-| Skills           |  293 skills | TDD, research, security, docs, frontend, data, ML, operations, and more              |
+| Agents           |   69 agents | Planning, review, build repair, security, architecture, and domain work              |
+| Skills           |  295 skills | TDD, research, security, docs, frontend, data, ML, operations, and more              |
 | Commands         | 94 commands | Convenient entry points while ECC moves to a skills-first surface                    |
 | Hooks and memory |     Runtime | Enforcement, session summaries, continuous learning, instincts, and context controls |
 | Rules            |   Selective | Always-loaded standards you choose by language or project                            |
@@ -824,7 +825,7 @@ Stable graduation of the 2.0 line: control-pane substrate, worktree lifecycle se
 
 ```text
 ECC/
-|-- agents/           # 68 specialized subagents for delegation
+|-- agents/           # 69 specialized subagents for delegation
 |-- skills/           # 293 reusable workflows loaded on demand
 |-- commands/         # 94 maintained slash-command shims
 |-- rules/            # opt-in common and language standards
