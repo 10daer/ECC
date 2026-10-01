@@ -2628,7 +2628,7 @@ async fn main() -> Result<()> {
                     .copied()
                     .unwrap_or(0);
                 if unread_before > 0 {
-                    let _ = db.mark_messages_read(&session_id)?;
+                    let _ = db.mark_non_handoff_messages_read(&session_id)?;
                 }
 
                 if messages.is_empty() {
