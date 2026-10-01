@@ -43,6 +43,14 @@ function parseArgs(argv) {
   return parsed;
 }
 
+function isDryRun(options) {
+  const dryRunEnv = process.env.ECC_DRY_RUN;
+  if (dryRunEnv !== undefined && dryRunEnv !== '0' && dryRunEnv !== '1') {
+    throw new Error('ECC_DRY_RUN must be "1" or "0" when set');
+  }
+  return options.dryRun || dryRunEnv === '1';
+}
+
 function printHuman(result) {
   if (result.results.length === 0) {
     console.log('No ECC install-state files found for the current home/project context.');
@@ -78,15 +86,16 @@ async function main() {
       showHelp(0);
     }
 
+    const dryRun = isDryRun(options);
     const result = repairInstalledStates({
       repoRoot: require('path').join(__dirname, '..'),
       homeDir: process.env.HOME || os.homedir(),
       env: process.env,
       projectRoot: process.cwd(),
       targets: options.targets,
-      dryRun: options.dryRun,
+      dryRun,
     });
-    if (!options.dryRun) {
+    if (!dryRun) {
       const { reconcileCanonicalInstallStates } = require('./lib/install-state-store-sync');
       result.installStateProjection = await reconcileCanonicalInstallStates({
         homeDir: process.env.HOME || os.homedir(),
