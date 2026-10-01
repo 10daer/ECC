@@ -162,6 +162,61 @@ test('codex reader parses [mcp_servers.*] TOML tables', () => {
   assert.ok(remote && remote.url === 'https://mcp.example.com/sse', 'parses http/url server');
 });
 
+test('codex reader selects CODEX_HOME with explicit config path precedence', () => {
+  const home = tmpHome();
+  const customRoot = path.join(home, 'custom codex');
+  const defaultRoot = path.join(home, '.codex');
+  try {
+    for (const [root, name] of [[customRoot, 'custom'], [defaultRoot, 'default']]) {
+      fs.mkdirSync(root, { recursive: true });
+      fs.writeFileSync(path.join(root, 'config.toml'), `[mcp_servers.${name}]\ncommand = "node"\n`);
+    }
+    const names = options => readCodexMcp({ homeDir: home, ...options }).map(record => record.name);
+    assert.deepStrictEqual(names({ env: { CODEX_HOME: customRoot } }), ['custom']);
+    assert.deepStrictEqual(names({ env: { CODEX_HOME: '' } }), ['default']);
+    assert.deepStrictEqual(names({ env: {} }), ['default']);
+    assert.deepStrictEqual(names({ env: { CODEX_HOME: path.join(home, 'missing') } }), []);
+    const configPath = path.join(defaultRoot, 'config.toml');
+    const explicit = readCodexMcp({ homeDir: home, env: { CODEX_HOME: customRoot }, configPath });
+    assert.deepStrictEqual(explicit.map(record => record.name), ['default']);
+    assert.strictEqual(explicit[0].source.configPath, configPath);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('inventory CLI honors CODEX_HOME while explicit reader homes remain isolated', () => {
+  const home = tmpHome();
+  const customRoot = path.join(home, 'custom codex');
+  const defaultRoot = path.join(home, '.codex');
+  try {
+    for (const [root, name] of [[customRoot, 'custom'], [defaultRoot, 'default']]) {
+      fs.mkdirSync(root, { recursive: true });
+      fs.writeFileSync(path.join(root, 'config.toml'), `[mcp_servers.${name}]\ncommand = "node"\n`);
+    }
+    const env = { ...process.env, HOME: home, USERPROFILE: home, CODEX_HOME: customRoot,
+      OPENCODE_CONFIG_DIR: path.join(home, 'opencode') };
+    const cli = spawnSync(process.execPath, [path.join(__dirname, '../../scripts/mcp-inventory.js'), '--json'], {
+      env, cwd: home, encoding: 'utf8', timeout: 10000,
+    });
+    assert.strictEqual(cli.status, 0, cli.stderr);
+    const inventory = JSON.parse(cli.stdout);
+    assert.deepStrictEqual(inventory.servers.map(server => server.name), ['custom']);
+    assert.strictEqual(inventory.servers[0].sources[0].configPath, path.join(customRoot, 'config.toml'));
+    const reader = spawnSync(process.execPath, ['-e', [
+      'const { readCodexMcp } = require(process.env.ECC_TEST_READER);',
+      'process.stdout.write(JSON.stringify(readCodexMcp({ homeDir: process.env.HOME }).map(record => record.name)));',
+    ].join('\n')], {
+      env: { ...env, ECC_TEST_READER: path.join(__dirname, '../../scripts/lib/mcp-inventory/readers/codex.js') },
+      encoding: 'utf8', timeout: 10000,
+    });
+    assert.strictEqual(reader.status, 0, reader.stderr);
+    assert.deepStrictEqual(JSON.parse(reader.stdout), ['default']);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('opencode reader splits command array and reads environment', () => {
   const home = tmpHome();
   fs.mkdirSync(path.join(home, '.config', 'opencode'), { recursive: true });
