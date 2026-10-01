@@ -102,7 +102,17 @@ function readJsonl(filePath) {
     .filter(Boolean)
     .reduce((rows, line) => {
       try {
-        rows.push(JSON.parse(line));
+        const record = JSON.parse(line);
+        // Parsing alone does not establish the shape used by health/dashboard.
+        // Keep optional historical fields and unknown metadata unchanged.
+        if (record && typeof record === 'object' && !Array.isArray(record)
+          && typeof record.skill_id === 'string' && record.skill_id.trim()
+          && VALID_OUTCOMES.has(record.outcome)
+          && typeof record.recorded_at === 'string' && !Number.isNaN(Date.parse(record.recorded_at))
+          && (record.failure_reason === null || record.failure_reason === undefined
+            || typeof record.failure_reason === 'string')) {
+          rows.push(record);
+        }
       } catch {
         // Ignore malformed rows so analytics remain best-effort.
       }
