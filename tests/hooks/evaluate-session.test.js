@@ -110,6 +110,40 @@ function runTests() {
     }
   }
 
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ1cAAAAASUVORK5CYII=' } };
+  for (const [name, blocks, expected, humanCount = 9] of [
+    ['numeric text', [{ type: 'text', text: 42 }], false],
+    ['object text', [{ type: 'text', text: { value: 'prompt' } }], false],
+    ['image-only', [image], true],
+    ['URL image-only', [{ type: 'image', source: { type: 'url', url: 'https://example.com/image.png' } }], true],
+    ['malformed image', [{ type: 'image' }], false],
+    ['empty image', [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: '' } }], false],
+    ['invalid image URL', [{ type: 'image', source: { type: 'url', url: 'not a URL' } }], false],
+    ['file image URL', [{ type: 'image', source: { type: 'url', url: 'file:///tmp/image.png' } }], false],
+    ['unknown image source', [{ type: 'image', source: { type: 'unknown' } }], false],
+    ['two images in one turn', [image, image], false, 8],
+    ['harness text with image', [{ type: 'text', text: '<system-reminder>Harness context</system-reminder>' }, image], false],
+    ['tool image carrier', [{ type: 'tool_result', content: [image] }], false],
+  ]) {
+    if (test(`v2 handles ${name} without coercing malformed human content`, () => {
+      const dir = createTestDir();
+      try {
+        const transcript = createTranscript(dir, humanCount);
+        fs.appendFileSync(transcript, JSON.stringify({ type: 'user', message: { role: 'user', content: blocks } }) + '\n');
+        const home = path.join(dir, 'unused-home');
+        const result = spawnSync(process.execPath, [evaluateScript], {
+          encoding: 'utf8', input: JSON.stringify({ transcript_path: transcript }),
+          env: { ...process.env, HOME: home, USERPROFILE: home, ECC_AGENT_DATA_HOME: home,
+            ECC_HOOK_PROFILE: 'standard', ECC_LEARNING_STOP_ENABLED: '1', ECC_LEARNING_STOP_MODE: 'v2',
+            ECC_HOOKS_ENABLED: 'true', ECC_DISABLED_HOOKS: '' }
+        });
+        assert.strictEqual(result.status, 0, result.stderr);
+        assert.strictEqual(Boolean(result.stdout.trim()), expected);
+        assert.ok(!fs.existsSync(home), 'delivery must not initialize learned state');
+      } finally { cleanupTestDir(dir); }
+    })) passed++; else failed++;
+  }
+
   // Threshold boundary tests (default minSessionLength = 10)
   for (const profile of ['standard', 'strict']) {
     for (const humanCount of [2, 9, 10]) {

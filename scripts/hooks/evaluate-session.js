@@ -25,6 +25,20 @@ const {
   output
 } = require('../lib/utils');
 
+function isHumanImageBlock(block) {
+  if (block?.type !== 'image' || !block.source) return false;
+  const source = block.source;
+  if (source.type === 'base64') {
+    return typeof source.data === 'string' && Boolean(source.data.trim())
+      && typeof source.media_type === 'string' && source.media_type.startsWith('image/');
+  }
+  if (source.type === 'url' && typeof source.url === 'string') {
+    try { return ['http:', 'https:'].includes(new URL(source.url).protocol); }
+    catch { return false; }
+  }
+  return false;
+}
+
 function countHumanMessages(transcriptPath) {
   const content = readFile(transcriptPath);
   if (!content) return 0;
@@ -37,9 +51,10 @@ function countHumanMessages(transcriptPath) {
       const raw = entry.message?.content ?? entry.content;
       if (Array.isArray(raw) && raw.some(block => block?.type === 'tool_result')) continue;
       const text = typeof raw === 'string' ? raw : Array.isArray(raw)
-        ? raw.filter(block => block?.type === 'text').map(block => block.text || '').join(' ') : '';
+        ? raw.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join(' ') : '';
       const cleaned = stripAnsi(text).trim();
-      if (cleaned && !/^<(local-command-caveat|local-command-stdout|command-name|command-message|command-args|system-reminder|task-notification)/i.test(cleaned)) count++;
+      if (/^<(local-command-caveat|local-command-stdout|command-name|command-message|command-args|system-reminder|task-notification)/i.test(cleaned)) continue;
+      if (cleaned || (Array.isArray(raw) && raw.some(isHumanImageBlock))) count++;
     } catch {
       // Ignore malformed transcript records; do not count text inside them.
     }
