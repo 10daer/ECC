@@ -60,6 +60,8 @@ async function main() {
       assert.strictEqual((await request(port, 'POST', '/api/sessions', { file })).status, 200);
       console.log(`PASS ${endMode}: user closure survives repeated program end; explicit reopen still works`);
     }
+    console.log('Passed: 2');
+    console.log('Failed: 0');
   } finally {
     if (listening) await server.close();
     fs.rmSync(root, { recursive: true, force: true });
