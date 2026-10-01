@@ -11,6 +11,7 @@ const { execFileSync } = require('child_process');
 const INSTALL_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'install-apply.js');
 const DOCTOR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'doctor.js');
 const REPAIR_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'repair.js');
+const ECC_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'ecc.js');
 const REPO_ROOT = path.join(__dirname, '..', '..');
 // Windows CI file I/O is several times slower, and these cases run full
 // install, doctor, and repair passes over hundreds of files. Keep this in
@@ -45,8 +46,10 @@ function runNode(scriptPath, args = [], options = {}) {
   const homeDir = options.homeDir || process.env.HOME;
   const env = {
     ...process.env,
+    ECC_DRY_RUN: '0',
     HOME: homeDir,
     USERPROFILE: homeDir,
+    ...(options.env || {}),
   };
 
   try {
@@ -353,15 +356,39 @@ function runTests() {
         },
       });
 
-      const repairResult = runNode(REPAIR_SCRIPT, ['--target', 'cursor', '--dry-run', '--json'], {
-        cwd: projectRoot,
-        homeDir,
-      });
-      assert.strictEqual(repairResult.code, 0, repairResult.stderr);
-      const parsed = JSON.parse(repairResult.stdout);
-      assert.strictEqual(parsed.dryRun, true);
-      assert.ok(parsed.results[0].plannedRepairs.includes(renderedPath));
-      assert.strictEqual(fs.readFileSync(renderedPath, 'utf8'), '# drifted\n');
+      const stateBefore = fs.readFileSync(statePath, 'utf8');
+      const previews = [
+        { script: REPAIR_SCRIPT, args: ['--dry-run'] },
+        { script: REPAIR_SCRIPT, args: [], env: { ECC_DRY_RUN: '1' } },
+        { script: ECC_SCRIPT, args: ['--dry-run', 'repair'] },
+        { script: ECC_SCRIPT, args: ['repair', '--dry-run'] },
+      ];
+      for (const preview of previews) {
+        const repairResult = runNode(preview.script, [...preview.args, '--target', 'cursor', '--json'], {
+          cwd: projectRoot,
+          homeDir,
+          env: preview.env,
+        });
+        assert.strictEqual(repairResult.code, 0, repairResult.stderr);
+        const parsed = JSON.parse(repairResult.stdout);
+        assert.strictEqual(parsed.dryRun, true, JSON.stringify(preview));
+        assert.ok(parsed.results[0].plannedRepairs.includes(renderedPath));
+        assert.strictEqual(fs.readFileSync(renderedPath, 'utf8'), '# drifted\n');
+        assert.strictEqual(fs.readFileSync(statePath, 'utf8'), stateBefore);
+        assert.strictEqual(parsed.installStateProjection, undefined);
+      }
+
+      for (const invalidValue of ['true', '', '2']) {
+        const repairResult = runNode(REPAIR_SCRIPT, ['--target', 'cursor', '--json'], {
+          cwd: projectRoot,
+          homeDir,
+          env: { ECC_DRY_RUN: invalidValue },
+        });
+        assert.strictEqual(repairResult.code, 1);
+        assert.ok(repairResult.stderr.includes('ECC_DRY_RUN must be "1" or "0" when set'));
+        assert.strictEqual(fs.readFileSync(renderedPath, 'utf8'), '# drifted\n');
+        assert.strictEqual(fs.readFileSync(statePath, 'utf8'), stateBefore);
+      }
     } finally {
       cleanup(homeDir);
       cleanup(projectRoot);
