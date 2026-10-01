@@ -236,6 +236,11 @@ test('git status failures cannot become clean worktree facts', () => {
 });
 
 test('real git: an unavailable registered worktree cannot produce a cleanup plan', () => {
+  const availability = spawnSync('git', ['--version'], { encoding: 'utf8' });
+  if (availability.error && availability.error.code === 'ENOENT') {
+    console.log('  (skipped unavailable-worktree fixture: git unavailable)');
+    return;
+  }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-wl-unavailable-'));
   const repo = path.join(root, 'repo');
   const worktree = path.join(root, 'worktree');
