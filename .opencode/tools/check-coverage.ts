@@ -128,9 +128,24 @@ interface CoverageResult {
   suggestion?: string
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
+const lineSummarySchema = tool.schema.object({
+  total: tool.schema.number().int().nonnegative(),
+  covered: tool.schema.number().int().nonnegative(),
+}).refine(value => value.covered <= value.total, "Covered lines exceed total lines")
+
+const summarySchema = tool.schema.object({ lines: lineSummarySchema })
+const locationSchema = tool.schema.object({
+  start: tool.schema.object({ line: tool.schema.number().int().positive() }),
+})
+const rawSchema = tool.schema.object({
+  statementMap: tool.schema.record(tool.schema.string(), locationSchema),
+  s: tool.schema.record(tool.schema.string(), tool.schema.number().int().nonnegative()),
+}).refine(value => {
+  const statementIds = Object.keys(value.statementMap)
+  return statementIds.length === Object.keys(value.s).length
+    && statementIds.every(id => Object.hasOwn(value.s, id))
+}, "Coverage statement maps and hit records must contain the same IDs")
+const reportSchema = tool.schema.record(tool.schema.string(), tool.schema.unknown())
 
 function lineMetrics(lines: number, covered: number): CoverageSummary["total"] {
   if (!Number.isInteger(lines) || !Number.isInteger(covered) || lines < 0 || covered < 0 || covered > lines) {
@@ -140,47 +155,29 @@ function lineMetrics(lines: number, covered: number): CoverageSummary["total"] {
 }
 
 function summaryMetrics(value: unknown): CoverageSummary["total"] {
-  if (!isRecord(value) || !isRecord(value.lines)
-    || typeof value.lines.total !== "number" || typeof value.lines.covered !== "number") {
-    throw new Error("Invalid coverage summary")
-  }
-  return lineMetrics(value.lines.total, value.lines.covered)
+  const { lines } = summarySchema.parse(value)
+  return lineMetrics(lines.total, lines.covered)
 }
 
 function rawMetrics(value: unknown): CoverageSummary["total"] {
-  if (!isRecord(value) || !isRecord(value.statementMap) || !isRecord(value.s)) {
-    throw new Error("Unsupported coverage report")
-  }
-  const hitsByLine = new Map<number, number>()
-  for (const [statementId, hits] of Object.entries(value.s)) {
-    if (typeof hits !== "number" || !Number.isFinite(hits) || hits < 0) {
-      throw new Error("Invalid coverage statement hits")
-    }
-    const location = value.statementMap[statementId]
-    // Istanbul's getLineCoverage uses statement start lines and the maximum
-    // hit count when multiple statements share a line, rather than end ranges.
-    if (location === undefined) continue
-    if (!isRecord(location) || !isRecord(location.start)
-      || typeof location.start.line !== "number" || !Number.isInteger(location.start.line) || location.start.line < 1) {
-      throw new Error("Invalid coverage statement location")
-    }
-    const line = location.start.line
-    hitsByLine.set(line, Math.max(hitsByLine.get(line) || 0, hits))
-  }
-  return lineMetrics(hitsByLine.size, [...hitsByLine.values()].filter(hits => hits > 0).length)
+  const { statementMap, s } = rawSchema.parse(value)
+  const statements = Object.entries(s).map(([id, hits]) => ({ line: statementMap[id].start.line, hits }))
+  // Istanbul groups statements by start line and uses the maximum hit count.
+  // A line is covered if any statement on it has hits, regardless of end ranges.
+  const lines = new Set(statements.map(statement => statement.line))
+  const covered = new Set(statements.filter(statement => statement.hits > 0).map(statement => statement.line))
+  return lineMetrics(lines.size, covered.size)
 }
 
-function parseCoverageData(data: unknown): CoverageSummary {
-  if (!isRecord(data)) throw new Error("Unsupported coverage report")
-  const files: CoverageSummary["files"] = []
+function parseCoverageData(value: unknown): CoverageSummary {
+  const data = reportSchema.parse(value)
   if ("total" in data) {
-    for (const [file, value] of Object.entries(data)) {
-      if (file !== "total") files.push({ file, ...summaryMetrics(value) })
-    }
+    const files = Object.entries(data).filter(([file]) => file !== "total")
+      .map(([file, summary]) => ({ file, ...summaryMetrics(summary) }))
     return { total: summaryMetrics(data.total), files }
   }
   if (Object.keys(data).length === 0) throw new Error("Empty coverage report")
-  for (const [file, value] of Object.entries(data)) files.push({ file, ...rawMetrics(value) })
+  const files = Object.entries(data).map(([file, raw]) => ({ file, ...rawMetrics(raw) }))
   return {
     total: lineMetrics(
       files.reduce((sum, file) => sum + file.lines, 0),

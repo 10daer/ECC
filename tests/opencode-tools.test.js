@@ -254,6 +254,34 @@ async function main() {
       assert.deepStrictEqual(parsed.total, { lines: 0, covered: 0, percentage: 100 })
     }),
   ])
+  for (const [name, report] of [
+    ["missing hit entries", { statementMap: { 0: { start: { line: 1 } }, 1: { start: { line: 2 } } }, s: { 0: 1 } }],
+    ["orphan hit entries", { statementMap: { 0: { start: { line: 1 } } }, s: { 0: 1, 1: 1 } }],
+    ["fractional hits", { statementMap: { 0: { start: { line: 1 } } }, s: { 0: 0.5 } }],
+    ["negative hits", { statementMap: { 0: { start: { line: 1 } } }, s: { 0: -1 } }],
+    ["invalid locations", { statementMap: { 0: { start: { line: 0 } } }, s: { 0: 1 } }],
+  ]) {
+    tests.push([
+      `check-coverage: rejects ${name} and falls back to valid NYC data`,
+      async () => withTempProject(["coverage/coverage-final.json", ".nyc_output/coverage.json"], async projectDir => {
+        fs.writeFileSync(path.join(projectDir, "coverage/coverage-final.json"), JSON.stringify({ "bad.ts": report }))
+        fs.writeFileSync(path.join(projectDir, ".nyc_output/coverage.json"), JSON.stringify(rawCoverage))
+        const parsed = JSON.parse(await tools.checkcoverage.execute({ threshold: 100 }, createMockContext(projectDir)))
+        assert.strictEqual(parsed.coverageFile, ".nyc_output/coverage.json")
+        assert.strictEqual(parsed.success, false)
+        assert.deepStrictEqual(parsed.total, { lines: 2, covered: 1, percentage: 50 })
+      }),
+    ])
+  }
+  tests.push([
+    "check-coverage: accepts genuinely empty raw statement records",
+    async () => withTempProject(["coverage/coverage-final.json"], async projectDir => {
+      fs.writeFileSync(path.join(projectDir, "coverage/coverage-final.json"), JSON.stringify({ "empty.ts": { statementMap: {}, s: {} } }))
+      const parsed = JSON.parse(await tools.checkcoverage.execute({ threshold: 100 }, createMockContext(projectDir)))
+      assert.strictEqual(parsed.success, true)
+      assert.deepStrictEqual(parsed.total, { lines: 0, covered: 0, percentage: 100 })
+    }),
+  ])
   tests.push([
     "check-coverage: rejects malformed metrics instead of treating them as measured zero coverage",
     async () => withTempProject(["coverage/coverage-summary.json"], async projectDir => {
