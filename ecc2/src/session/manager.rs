@@ -1532,6 +1532,13 @@ async fn resume_session_with_program(
         anyhow::bail!("Session is already running: {}", session.id);
     }
 
+    if session.pid.is_some() {
+        anyhow::bail!(
+            "Session still has a tracked process; stop it before resuming: {}",
+            session.id
+        );
+    }
+
     db.update_state_and_pid(&session.id, &SessionState::Pending, None)?;
     if let Some(worktree) = session.worktree.as_ref() {
         if let Err(error) = worktree::sync_shared_dependency_dirs(worktree) {
@@ -6186,6 +6193,47 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn resume_session_preserves_retained_process_tracking() -> Result<()> {
+        let root = TestDir::new("resume-retained-process")?;
+        let cfg = build_config(root.path());
+        let db = StateStore::open(&cfg.db_path)?;
+        for (index, state) in [
+            SessionState::Pending,
+            SessionState::Running,
+            SessionState::Idle,
+            SessionState::Stale,
+            SessionState::Failed,
+            SessionState::Stopped,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("tracked-{index}");
+            let mut session = build_session(&id, state.clone(), Utc::now());
+            session.working_dir = root.path().to_path_buf();
+            session.pid = Some(31337);
+            db.insert_session(&session)?;
+            db.update_pid_with_creation_time(&id, session.pid, Some(123456789))?;
+            let result = resume_session_with_program(
+                &db,
+                &cfg,
+                &id,
+                Some(&root.path().join("missing-runner")),
+            )
+            .await;
+            let retained = db.get_session(&id)?.context("session must remain")?;
+            assert!(result.is_err());
+            assert_eq!(retained.state, state, "resume must preserve state for {id}");
+            assert_eq!(
+                retained.pid, session.pid,
+                "resume must preserve PID for {id}"
+            );
+            assert_eq!(db.process_creation_time(&id, 31337)?, Some(123456789));
+        }
+        Ok(())
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn resume_session_requeues_failed_session() -> Result<()> {
         let tempdir = TestDir::new("manager-resume-session")?;
@@ -6201,7 +6249,7 @@ mod tests {
             agent_type: "claude".to_string(),
             working_dir: tempdir.path().join("resume-working-dir"),
             state: SessionState::Failed,
-            pid: Some(31337),
+            pid: None,
             worktree: None,
             created_at: now - Duration::minutes(1),
             updated_at: now,
