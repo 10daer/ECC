@@ -64,9 +64,11 @@ function runEvaluate(stdinJson, preloadPath) {
     input: JSON.stringify(stdinJson),
     timeout: 10000,
     maxBuffer: 2 * 1024 * 1024,
+    env: { ...process.env, ECC_LEARNING_STOP_ENABLED: '1',
+      ECC_LEARNING_STOP_MODE: 'v1', ECC_HOOK_PROFILE: 'standard' },
   });
   return {
-    code: result.status || 0,
+    code: result.status,
     stdout: result.stdout || '',
     stderr: result.stderr || '',
   };
@@ -78,7 +80,60 @@ function runTests() {
   let passed = 0;
   let failed = 0;
 
+  for (const profile of ['minimal', 'standard', 'strict']) {
+    for (const enabled of ['', '0', 'true', '1']) {
+      if (test(`requires explicit consent and excludes minimal (${profile}, ${enabled || 'unset'})`, () => {
+        const dir = createTestDir();
+        try {
+          const transcript = createTranscript(dir, 12);
+          const home = path.join(dir, 'unused-home');
+          const result = spawnSync(process.execPath, [evaluateScript], {
+            encoding: 'utf8', input: JSON.stringify({ transcript_path: transcript }),
+            env: { ...process.env, HOME: home, USERPROFILE: home,
+              ECC_AGENT_DATA_HOME: home, ECC_HOOK_PROFILE: profile,
+              ECC_LEARNING_STOP_ENABLED: enabled, ECC_LEARNING_STOP_MODE: '',
+              ECC_HOOKS_ENABLED: 'true', ECC_DISABLED_HOOKS: '' }
+          });
+          assert.strictEqual(result.status, 0);
+          const shouldRun = enabled === '1' && profile !== 'minimal';
+          assert.strictEqual(Boolean(result.stdout.trim()), shouldRun);
+          assert.ok(!fs.existsSync(home), 'v2 delivery must not initialize learned state');
+          if (shouldRun) {
+            const context = JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+            assert.ok(context.includes('continuous-learning-v2'));
+            assert.ok(context.includes('project-scoped'));
+            assert.ok(!context.includes('Save learned skills to:'));
+          }
+        } finally { cleanupTestDir(dir); }
+      })) passed++; else failed++;
+    }
+  }
+
   // Threshold boundary tests (default minSessionLength = 10)
+  for (const profile of ['standard', 'strict']) {
+    for (const boundary of ['active-stop', 'short-session', 'disabled-hook', 'disabled-all', 'unknown-mode']) {
+      if (test(`v2 fails closed without writes (${profile}, ${boundary})`, () => {
+        const dir = createTestDir();
+        try {
+          const transcript = createTranscript(dir, boundary === 'short-session' ? 9 : 12);
+          const home = path.join(dir, 'unused-home');
+          const result = spawnSync(process.execPath, [evaluateScript], {
+            encoding: 'utf8', input: JSON.stringify({ transcript_path: transcript,
+              stop_hook_active: boundary === 'active-stop' }),
+            env: { ...process.env, HOME: home, USERPROFILE: home, ECC_AGENT_DATA_HOME: home,
+              ECC_HOOK_PROFILE: profile, ECC_LEARNING_STOP_ENABLED: '1',
+              ECC_LEARNING_STOP_MODE: boundary === 'unknown-mode' ? 'future' : 'v2',
+              ECC_HOOKS_ENABLED: boundary === 'disabled-all' ? 'false' : 'true',
+              ECC_DISABLED_HOOKS: boundary === 'disabled-hook' ? 'stop:evaluate-session' : '' }
+          });
+          assert.strictEqual(result.status, 0);
+          assert.strictEqual(result.stdout, '');
+          assert.ok(!fs.existsSync(home));
+        } finally { cleanupTestDir(dir); }
+      })) passed++; else failed++;
+    }
+  }
+
   console.log('Threshold boundary (default min=10):');
 
   if (test('skips session with 9 user messages (below threshold)', () => {
@@ -142,6 +197,8 @@ function runTests() {
     assert.ok(registration, 'The evaluator should be registered for Stop');
     assert.notStrictEqual(registration.async, true, 'The evaluator must not defer context to a later turn');
     assert.ok(registration.timeout > 30, 'The synchronous evaluator needs time beyond its 30-second child-process budget');
+    assert.ok(registration.command.includes('evaluate-session.js standard,strict 30000'));
+    assert.ok(!registration.command.includes('evaluate-session.js minimal,'));
   })) passed++; else failed++;
 
   if (test('allows a large Stop JSON payload to drain before exiting', () => {
@@ -329,7 +386,9 @@ function runTests() {
       encoding: 'utf8',
       input: 'invalid json {{{',
       timeout: 10000,
-      env: { ...process.env, CLAUDE_TRANSCRIPT_PATH: transcript }
+      env: { ...process.env, CLAUDE_TRANSCRIPT_PATH: transcript,
+        ECC_LEARNING_STOP_ENABLED: '1', ECC_LEARNING_STOP_MODE: 'v1',
+        ECC_HOOK_PROFILE: 'standard' }
     });
 
     assert.strictEqual(result.status, 0, 'Should exit 0');
