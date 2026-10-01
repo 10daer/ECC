@@ -505,8 +505,8 @@ function createPlanCanvasServer({
       }
       const session = store.findByFile(body.file);
       if (!session) return sendJson(res, 404, { error: 'no session for that file' });
-      endSession(session.key, 'agent');
-      return sendJson(res, 200, { status: 'ended', endedBy: 'agent' });
+      const ended = endSession(session.key, 'agent');
+      return sendJson(res, 200, { status: 'ended', endedBy: ended.endedBy });
     }
 
     const sessionMatch = pathname.match(/^\/api\/session\/([a-f0-9]{12})\/(feedback|end|reply|typing)$/);
