@@ -490,7 +490,12 @@ fn pid_is_alive(pid: u32) -> bool {
     )
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    super::windows_process::pid_is_alive(pid)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn pid_is_alive(_pid: u32) -> bool {
     false
 }
@@ -569,6 +574,30 @@ mod tests {
         assert_eq!(session.state, SessionState::Running);
         assert_eq!(session.pid, Some(7777));
 
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resume_crashed_sessions_preserves_current_windows_process() -> Result<()> {
+        let path = temp_db_path();
+        let store = StateStore::open(&path)?;
+        let pid = std::process::id();
+        store.insert_session(&sample_session(
+            "live-windows",
+            SessionState::Running,
+            Some(pid),
+        ))?;
+
+        resume_crashed_sessions(&store)?;
+
+        let session = store
+            .get_session("live-windows")?
+            .expect("live session must remain tracked");
+        assert_eq!(session.state, SessionState::Running);
+        assert_eq!(session.pid, Some(pid));
+        drop(store);
         let _ = std::fs::remove_file(path);
         Ok(())
     }
