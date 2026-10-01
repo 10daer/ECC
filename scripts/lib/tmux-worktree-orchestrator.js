@@ -72,6 +72,14 @@ function normalizeSeedPaths(seedPaths, repoRoot) {
     }
 
     const normalizedPath = relativePath.split(path.sep).join('/');
+    if (!normalizedPath) {
+      throw new Error(`seedPaths entries cannot replace the worktree root: ${entry}`);
+    }
+    const firstComponent = normalizedPath.split('/')[0];
+    const gitComponent = process.platform === 'win32' ? firstComponent.toLowerCase() : firstComponent;
+    if (gitComponent === '.git') {
+      throw new Error(`seedPaths entries cannot replace Git administration files: ${entry}`);
+    }
     if (seen.has(normalizedPath)) {
       continue;
     }
