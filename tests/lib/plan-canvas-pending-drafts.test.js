@@ -50,9 +50,10 @@ function client() {
 }
 
 async function main() {
+  let passed = 0;
   let failed = 0;
   async function test(name, fn) {
-    try { await fn(); console.log(`PASS ${name}`); } catch (error) { failed++; console.error(`FAIL ${name}: ${error.message}`); }
+    try { await fn(); passed++; console.log(`PASS ${name}`); } catch (error) { failed++; console.error(`FAIL ${name}: ${error.message}`); }
   }
   await test('acknowledgment removes only submitted annotations after queue edits', async () => {
     const app = client();
@@ -103,6 +104,8 @@ async function main() {
     assert.strictEqual(failure.get('chatInput').value, 'new draft');
     assert.strictEqual(failure.get('send').disabled, false);
   });
+  console.log(`Passed: ${passed}`);
+  console.log(`Failed: ${failed}`);
   if (failed) process.exitCode = 1;
 }
 
