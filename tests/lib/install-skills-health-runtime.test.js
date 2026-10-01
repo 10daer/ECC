@@ -7,11 +7,12 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { createManifestInstallPlan } = require('../../scripts/lib/install-executor');
 const { applyInstallPlan } = require('../../scripts/lib/install/apply');
+const { withHookConsent } = require('../../scripts/lib/install/hook-consent');
 
 let failed = 0;
 let passed = 0;
 
-for (const target of ['claude', 'claude-project', 'hermes', 'cursor']) {
+for (const [target, profile] of [['claude'], ['claude-project'], ['hermes'], ['cursor'], ['claude', 'core'], ['claude-project', 'core'], ['cursor', 'core']]) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-health-install-'));
   try {
     const projectRoot = path.join(root, 'project');
@@ -20,7 +21,8 @@ for (const target of ['claude', 'claude-project', 'hermes', 'cursor']) {
     fs.mkdirSync(homeDir, { recursive: true });
     // Installed CommonJS scripts must also work inside an ESM consumer project.
     fs.writeFileSync(path.join(projectRoot, 'package.json'), '{"type":"module"}\n');
-    const plan = createManifestInstallPlan({ target, projectRoot, homeDir, moduleIds: ['commands-core'] });
+    const plan = withHookConsent(createManifestInstallPlan({ target, projectRoot, homeDir,
+      ...(profile ? { profileId: profile } : { moduleIds: ['commands-core'] }) }), 'declined');
     assert.ok(!plan.selectedModuleIds.includes('hooks-runtime'));
     applyInstallPlan(plan);
     assert.ok(!fs.existsSync(path.join(plan.targetRoot, 'scripts', 'hooks')));
@@ -41,7 +43,7 @@ for (const target of ['claude', 'claude-project', 'hermes', 'cursor']) {
       assert.ok(result.stdout.includes('example'), 'installed report should discover supplied skills');
     }
     passed += 1;
-    console.log(`  ✓ ${target}: installed health and dashboard run without hook runtime`);
+    console.log(`  ✓ ${target} ${profile || 'commands-core'}: installed health and dashboard run without hook runtime`);
   } catch (error) {
     failed += 1;
     console.error(`  ✗ ${target}: ${error.message}`);
