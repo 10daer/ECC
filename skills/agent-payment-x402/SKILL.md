@@ -175,8 +175,7 @@ client.registerPolicy((_x402Version, requirements) =>
 
 // The policy sees one challenge at a time, so it cannot enforce a session
 // total or ask a human anything. Keep the payment-enabled client private and
-// route every paid call through this boundary.
-const fetchWithPayment = wrapFetchWithPayment(fetch, client);
+// route every paid call through the payOnce boundary below.
 
 // Supply this from your harness — a real prompt, never a stub that returns true.
 declare function confirmWithUser(prompt: string): Promise<boolean>;
@@ -193,16 +192,30 @@ async function payOnce(url: string, init?: RequestInit): Promise<Response> {
     throw new Error("Session budget exhausted — blocked");
   }
   sessionSpent += MAX_AMOUNT;
-  if (!sessionApproved) {
-    sessionApproved = await confirmWithUser(
-      `Allow paid requests up to ${SESSION_CAP} atomic units this session?`,
-    );
-    if (!sessionApproved) {
-      sessionSpent -= MAX_AMOUNT; // nothing was signed
-      throw new Error("User declined — no payment attempted");
+  // Release the reservation only when no signed payment left this process:
+  // a declined or failed prompt, a challenge the policy rejected, or a free
+  // response. Once a signed request is sent it may settle, so keep it counted.
+  let signedRequestSent = false;
+  const trackingFetch: typeof fetch = (input, reqInit) => {
+    const req = new Request(input, reqInit);
+    if (req.headers.has("PAYMENT-SIGNATURE") || req.headers.has("X-PAYMENT")) {
+      signedRequestSent = true;
     }
+    return fetch(req);
+  };
+  try {
+    if (!sessionApproved) {
+      sessionApproved = await confirmWithUser(
+        `Allow paid requests up to ${SESSION_CAP} atomic units this session?`,
+      );
+      if (!sessionApproved) {
+        throw new Error("User declined — no payment attempted");
+      }
+    }
+    return await wrapFetchWithPayment(trackingFetch, client)(url, init);
+  } finally {
+    if (!signedRequestSent) sessionSpent -= MAX_AMOUNT;
   }
-  return fetchWithPayment(url, init);
 }
 
 const res = await payOnce("https://api.example.com/data", { method: "GET" });
