@@ -101,12 +101,6 @@ pub(super) fn with_verified_process<F>(
 where
     F: FnOnce() -> io::Result<()>,
 {
-    let expected = expected_creation.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Session process identity is unverified",
-        )
-    })?;
     let handle = match ProcessHandle::open(pid) {
         Ok(handle) => handle,
         Err(error) if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => return Ok(()),
@@ -115,13 +109,23 @@ where
     if handle.has_exited() {
         return Ok(());
     }
+    let expected = expected_creation.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Session process identity is unverified; verify and stop the legacy process externally, then retry",
+        )
+    })?;
     // SAFETY: the owned handle remains open for the query and termination.
     if unsafe { creation_time_from_handle(handle.0) }? != expected {
         return Ok(()); // The recorded process has gone; do not target its replacement.
     }
-    // Holding the verified process handle prevents PID reuse until taskkill
-    // completes, even if the process exits between this check and invocation.
-    terminate()
+    // Holding this verified handle prevents PID reuse until taskkill completes.
+    // The process can still exit before taskkill runs; an error then is harmless
+    // only when the same handle confirms that this process has exited.
+    match terminate() {
+        Err(_) if handle.has_exited() => Ok(()),
+        result => result,
+    }
 }
 
 fn retain_after_open_error(error: u32) -> bool {
@@ -137,6 +141,62 @@ mod tests {
         with_verified_process,
     };
     use std::os::windows::io::AsRawHandle;
+
+    #[test]
+    fn exited_legacy_process_does_not_require_identity() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("isolated child");
+        child.wait().unwrap();
+        with_verified_process(child.id(), None, || {
+            panic!("must not terminate an exited process")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn termination_error_after_verified_exit_is_success() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("isolated child");
+        let creation = unsafe { creation_time_from_handle(child.as_raw_handle()) }.unwrap();
+        let result = with_verified_process(child.id(), Some(creation), || {
+            child.kill()?;
+            child.wait()?;
+            Err(std::io::Error::other(
+                "process exited before taskkill completed",
+            ))
+        });
+        let _ = child.kill();
+        let _ = child.wait();
+        result.unwrap();
+    }
+
+    #[test]
+    fn termination_error_for_a_live_verified_process_is_preserved() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "pause"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("isolated child");
+        let creation = unsafe { creation_time_from_handle(child.as_raw_handle()) }.unwrap();
+        let result = with_verified_process(child.id(), Some(creation), || {
+            Err(std::io::Error::other("fixture termination failure"))
+        });
+        let alive = child.try_wait().unwrap().is_none();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(alive);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "fixture termination failure"
+        );
+    }
 
     #[test]
     fn reused_identity_is_not_recovered_or_terminated() {

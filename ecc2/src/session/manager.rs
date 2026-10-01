@@ -819,6 +819,12 @@ where
                         "Session {} could not be safely terminated: {error}",
                         session.id
                     );
+                    // A timeout still makes the session stale. Keep its PID and
+                    // identity so an uncertain live process remains tracked.
+                    if session.state != SessionState::Stale {
+                        db.update_state(&session.id, &SessionState::Stale)?;
+                        outcome.stale_sessions.push(session.id.clone());
+                    }
                     continue;
                 }
             }
@@ -5116,9 +5122,20 @@ mod tests {
             assert!(outcome.auto_terminated_sessions.is_empty());
             assert_eq!(
                 db.get_session(&session.id)?.unwrap().state,
-                SessionState::Running
+                SessionState::Stale
             );
+            assert_eq!(db.get_session(&session.id)?.unwrap().pid, Some(child.id()));
+            assert_eq!(outcome.stale_sessions, vec![session.id.clone()]);
             assert!(child.try_wait()?.is_none());
+            // A migrated process can be reconciled once it is verifiably gone;
+            // stopping the live unverified PID above never authorized a kill.
+            child.kill()?;
+            child.wait()?;
+            let stale = db.get_session(&session.id)?.unwrap();
+            stop_session_recorded(&db, &stale, false)?;
+            let stopped = db.get_session(&session.id)?.unwrap();
+            assert_eq!(stopped.state, SessionState::Stopped);
+            assert_eq!(stopped.pid, None);
             Ok(())
         })();
         let _ = child.kill();
