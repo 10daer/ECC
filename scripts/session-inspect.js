@@ -39,7 +39,7 @@ function usage() {
 
 function parseArgs(argv) {
   const args = argv.slice(2);
-  const parsed = {
+  let parsed = {
     target: null,
     adapterId: null,
     targetType: null,
@@ -65,16 +65,16 @@ function parseArgs(argv) {
       if (!value || value.startsWith('--')) {
         throw new Error(`Missing value for ${arg}`);
       }
-      parsed[valueOptions.get(arg)] = value;
+      parsed = { ...parsed, [valueOptions.get(arg)]: value };
       index += 1;
     } else if (arg === '--list-adapters') {
-      parsed.listAdapters = true;
+      parsed = { ...parsed, listAdapters: true };
     } else if (arg.startsWith('--')) {
       throw new Error(`Unknown argument: ${arg}`);
     } else if (parsed.target !== null) {
       throw new Error('Only one target may be provided');
     } else {
-      parsed.target = arg;
+      parsed = { ...parsed, target: arg };
     }
   }
 
