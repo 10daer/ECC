@@ -2023,6 +2023,11 @@ impl StateStore {
             {
                 continue;
             }
+            // The append-only hook log can outlive a deleted session or contain
+            // activity from a harness session that ECC2 never registered.
+            if !session_tasks.contains_key(&row.session_id) {
+                continue;
+            }
             if !seen_event_ids.insert(row.id.clone()) {
                 continue;
             }
@@ -4050,11 +4055,7 @@ impl StateStore {
     }
 
     /// Returns at most `limit` output rows newer than `cursor` in insertion order.
-    pub(crate) fn get_output_since(
-        &self,
-        cursor: i64,
-        limit: usize,
-    ) -> Result<SessionOutputBatch> {
+    pub(crate) fn get_output_since(&self, cursor: i64, limit: usize) -> Result<SessionOutputBatch> {
         let cursor = cursor.max(0);
         let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
@@ -6117,6 +6118,70 @@ mod tests {
         );
         assert_eq!(logs.entries[1].trigger_summary, "sync tools");
 
+        Ok(())
+    }
+
+    #[test]
+    fn sync_tool_activity_metrics_skips_deleted_and_unknown_sessions() -> Result<()> {
+        let tempdir = TestDir::new("store-tool-activity-missing-sessions")?;
+        let db = StateStore::open(&tempdir.path().join("state.db"))?;
+        let now = Utc::now();
+        for id in ["deleted-session", "active-session"] {
+            db.insert_session(&Session {
+                id: id.to_string(),
+                task: "sync surviving activity".to_string(),
+                project: "workspace".to_string(),
+                task_group: "general".to_string(),
+                agent_type: "claude".to_string(),
+                working_dir: tempdir.path().to_path_buf(),
+                state: SessionState::Stopped,
+                pid: None,
+                worktree: None,
+                created_at: now,
+                updated_at: now,
+                last_heartbeat_at: now,
+                metrics: SessionMetrics::default(),
+            })?;
+        }
+        let metrics_path = tempdir.path().join("tool-usage.jsonl");
+        let deleted_row = serde_json::json!({
+            "id": "deleted-event", "session_id": "deleted-session",
+            "tool_name": "Read", "file_paths": ["old.rs"]
+        });
+        fs::write(&metrics_path, format!("{deleted_row}\n"))?;
+        db.sync_tool_activity_metrics(&metrics_path)?;
+        db.delete_session("deleted-session")?;
+
+        let rows = [
+            deleted_row,
+            serde_json::json!({
+                "id": "shared-event", "session_id": "unknown-session",
+                "tool_name": "Read", "file_paths": ["unknown.rs"]
+            }),
+            serde_json::json!({
+                "id": "shared-event", "session_id": "active-session",
+                "tool_name": "Write", "file_paths": ["current.rs"]
+            }),
+        ];
+        let content = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        fs::write(&metrics_path, &content)?;
+        for _ in 0..2 {
+            db.sync_tool_activity_metrics(&metrics_path)?;
+            let session = db
+                .get_session("active-session")?
+                .expect("surviving session");
+            assert_eq!(session.metrics.tool_calls, 1);
+            assert_eq!(session.metrics.files_changed, 1);
+            let logs = db.query_tool_logs("active-session", 1, 10)?;
+            assert_eq!(logs.total, 1);
+            assert_eq!(logs.entries[0].tool_name, "Write");
+            assert!(db.get_session("deleted-session")?.is_none());
+            assert!(db.get_session("unknown-session")?.is_none());
+            assert_eq!(fs::read_to_string(&metrics_path)?, content);
+        }
         Ok(())
     }
 
