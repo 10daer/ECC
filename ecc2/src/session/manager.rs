@@ -1763,6 +1763,13 @@ pub async fn cleanup_session_worktree(db: &StateStore, id: &str) -> Result<()> {
         return Ok(());
     }
 
+    if session.pid.is_some() {
+        anyhow::bail!(
+            "Session still has a tracked process; stop it before cleaning its worktree: {}",
+            session.id
+        );
+    }
+
     if let Some(worktree) = session.worktree.as_ref() {
         crate::worktree::remove(worktree)?;
         db.clear_worktree(&session.id)?;
@@ -1795,12 +1802,17 @@ pub async fn merge_session_worktree(
 ) -> Result<WorktreeMergeOutcome> {
     let session = resolve_session(db, id)?;
 
-    if matches!(
-        session.state,
-        SessionState::Pending | SessionState::Running | SessionState::Idle | SessionState::Stale
-    ) {
+    if session.pid.is_some()
+        || matches!(
+            session.state,
+            SessionState::Pending
+                | SessionState::Running
+                | SessionState::Idle
+                | SessionState::Stale
+        )
+    {
         anyhow::bail!(
-            "Cannot merge active session {} while it is {}",
+            "Cannot merge session {} while it is active or has a tracked process ({})",
             session.id,
             session.state
         );
@@ -1829,12 +1841,17 @@ pub async fn merge_session_worktree(
 pub async fn rebase_session_worktree(db: &StateStore, id: &str) -> Result<WorktreeRebaseOutcome> {
     let session = resolve_session(db, id)?;
 
-    if matches!(
-        session.state,
-        SessionState::Pending | SessionState::Running | SessionState::Idle | SessionState::Stale
-    ) {
+    if session.pid.is_some()
+        || matches!(
+            session.state,
+            SessionState::Pending
+                | SessionState::Running
+                | SessionState::Idle
+                | SessionState::Stale
+        )
+    {
         anyhow::bail!(
-            "Cannot rebase active session {} while it is {}",
+            "Cannot rebase session {} while it is active or has a tracked process ({})",
             session.id,
             session.state
         );
@@ -6282,6 +6299,82 @@ mod tests {
                 .as_ref()
         ));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worktree_operations_preserve_retained_process_tracking() -> Result<()> {
+        for state in [SessionState::Failed, SessionState::Stopped] {
+            for action in ["cleanup", "merge", "rebase"] {
+                let root = TestDir::new("worktree-tracked-process")?;
+                let repo = root.path().join("repo");
+                init_git_repo(&repo)?;
+                let cfg = build_config(root.path());
+                let db = StateStore::open(&cfg.db_path)?;
+                let mut session = build_session_record(
+                    &db,
+                    "tracked work",
+                    "claude",
+                    true,
+                    &cfg,
+                    &repo,
+                    SessionGrouping::default(),
+                )?;
+                session.state = state.clone();
+                session.pid = Some(31337);
+                let worktree = session.worktree.clone().context("fixture worktree")?;
+                fs::write(worktree.path.join("feature.txt"), "retained feature\n")?;
+                run_git(&worktree.path, ["add", "feature.txt"])?;
+                run_git(&worktree.path, ["commit", "-qm", "feature"])?;
+                fs::write(repo.join("README.md"), "new base\n")?;
+                run_git(&repo, ["add", "README.md"])?;
+                run_git(&repo, ["commit", "-qm", "base change"])?;
+                db.insert_session(&session)?;
+                db.update_pid_with_creation_time(&session.id, session.pid, Some(123456789))?;
+                let head = worktree::branch_head_oid(&worktree, &worktree.branch)?;
+                let base = worktree::branch_head_oid(&worktree, &worktree.base_branch)?;
+                let result = match action {
+                    "cleanup" => cleanup_session_worktree(&db, &session.id).await,
+                    "merge" => merge_session_worktree(&db, &session.id, true)
+                        .await
+                        .map(|_| ()),
+                    _ => rebase_session_worktree(&db, &session.id).await.map(|_| ()),
+                };
+                assert!(
+                    result.is_err(),
+                    "{action} must reject retained PID in {state}"
+                );
+                let retained = db.get_session(&session.id)?.context("session remains")?;
+                assert_eq!(retained.state, state);
+                assert_eq!(retained.pid, session.pid);
+                assert_eq!(
+                    db.process_creation_time(&session.id, 31337)?,
+                    Some(123456789)
+                );
+                assert_eq!(
+                    retained.worktree.as_ref().map(|w| &w.path),
+                    Some(&worktree.path)
+                );
+                assert_eq!(
+                    fs::read_to_string(worktree.path.join("feature.txt"))?,
+                    "retained feature\n"
+                );
+                assert_eq!(
+                    worktree::branch_head_oid(&worktree, &worktree.branch)?,
+                    head
+                );
+                assert_eq!(
+                    worktree::branch_head_oid(&worktree, &worktree.base_branch)?,
+                    base
+                );
+                // Once tracking has been cleared by a successful stop, ordinary
+                // worktree cleanup remains available.
+                db.update_pid(&session.id, None)?;
+                cleanup_session_worktree(&db, &session.id).await?;
+                assert!(db.get_session(&session.id)?.unwrap().worktree.is_none());
+                assert!(!worktree.path.exists());
+            }
+        }
         Ok(())
     }
 
