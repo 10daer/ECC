@@ -131,8 +131,8 @@ import re
 
 def tokenize_bangla(text: str) -> list[str]:
     """Basic Bengali tokenizer — split on whitespace and punctuation."""
-    # Remove Bengali and ASCII punctuation
-    text = re.sub(r'[।,;:!?.\-\'"()\[\]{}]', ' ', text)
+    # Remove Bengali and ASCII punctuation, but preserve decimal points
+    text = re.sub(r'(?<!\d)\.|\.(?!\d)|[।,;:!?\-\'"()\[\]{}]', ' ', text)
     return [token for token in text.split() if token]
 
 # For production, use a trained tokenizer:

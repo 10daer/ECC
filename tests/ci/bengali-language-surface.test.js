@@ -143,6 +143,32 @@ function run() {
     });
   });
 
+  test('Bengali tokenizer preserves decimal quantities', () => {
+    const skill = read('skills/bengali-nlp/SKILL.md');
+    const tokenizer = extractFencedBlocks(skill)
+      .filter(block => block.language === 'python')
+      .find(block => block.code.includes('def tokenize_bangla'));
+    assert.ok(tokenizer, 'Expected the Bengali tokenizer example');
+
+    const python = findPython();
+    if (!python) {
+      throw new SkipError('no Python 3 interpreter on PATH');
+    }
+
+    const check = [
+      tokenizer.code,
+      "assert tokenize_bangla('ওজন ৩.৫ কেজি। মূল্য 12.75 টাকা.') == ['ওজন', '৩.৫', 'কেজি', 'মূল্য', '12.75', 'টাকা']",
+    ].join('\n');
+    const result = spawnSync(python.command, [...python.prefix, '-c', check], {
+      encoding: 'utf8',
+    });
+    assert.strictEqual(
+      result.status,
+      0,
+      `Bengali tokenizer changed decimal quantities:\n${result.stderr || result.stdout}`,
+    );
+  });
+
   test('Bengali skill is exported and installable', () => {
     const agentYaml = read('agent.yaml');
     const modules = readJson('manifests/install-modules.json').modules;
