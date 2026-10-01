@@ -12,33 +12,42 @@ use super::dashboard::Dashboard;
 use crate::config::Config;
 use crate::session::store::StateStore;
 
-struct TerminalRestore {
-    active: bool,
+struct TerminalRestore;
+
+fn restore_terminal() -> Result<()> {
+    // Attempt and report both operations even if one fails.
+    let raw_result = disable_raw_mode();
+    let screen_result = execute!(io::stdout(), LeaveAlternateScreen);
+    if let Err(error) = &raw_result {
+        tracing::warn!("Failed to disable terminal raw mode: {error}");
+    }
+    if let Err(error) = &screen_result {
+        tracing::warn!("Failed to leave terminal alternate screen: {error}");
+    }
+    raw_result?;
+    screen_result?;
+    Ok(())
 }
 
 impl TerminalRestore {
-    fn restore(&mut self) -> Result<()> {
-        // Attempt both operations even if one fails.
-        let raw_result = disable_raw_mode();
-        let screen_result = execute!(io::stdout(), LeaveAlternateScreen);
-        self.active = raw_result.is_err() || screen_result.is_err();
-        raw_result?;
-        screen_result?;
+    fn restore(self) -> Result<()> {
+        restore_terminal()?;
+        // Successful restoration consumes the guard without repeating cleanup.
+        std::mem::forget(self);
         Ok(())
     }
 }
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
-        if self.active {
-            let _ = self.restore();
-        }
+        // Failures are reported by restore_terminal; preserve the original error.
+        let _ = restore_terminal();
     }
 }
 
 pub async fn run(db: StateStore, cfg: Config) -> Result<()> {
     enable_raw_mode()?;
-    let mut restore = TerminalRestore { active: true };
+    let restore = TerminalRestore;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
 
