@@ -49,6 +49,47 @@ const GITHUB_STDIO = {
   type: 'stdio'
 };
 
+test('stdio signatures preserve argument and command boundaries', () => {
+  for (const [left, right] of [
+    [{ command: 'node', args: ['alpha beta'] }, { command: 'node', args: ['alpha', 'beta'] }],
+    [{ command: 'node', args: [''] }, { command: 'node', args: [] }],
+    [{ command: 'node script', args: [] }, { command: 'node', args: ['script'] }],
+  ]) {
+    assert.notStrictEqual(buildSignature({ transport: 'stdio', ...left }), buildSignature({ transport: 'stdio', ...right }));
+  }
+});
+
+test('real configuration readers and inventory CLI report argument-boundary drift', () => {
+  const home = tmpHome();
+  const opencodeRoot = path.join(home, '.config', 'opencode');
+  try {
+    fs.mkdirSync(opencodeRoot, { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({
+      mcpServers: { demo: { command: 'node', args: ['alpha beta'] } },
+    }));
+    fs.writeFileSync(path.join(opencodeRoot, 'opencode.json'), JSON.stringify({
+      mcp: { demo: { type: 'local', command: ['node', 'alpha', 'beta'] } },
+    }));
+    const env = { ...process.env, HOME: home, USERPROFILE: home, OPENCODE_CONFIG_DIR: opencodeRoot };
+    for (const args of [['--json'], ['--fragmented']]) {
+      const result = spawnSync(process.execPath, [path.join(__dirname, '../../scripts/mcp-inventory.js'), ...args], {
+        env, cwd: home, encoding: 'utf8', timeout: 10000,
+      });
+      assert.strictEqual(result.status, 0, result.stderr);
+      if (args[0] === '--json') {
+        const inventory = JSON.parse(result.stdout);
+        assert.strictEqual(inventory.servers.length, 1);
+        assert.strictEqual(inventory.servers[0].consistent, false);
+        assert.strictEqual(inventory.aggregates.inconsistentServerCount, 1);
+      } else {
+        assert.match(result.stdout, /demo.*DRIFT/);
+      }
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('normalizeTransport maps harness-specific labels to stdio/http/sse', () => {
   assert.strictEqual(normalizeTransport('stdio'), 'stdio');
   assert.strictEqual(normalizeTransport('local'), 'stdio');
