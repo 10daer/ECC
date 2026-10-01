@@ -205,6 +205,8 @@ function canvasClientJs() {
   let lastScroll = { x: 0, y: 0 };
   let ended = boot.status === 'ended';
   let sending = false;
+  let inputRevision = 0;
+  input.addEventListener('input', () => { inputRevision++; });
 
   try { queue = JSON.parse(sessionStorage.getItem(QKEY) || '[]'); } catch { queue = []; }
 
@@ -366,8 +368,11 @@ function canvasClientJs() {
   async function send(extraItems) {
     if (ended || sending) return;
     const items = queue.slice();
+    const submittedQueue = new Set(items);
     if (extraItems) items.push(...extraItems);
-    const text = input.value.trim();
+    const submittedInput = input.value;
+    const submittedRevision = inputRevision;
+    const text = submittedInput.trim();
     if (text) items.push({ kind: 'chat', text });
     if (!items.length) {
       statusEl.textContent = 'Nothing to send yet - annotate the plan or type a message.';
@@ -384,10 +389,11 @@ function canvasClientJs() {
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const body = await res.json().catch(() => ({}));
-      queue = [];
+      // A response acknowledges this batch, not drafts added while it waited.
+      queue = queue.filter(item => !submittedQueue.has(item));
       persistQueue();
       renderQueue();
-      input.value = '';
+      if (inputRevision === submittedRevision && input.value === submittedInput) input.value = '';
       // Say what actually happened: a parked agent takes the batch on the
       // spot, otherwise it sits in the queue until the agent checks in.
       statusEl.textContent = body.presence === 'thinking' || body.presence === 'typing'
