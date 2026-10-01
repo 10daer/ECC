@@ -5,7 +5,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const { createGitRunner } = require('../../scripts/lib/worktree-lifecycle/git');
 const {
   STATES,
@@ -229,6 +229,50 @@ test('empty-queue branches: no conflicts / no stale render friendly messages', (
   assert.ok(formatReport(report, { staleOnly: true }).includes('No stale worktrees'));
 });
 
+
+test('git status failures cannot become clean worktree facts', () => {
+  const runner = createGitRunner('/repo', () => ({ status: 128, stdout: '', stderr: 'status unavailable' }));
+  assert.throws(() => runner.isDirty('/repo/.wt/merged'), /Unable to determine worktree status.*status unavailable/);
+});
+
+test('real git: an unavailable registered worktree cannot produce a cleanup plan', () => {
+  const availability = spawnSync('git', ['--version'], { encoding: 'utf8' });
+  if (availability.error && availability.error.code === 'ENOENT') {
+    console.log('  (skipped unavailable-worktree fixture: git unavailable)');
+    return;
+  }
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-wl-unavailable-'));
+  const repo = path.join(root, 'repo');
+  const worktree = path.join(root, 'worktree');
+  const cleanEnv = { ...process.env };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_PREFIX']) delete cleanEnv[key];
+  const git = args => execFileSync('git', ['-C', repo, ...args], {
+    env: cleanEnv, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    fs.mkdirSync(repo);
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'user.email', 't@e.st']);
+    git(['config', 'user.name', 'Test']);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'init']);
+    git(['worktree', 'add', '-q', '-b', 'merged', worktree]);
+    fs.renameSync(worktree, path.join(root, 'retained-worktree'));
+    const runner = createGitRunner(repo);
+    assert.ok(runner.listWorktrees().some(w => w.branch === 'merged'));
+    assert.throws(() => buildLifecycleReport(repo, { baseBranch: 'main' }), /Unable to determine worktree status/);
+    const cli = spawnSync(process.execPath, [
+      path.join(__dirname, '../../scripts/worktree-lifecycle.js'), '--repo', repo, '--cleanup-plan',
+    ], { env: cleanEnv, encoding: 'utf8', timeout: 10000 });
+    assert.strictEqual(cli.status, 1, cli.stderr);
+    assert.match(cli.stderr, /Unable to determine worktree status/);
+    assert.strictEqual(cli.stdout, '');
+    assert.ok(fs.existsSync(path.join(root, 'retained-worktree', 'a.txt')));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('real git: createGitRunner drives an actual repo (covers default spawn path)', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-wl-realgit-'));

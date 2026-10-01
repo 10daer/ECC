@@ -98,7 +98,11 @@ function createGitRunner(repoRoot, runImpl = defaultRunImpl) {
     // Uncommitted changes in a worktree (status --porcelain over its own path).
     isDirty(worktreePath) {
       const result = runImpl(['status', '--porcelain'], { cwd: worktreePath });
-      return result.status === 0 ? (result.stdout || '').trim().length > 0 : false;
+      if (result.status !== 0) {
+        const reason = (result.stderr || '').trim() || `git status exited with status ${result.status}`;
+        throw new Error(`Unable to determine worktree status at ${worktreePath}: ${reason}`);
+      }
+      return (result.stdout || '').trim().length > 0;
     },
 
     // Commits a branch is ahead of / behind its base. Returns null if either
