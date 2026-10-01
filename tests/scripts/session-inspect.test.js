@@ -10,6 +10,8 @@ const { execFileSync } = require('child_process');
 
 const { getFallbackSessionRecordingPath } = require('../../scripts/lib/session-adapters/canonical-session');
 
+const { parseArgs } = require('../../scripts/session-inspect');
+
 const SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'session-inspect.js');
 
 function run(args = [], options = {}) {
@@ -63,6 +65,37 @@ function runTests() {
 
   let passed = 0;
   let failed = 0;
+
+  if (test('option values are not mistaken for positional targets', () => {
+    const cases = [
+      ['--adapter', 'claude-history'],
+      ['--target-type', 'claude-history'],
+      ['--skill', 'api-design'],
+      ['--amendment-id', 'amend-1'],
+      ['--observations', 'observations.jsonl'],
+      ['--write', 'snapshot.json']
+    ];
+    for (const option of cases) {
+      assert.strictEqual(parseArgs(['node', SCRIPT, ...option, 'skills:health']).target, 'skills:health');
+      assert.strictEqual(parseArgs(['node', SCRIPT, 'skills:health', ...option]).target, 'skills:health');
+      assert.strictEqual(parseArgs(['node', SCRIPT, ...option]).target, null);
+    }
+  })) passed++; else failed++;
+
+  if (test('rejects missing option values, unknown flags and extra targets', () => {
+    for (const flag of ['--adapter', '--target-type', '--skill', '--amendment-id', '--observations', '--write']) {
+      assert.throws(() => parseArgs(['node', SCRIPT, 'skills:health', flag]), /Missing value/);
+      assert.throws(() => parseArgs(['node', SCRIPT, flag, '--list-adapters']), /Missing value/);
+    }
+    assert.throws(() => parseArgs(['node', SCRIPT, 'skills:health', '--unknown']), /Unknown argument/);
+    assert.throws(() => parseArgs(['node', SCRIPT, 'skills:health', 'claude:latest']), /Only one target/);
+  })) passed++; else failed++;
+
+  if (test('skill-health CLI accepts options before its target', () => {
+    const result = run(['--skill', 'api-design', 'skills:health']);
+    assert.strictEqual(result.code, 0, result.stderr);
+    assert.strictEqual(JSON.parse(result.stdout).schemaVersion, 'ecc.skill-health.v1');
+  })) passed++; else failed++;
 
   if (test('shows usage when no target is provided', () => {
     const result = run();
