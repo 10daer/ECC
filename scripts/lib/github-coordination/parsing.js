@@ -13,18 +13,28 @@ function normalizeBodyForComparison(body) {
 function extractCoordinationState(body, policy = DEFAULT_POLICY) {
   const marker = escapeRegExp(policy.sectionMarker || DEFAULT_SECTION_MARKER);
   const regex = new RegExp(`<!--\\s*${marker}:start\\s*-->\\s*` + '```json\\s*([\\s\\S]*?)\\s*```' + `\\s*<!--\\s*${marker}:end\\s*-->`, 'm');
-  const match = String(body || '').match(regex);
+  const source = String(body || '');
+  const boundaries = source.match(new RegExp(`<!--\\s*${marker}:(?:start|end)\\s*-->`, 'g')) || [];
+  const match = source.match(regex);
 
-  if (!match) {
+  if (boundaries.length === 0) {
     return null;
   }
-
-  try {
-    const parsed = JSON.parse(match[1]);
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch (error) {
-    throw new SyntaxError(`Malformed coordination JSON in body: ${error.message} — raw: ${match[1].slice(0, 120)}`);
+  if (boundaries.length !== 2 || !match) {
+    throw new SyntaxError('Malformed coordination section boundaries or JSON fence');
   }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    // Native JSON errors can quote source text; do not leak issue content.
+    throw new SyntaxError('Malformed coordination JSON in body');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new SyntaxError('Coordination JSON must be an object');
+  }
+  return parsed;
 }
 
 function extractIssueReferences(text) {
@@ -101,6 +111,8 @@ function renderCoordinationState(state, policy = DEFAULT_POLICY) {
 
 function mergeIssueBody(issue, nextState, policy = DEFAULT_POLICY) {
   const body = String(issue.body || '');
+  // Present but damaged metadata must not be replaced by inferred defaults.
+  extractCoordinationState(body, policy);
   const markerEscaped = escapeRegExp(policy.sectionMarker || DEFAULT_SECTION_MARKER);
   const rendered = renderCoordinationState(nextState, policy);
   const regex = new RegExp(`\\n?<!--\\s*${markerEscaped}:start\\s*-->[\\s\\S]*?<!--\\s*${markerEscaped}:end\\s*-->\\n?`, 'm');
