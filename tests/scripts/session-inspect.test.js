@@ -293,6 +293,28 @@ function runTests() {
     }
   })) passed++; else failed++;
 
+  if (test('skill health ignores malformed records and keeps valid failures', () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-skill-health-invalid-'));
+    const logPath = path.join(projectRoot, 'observations.jsonl');
+    const valid = {
+      schemaVersion: 'ecc.skill-observation.v1',
+      task: 'Review API', skill: { id: 'api-design' },
+      outcome: { success: false, error: 'Missing check' }
+    };
+    const content = [JSON.stringify(valid), JSON.stringify({ schemaVersion: valid.schemaVersion })].join('\n');
+    fs.writeFileSync(logPath, content);
+    try {
+      const result = run(['skills:health', '--observations', logPath], { cwd: projectRoot });
+      assert.strictEqual(result.code, 0, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.strictEqual(report.totalObservations, 1);
+      assert.strictEqual(report.skills[0].failures, 1);
+      assert.strictEqual(fs.readFileSync(logPath, 'utf8'), content);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  })) passed++; else failed++;
+
   console.log(`\nResults: Passed: ${passed}, Failed: ${failed}`);
   process.exit(failed > 0 ? 1 : 0);
 }

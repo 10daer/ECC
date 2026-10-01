@@ -182,5 +182,34 @@ test('evaluation scaffold compares amended and baseline performance', () => {
   assert.strictEqual(evaluation.recommendation, 'promote-amendment');
 });
 
+test('observation reader skips malformed shapes without changing the source log', () => {
+  const projectRoot = makeProjectRoot('ecc-skill-invalid-');
+  try {
+    const valid = createSkillObservation({ task: 'Review API', skill: { id: 'api-design' }, success: false });
+    const invalid = [
+      { schemaVersion: valid.schemaVersion },
+      { ...valid, skill: null },
+      { ...valid, skill: { id: 42 } },
+      { ...valid, outcome: null },
+      { ...valid, outcome: { ...valid.outcome, success: 'false' } },
+      { ...valid, outcome: { ...valid.outcome, error: {} } },
+      { ...valid, task: {} },
+      { ...valid, run: { variant: 42 } }
+    ];
+    const content = [valid, ...invalid].map(JSON.stringify).join('\n') + '\n{broken\n';
+    const logPath = getSkillObservationsPath({ projectRoot });
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, content);
+    const records = readSkillObservations({ projectRoot });
+    assert.deepStrictEqual(records, [valid]);
+    const report = buildSkillHealthReport(records);
+    assert.strictEqual(report.totalObservations, 1);
+    assert.strictEqual(report.skills[0].failures, 1);
+    assert.strictEqual(fs.readFileSync(logPath, 'utf8'), content);
+  } finally {
+    cleanup(projectRoot);
+  }
+});
+
 console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
 if (failed > 0) process.exit(1);

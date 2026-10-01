@@ -78,6 +78,32 @@ function appendSkillObservation(observation, options = {}) {
   return outputPath;
 }
 
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isOptionalString(value) {
+  return value === null || value === undefined || typeof value === 'string';
+}
+
+// Validate fields consumed by health, amendment and evaluation reports while
+// leaving optional metadata and extension fields intact.
+function isReadableSkillObservation(record) {
+  return isObject(record)
+    && record.schemaVersion === OBSERVATION_SCHEMA_VERSION
+    && typeof record.task === 'string' && record.task.trim().length > 0
+    && isObject(record.skill)
+    && typeof record.skill.id === 'string' && record.skill.id.trim().length > 0
+    && isOptionalString(record.skill.path)
+    && isObject(record.outcome)
+    && typeof record.outcome.success === 'boolean'
+    && isOptionalString(record.outcome.error)
+    && isOptionalString(record.outcome.feedback)
+    && (record.run === null || record.run === undefined || (
+      isObject(record.run) && isOptionalString(record.run.variant)
+    ));
+}
+
 function readSkillObservations(options = {}) {
   const observationPath = path.resolve(options.observationsPath || getSkillObservationsPath(options));
   if (!fs.existsSync(observationPath)) {
@@ -94,7 +120,7 @@ function readSkillObservations(options = {}) {
         return null;
       }
     })
-    .filter(record => record && record.schemaVersion === OBSERVATION_SCHEMA_VERSION);
+    .filter(isReadableSkillObservation);
 }
 
 module.exports = {
