@@ -2043,14 +2043,18 @@ pub async fn prune_inactive_worktrees(
     let now = chrono::Utc::now();
 
     for session in sessions {
-        let Some(_) = session.worktree.as_ref() else {
+        let Some(worktree) = session.worktree.as_ref() else {
             continue;
         };
 
         if matches!(
             session.state,
-            SessionState::Pending | SessionState::Running | SessionState::Idle
-        ) {
+            SessionState::Pending
+                | SessionState::Running
+                | SessionState::Idle
+                | SessionState::Stale
+        ) || session.pid.is_some()
+        {
             active_with_worktree_ids.push(session.id);
             continue;
         }
@@ -2060,6 +2064,21 @@ pub async fn prune_inactive_worktrees(
         {
             retained_session_ids.push(session.id);
             continue;
+        }
+
+        // Automatic pruning must not discard unsaved work or interpret an unknown
+        // Git state as clean. Explicit cleanup remains a separate user action.
+        match crate::worktree::has_uncommitted_changes(worktree) {
+            Ok(false) => {}
+            Ok(true) => {
+                retained_session_ids.push(session.id);
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!("Retaining worktree for session {}: {error}", session.id);
+                retained_session_ids.push(session.id);
+                continue;
+            }
         }
 
         cleanup_session_worktree(db, &session.id).await?;
@@ -3064,7 +3083,9 @@ fn configure_background_runner_command(command: &mut Command) {
     {
         use std::os::windows::process::CommandExt;
 
-        command.as_std_mut().creation_flags(detached_creation_flags());
+        command
+            .as_std_mut()
+            .creation_flags(detached_creation_flags());
     }
 }
 
@@ -5154,8 +5175,7 @@ mod tests {
 
     #[test]
     fn background_runner_stderr_log_path_is_session_scoped() {
-        let path =
-            background_runner_stderr_log_path(Path::new("/tmp/ecc-repo"), "session-123");
+        let path = background_runner_stderr_log_path(Path::new("/tmp/ecc-repo"), "session-123");
         assert_eq!(
             path,
             PathBuf::from("/tmp/ecc-repo/.claude/ecc2/logs/session-123.runner-stderr.log")
@@ -6084,6 +6104,82 @@ mod tests {
         );
         assert!(!worktree_path.exists(), "worktree path should be removed");
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prune_inactive_worktrees_preserves_dirty_active_and_unknown_work() -> Result<()> {
+        let tempdir = TestDir::new("manager-prune-safety")?;
+        let repo_root = tempdir.path().join("repo");
+        init_git_repo(&repo_root)?;
+        let cfg = build_config(tempdir.path());
+        let db = StateStore::open(&cfg.db_path)?;
+        let now = Utc::now();
+        for (id, state, pid) in [
+            ("dirty", SessionState::Stopped, None),
+            ("stale", SessionState::Stale, None),
+            ("tracked", SessionState::Failed, Some(31337)),
+            ("unknown", SessionState::Stopped, None),
+            ("clean", SessionState::Stopped, None),
+        ] {
+            let worktree = crate::worktree::create_for_session_in_repo(id, &cfg, &repo_root)?;
+            if id == "dirty" {
+                fs::write(worktree.path.join("uncommitted.txt"), "unsaved work\n")?;
+                fs::write(
+                    worktree.path.join("README.md"),
+                    "uncommitted tracked edit\n",
+                )?;
+            }
+            if id == "unknown" {
+                fs::remove_file(worktree.path.join(".git"))?;
+            }
+            db.insert_session(&Session {
+                id: id.to_string(),
+                task: "prune fixture".to_string(),
+                project: "fixture".to_string(),
+                task_group: "fixture".to_string(),
+                agent_type: "claude".to_string(),
+                working_dir: worktree.path.clone(),
+                state,
+                pid,
+                worktree: Some(worktree),
+                created_at: now,
+                updated_at: now,
+                last_heartbeat_at: now,
+                metrics: SessionMetrics::default(),
+            })?;
+        }
+        let outcome = prune_inactive_worktrees(&db, &cfg).await?;
+        assert_eq!(outcome.cleaned_session_ids, vec!["clean"]);
+        for id in ["dirty", "stale", "tracked", "unknown"] {
+            let session = db.get_session(id)?.context("retained session")?;
+            let worktree = session.worktree.context("retained worktree metadata")?;
+            assert!(worktree.path.is_dir(), "{id} worktree must remain");
+            if id == "tracked" {
+                assert_eq!(session.pid, Some(31337));
+                assert_eq!(session.state, SessionState::Failed);
+            }
+            if id == "dirty" {
+                assert_eq!(
+                    fs::read_to_string(worktree.path.join("uncommitted.txt"))?,
+                    "unsaved work\n"
+                );
+                assert_eq!(
+                    fs::read_to_string(worktree.path.join("README.md"))?,
+                    "uncommitted tracked edit\n"
+                );
+            }
+        }
+        assert!(outcome.retained_session_ids.contains(&"dirty".to_string()));
+        assert!(outcome
+            .retained_session_ids
+            .contains(&"unknown".to_string()));
+        assert!(outcome
+            .active_with_worktree_ids
+            .contains(&"stale".to_string()));
+        assert!(outcome
+            .active_with_worktree_ids
+            .contains(&"tracked".to_string()));
         Ok(())
     }
 

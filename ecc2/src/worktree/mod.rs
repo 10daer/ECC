@@ -1449,11 +1449,10 @@ fn git_status_short(worktree_path: &Path) -> Result<Vec<String>> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(
-            "Worktree status preview warning for {}: {stderr}",
+        anyhow::bail!(
+            "Git status failed for {}: {stderr}",
             worktree_path.display()
         );
-        return Ok(Vec::new());
     }
 
     Ok(parse_nonempty_lines(&output.stdout))
